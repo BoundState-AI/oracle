@@ -102,6 +102,7 @@ class SessionLogHandler(logging.Handler):
 
 SESSIONS_DIR = Path(os.environ.get("ORACLE_SESSIONS_DIR", "oracle_sessions"))
 SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+SESSION_STATE_FILE = "session_state.json"
 
 
 def _max_rounds_for_mode(mode: str) -> int:
@@ -153,6 +154,86 @@ def extract_text(file_path: Path) -> str:
 
     else:
         raise ValueError(f"Unsupported file type: {suffix}")
+
+
+def _session_dir(session_id: str) -> Path:
+    return SESSIONS_DIR / session_id
+
+
+def _session_state_path(session_id: str) -> Path:
+    return _session_dir(session_id) / SESSION_STATE_FILE
+
+
+def _session_manifest(session: dict[str, Any]) -> dict[str, Any]:
+    """Return the JSON-serializable subset of a session."""
+    return {
+        "session_id": session["session_id"],
+        "mode": session.get("mode", "review"),
+        "status": session.get("status", "processing"),
+        "error": session.get("error"),
+        "critique": session.get("critique"),
+        "original_name": session.get("original_name"),
+        "file_path": session.get("file_path"),
+        "output_dir": session.get("output_dir"),
+    }
+
+
+def _persist_session_state(session: dict[str, Any]) -> None:
+    """Persist session metadata so a restarted process can recover state."""
+    session_id = session["session_id"]
+    state_path = _session_state_path(session_id)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(
+        json.dumps(_session_manifest(session), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
+def _load_session_from_disk(session_id: str) -> dict[str, Any] | None:
+    """Recover session metadata from disk when in-memory state was lost."""
+    state_path = _session_state_path(session_id)
+    if not state_path.exists():
+        return None
+
+    try:
+        session = json.loads(state_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        LOGGER.warning("Failed to decode persisted state for session %s", session_id)
+        return None
+
+    session["session_id"] = session_id
+
+    if session.get("status") == "processing":
+        session["status"] = "error"
+        session["error"] = (
+            "Oracle session was interrupted by a server restart or redeploy. "
+            "Please start the review again."
+        )
+        _persist_session_state(session)
+        return session
+
+    output_dir = session.get("output_dir")
+    if output_dir and session.get("status") in ("complete", "ready_to_generate"):
+        try:
+            session["review_result"] = build_review_result(Path(output_dir))
+        except Exception:
+            LOGGER.exception("Failed to rebuild review result for session %s", session_id)
+
+    return session
+
+
+def _get_session(session_id: str) -> dict[str, Any] | None:
+    """Return a live or recovered session."""
+    session = _sessions.get(session_id)
+    if session:
+        return session
+
+    recovered = _load_session_from_disk(session_id)
+    if recovered:
+        _sessions[session_id] = recovered
+        return recovered
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +304,7 @@ def _run_review_background(
             "status": "complete" if mode in ("polish", "rewrite") else "ready_to_generate",
             "error": None,
         }
+        _persist_session_state(_sessions[session_id])
 
         msg_queue.put("All oracles have reported — finalizing...")
 
@@ -232,9 +314,12 @@ def _run_review_background(
             "session_id": session_id,
             "mode": mode,
             "original_name": file_path.name,
+            "file_path": str(file_path),
+            "output_dir": str(output_dir),
             "status": "error",
             "error": str(e),
         }
+        _persist_session_state(_sessions[session_id])
         msg_queue.put(f"ERROR: {e}")
 
     finally:
@@ -290,10 +375,14 @@ async def analyze(
     _sessions[session_id] = {
         "session_id": session_id,
         "mode": mode,
+        "original_name": original_name,
+        "file_path": str(file_path),
+        "output_dir": str(output_dir),
         "status": "processing",
         "msg_queue": msg_queue,
         "error": None,
     }
+    _persist_session_state(_sessions[session_id])
 
     thread = threading.Thread(
         target=_run_review_background,
@@ -316,7 +405,7 @@ async def stream(request: Request, session_id: str):
     """
     await verify_api_key(request)
 
-    session = _sessions.get(session_id)
+    session = _get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -378,7 +467,7 @@ async def session_status(request: Request, session_id: str):
     """Return the latest session status/result payload for polling fallbacks."""
     await verify_api_key(request)
 
-    session = _sessions.get(session_id)
+    session = _get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -465,7 +554,7 @@ async def generate(request: Request, body: GenerateRequest):
     """Generate polished output documents from a reviewed session."""
     await verify_api_key(request)
 
-    session = _sessions.get(body.session_id)
+    session = _get_session(body.session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -483,7 +572,7 @@ async def download(request: Request, session_id: str, fmt: str):
     """Download a generated document."""
     await verify_api_key(request)
 
-    session = _sessions.get(session_id)
+    session = _get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 

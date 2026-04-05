@@ -104,6 +104,14 @@ function startStatusPolling(
     if (!active) return;
     try {
       const res = await apiGet(`/session/${sessionId}`);
+      if (res.status === 404) {
+        onDone({
+          status: "error",
+          error:
+            "Oracle session was interrupted by a server restart or redeploy. Please start the review again.",
+        });
+        return;
+      }
       if (!res.ok) {
         throw new Error(`Polling failed (${res.status})`);
       }
