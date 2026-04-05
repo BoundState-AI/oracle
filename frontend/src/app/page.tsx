@@ -80,7 +80,7 @@ export default function OracleLandingPage() {
             </div>
 
             <div className="space-y-4">
-              <h1 className="max-w-3xl text-5xl font-semibold tracking-tight text-balance text-foreground md:text-6xl">
+              <h1 className="max-w-3xl text-2xl font-semibold tracking-tight text-balance text-foreground md:text-3xl">
                 Review dense drafts with the kind of operator experience they
                 actually deserve.
               </h1>
