@@ -281,6 +281,11 @@ Output JSON:
 # ---------------------------------------------------------------------------
 
 PROVIDER_TIMEOUT = int(os.environ.get("ORACLE_TIMEOUT_SECONDS", "600"))
+OPENAI_REVIEWER_MAX_TOKENS = int(
+    os.environ.get("ORACLE_OPENAI_REVIEWER_MAX_TOKENS", "24576")
+)
+OPENAI_REASONING_EFFORT = os.environ.get("ORACLE_OPENAI_REASONING_EFFORT", "high")
+OPENAI_VERBOSITY = os.environ.get("ORACLE_OPENAI_VERBOSITY", "low")
 
 # Required fields per oracle role — field name -> expected type
 REQUIRED_SCHEMA: dict[str, dict[str, type]] = {
@@ -327,6 +332,9 @@ ORACLE_ROSTER: dict[str, OracleConfig] = {
         provider="openai",
         model=os.environ.get("ORACLE_FRAN_MODEL", "gpt-5.4"),
         system_prompt=FRAN_ADVERSARIAL_PROMPT,
+        max_tokens=int(
+            os.environ.get("ORACLE_FRAN_MAX_TOKENS", str(OPENAI_REVIEWER_MAX_TOKENS))
+        ),
     ),
     "codex": OracleConfig(
         name="Codex",
@@ -334,6 +342,9 @@ ORACLE_ROSTER: dict[str, OracleConfig] = {
         provider="openai",
         model=os.environ.get("ORACLE_CODEX_MODEL", "gpt-5.4"),
         system_prompt=CODEX_FEASIBILITY_PROMPT,
+        max_tokens=int(
+            os.environ.get("ORACLE_CODEX_MAX_TOKENS", str(OPENAI_REVIEWER_MAX_TOKENS))
+        ),
     ),
     "grok": OracleConfig(
         name="Grok",
@@ -383,6 +394,78 @@ def _call_anthropic(config: OracleConfig, user_message: str) -> dict:
     return _parse_json(text, config.name)
 
 
+def _openai_reviewer_response_format(config: OracleConfig) -> dict[str, Any]:
+    """Return a strict structured-output contract for OpenAI reviewers."""
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": f"oracle_{config.role}_review",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "oracle_name": {"type": "string"},
+                    "role": {"type": "string"},
+                    "document_type": {"type": "string"},
+                    "overall_verdict": {
+                        "type": "string",
+                        "enum": [
+                            "approve_with_minor_changes",
+                            "revise",
+                            "major_revision",
+                        ],
+                    },
+                    "findings": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "title": {"type": "string"},
+                                "severity": {
+                                    "type": "string",
+                                    "enum": ["critical", "high", "medium", "low"],
+                                },
+                                "category": {"type": "string"},
+                                "location": {"type": "string"},
+                                "evidence": {"type": "string"},
+                                "problem": {"type": "string"},
+                                "why_it_matters": {"type": "string"},
+                                "proposed_fix": {"type": "string"},
+                                "confidence": {"type": "number"},
+                            },
+                            "required": [
+                                "title",
+                                "severity",
+                                "category",
+                                "location",
+                                "evidence",
+                                "problem",
+                                "why_it_matters",
+                                "proposed_fix",
+                                "confidence",
+                            ],
+                        },
+                    },
+                    "top_3_must_fix": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                },
+                "required": [
+                    "oracle_name",
+                    "role",
+                    "document_type",
+                    "overall_verdict",
+                    "findings",
+                    "top_3_must_fix",
+                ],
+            },
+        },
+    }
+
+
 def _call_openai(config: OracleConfig, user_message: str) -> dict:
     """Call OpenAI Chat Completions API (Fran / Codex)."""
     import httpx
@@ -401,12 +484,42 @@ def _call_openai(config: OracleConfig, user_message: str) -> dict:
     }
     if config.model.startswith(("gpt-5", "o3", "o4")):
         kwargs["max_completion_tokens"] = config.max_tokens
-        kwargs["reasoning_effort"] = "high"
+        kwargs["reasoning_effort"] = OPENAI_REASONING_EFFORT
+        kwargs["verbosity"] = OPENAI_VERBOSITY
+        kwargs["response_format"] = _openai_reviewer_response_format(config)
     else:
         kwargs["temperature"] = config.temperature
         kwargs["max_tokens"] = config.max_tokens
     response = client.chat.completions.create(**kwargs)
-    text = response.choices[0].message.content or ""
+    choice = response.choices[0]
+    message = choice.message
+    text = (message.content or "").strip()
+
+    if choice.finish_reason == "length":
+        LOGGER.warning(
+            f"[{config.name}] OpenAI hit max completion budget "
+            f"(max_completion_tokens={config.max_tokens})"
+        )
+
+    if message.refusal:
+        LOGGER.error(f"[{config.name}] OpenAI refusal: {message.refusal[:400]}")
+        return {
+            "oracle_name": config.name,
+            "error": "Model refusal",
+            "raw": message.refusal[:2000],
+        }
+
+    if not text:
+        LOGGER.error(
+            f"[{config.name}] Empty OpenAI response "
+            f"(finish_reason={choice.finish_reason})"
+        )
+        return {
+            "oracle_name": config.name,
+            "error": f"Empty response (finish_reason={choice.finish_reason})",
+            "raw": "",
+        }
+
     return _parse_json(text, config.name)
 
 
@@ -543,6 +656,7 @@ def _validate_schema(result: dict, config: OracleConfig) -> str | None:
 def _parse_json(text: str, oracle_name: str) -> dict:
     """Extract the first balanced JSON object from LLM response."""
     text = text.strip()
+    preview = " ".join(text.split())[:240]
 
     # Strip markdown fences
     if text.startswith("```"):
@@ -556,7 +670,9 @@ def _parse_json(text: str, oracle_name: str) -> dict:
     # Find the first '{' and extract the balanced JSON object
     start = text.find("{")
     if start == -1:
-        LOGGER.error(f"[{oracle_name}] No JSON object found in response")
+        LOGGER.error(
+            f"[{oracle_name}] No JSON object found in response. Preview: {preview!r}"
+        )
         return {"oracle_name": oracle_name, "error": "No JSON found", "raw": text[:2000]}
 
     depth = 0
@@ -593,7 +709,10 @@ def _parse_json(text: str, oracle_name: str) -> dict:
     try:
         return json.loads(candidate)
     except json.JSONDecodeError as e:
-        LOGGER.warning(f"[{oracle_name}] JSON parse error: {e} — attempting recovery")
+        LOGGER.warning(
+            f"[{oracle_name}] JSON parse error: {e} — attempting recovery. "
+            f"Preview: {preview!r}"
+        )
         return _recover_truncated_json(text, oracle_name)
 
 
