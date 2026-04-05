@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useCallback } from "react";
-import { UserButton } from "@clerk/nextjs";
 import { toast } from "sonner";
 import { BoundStateLogo } from "@/components/BoundStateLogo";
 import { DropZone } from "@/components/DropZone";
@@ -132,7 +131,7 @@ export default function OraclePage() {
               Oracle
             </span>
           </div>
-          <UserButton />
+          {/* TODO: Add Clerk UserButton when auth is configured */}
         </div>
       </header>
 
