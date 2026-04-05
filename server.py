@@ -104,6 +104,24 @@ SESSIONS_DIR = Path(os.environ.get("ORACLE_SESSIONS_DIR", "oracle_sessions"))
 SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _max_rounds_for_mode(mode: str) -> int:
+    """Return the configured review budget for a given UI mode."""
+    defaults = {
+        "polish": 1,
+        "review": 1,
+        "rewrite": 1,
+    }
+    env_name = f"ORACLE_MAX_ROUNDS_{mode.upper()}"
+    raw = os.environ.get(env_name)
+    if not raw:
+        return defaults[mode]
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        LOGGER.warning("Invalid %s=%r, falling back to %d", env_name, raw, defaults[mode])
+        return defaults[mode]
+
+
 def extract_text(file_path: Path) -> str:
     """Extract text content from .docx or .pptx files."""
     suffix = file_path.suffix.lower()
@@ -166,11 +184,13 @@ def _run_review_background(
 
         msg_queue.put(f"Document loaded — {len(draft_text):,} characters extracted")
         msg_queue.put(f"Mode: {mode} — starting Oracle review...")
+        max_rounds = _max_rounds_for_mode(mode)
+        msg_queue.put(f"Review budget: {max_rounds} round(s)")
 
         run_review(
             draft=draft_text,
             document_path=str(file_path),
-            max_rounds=1 if mode == "polish" else 3,
+            max_rounds=max_rounds,
             output_dir=output_dir,
         )
 
