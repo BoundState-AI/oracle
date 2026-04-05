@@ -50,6 +50,13 @@ async function apiGet(path: string): Promise<Response> {
   });
 }
 
+function normalizeDownloadUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  if (url.startsWith("/api/oracle/")) return url;
+  if (url.startsWith("/oracle/")) return `/api${url}`;
+  return url;
+}
+
 function connectSSE(
   sessionId: string,
   onLog: (msg: string) => void,
@@ -137,16 +144,16 @@ export default function OraclePage() {
     if (result.status === "complete") {
       setPhase({
         step: "download",
-        docxUrl: (result.docx_url as string) ?? null,
-        pptxUrl: (result.pptx_url as string) ?? null,
+        docxUrl: normalizeDownloadUrl((result.docx_url as string) ?? null),
+        pptxUrl: normalizeDownloadUrl((result.pptx_url as string) ?? null),
       });
     } else if (result.status === "ready_to_generate") {
       setPhase({
         step: "reviewed",
         sessionId: result.session_id as string,
         critique: (result.critique as string) ?? "",
-        docxUrl: (result.docx_url as string) ?? null,
-        pptxUrl: (result.pptx_url as string) ?? null,
+        docxUrl: normalizeDownloadUrl((result.docx_url as string) ?? null),
+        pptxUrl: normalizeDownloadUrl((result.pptx_url as string) ?? null),
       });
     } else if (result.status === "error") {
       toast.error((result.error as string) ?? "Oracle review failed. Try again.");
@@ -263,8 +270,8 @@ export default function OraclePage() {
         const data = await res.json();
         setPhase({
           step: "download",
-          docxUrl: data.docx_url ?? null,
-          pptxUrl: data.pptx_url ?? null,
+          docxUrl: normalizeDownloadUrl((data.docx_url as string) ?? null),
+          pptxUrl: normalizeDownloadUrl((data.pptx_url as string) ?? null),
         });
       } catch {
         toast.error("Network error — check your connection and try again.");
