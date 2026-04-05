@@ -1,394 +1,169 @@
-"use client";
-
-import { useState, useCallback, useRef } from "react";
-import { toast } from "sonner";
+import Link from "next/link";
+import {
+  ArrowRight,
+  FileSearch,
+  ShieldCheck,
+  Sparkles,
+  Workflow,
+} from "lucide-react";
 import { BoundStateLogo } from "@/components/BoundStateLogo";
-import { DropZone } from "@/components/DropZone";
-import { ModeSelector, type ProcessingMode } from "@/components/ModeSelector";
-import { StatusSpinner } from "@/components/StatusSpinner";
-import { CritiquePanel } from "@/components/CritiquePanel";
-import { DownloadPanel } from "@/components/DownloadPanel";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
-import { Zap } from "lucide-react";
 
-type Phase =
-  | { step: "upload" }
-  | { step: "analyzing"; logMessages: string[] }
-  | {
-      step: "critique";
-      sessionId: string;
-      critique: string;
-    }
-  | {
-      step: "reviewed";
-      sessionId: string;
-      critique: string;
-      docxUrl: string | null;
-      pptxUrl: string | null;
-    }
-  | { step: "generating"; logMessages: string[] }
-  | {
-      step: "download";
-      docxUrl: string | null;
-      pptxUrl: string | null;
-    };
+const capabilities = [
+  {
+    title: "Structured review",
+    description:
+      "Turn dense drafts into an actionable issue ledger with concrete fixes and evidence.",
+    icon: FileSearch,
+  },
+  {
+    title: "Operational resilience",
+    description:
+      "Long-running review sessions survive disconnects, surface progress clearly, and fail more safely.",
+    icon: Workflow,
+  },
+  {
+    title: "Decision support",
+    description:
+      "Help teams pressure-test complex documents before they move into delivery or governance paths.",
+    icon: ShieldCheck,
+  },
+];
 
-async function apiPost(path: string, body: FormData | object): Promise<Response> {
-  const isFormData = body instanceof FormData;
-  return fetch(`/api/oracle${path}`, {
-    method: "POST",
-    headers: isFormData ? undefined : { "Content-Type": "application/json" },
-    body: isFormData ? body : JSON.stringify(body),
-  });
-}
+const steps = [
+  "Upload a proposal, spec, or working draft.",
+  "Run a guided review pass and inspect the critique.",
+  "Download polished artifacts directly from the workspace.",
+];
 
-async function apiGet(path: string): Promise<Response> {
-  return fetch(`/api/oracle${path}`, {
-    method: "GET",
-    cache: "no-store",
-  });
-}
-
-function normalizeDownloadUrl(url: string | null | undefined): string | null {
-  if (!url) return null;
-  if (url.startsWith("/api/oracle/")) return url;
-  if (url.startsWith("/oracle/")) return `/api${url}`;
-  return url;
-}
-
-function connectSSE(
-  sessionId: string,
-  onLog: (msg: string) => void,
-  onDone: (data: Record<string, unknown>) => void,
-  onError: (err: string, recoverable: boolean) => void,
-): () => void {
-  const url = `/api/oracle/stream/${sessionId}`;
-  const eventSource = new EventSource(url);
-
-  eventSource.addEventListener("log", (e) => {
-    onLog(e.data);
-  });
-
-  eventSource.addEventListener("done", (e) => {
-    try {
-      const data = JSON.parse(e.data);
-      onDone(data);
-    } catch {
-      onError("Failed to parse result", false);
-    }
-    eventSource.close();
-  });
-
-  eventSource.addEventListener("error", (e) => {
-    if (e instanceof MessageEvent) {
-      onError(e.data, false);
-    } else {
-      onError("Live connection dropped — checking Oracle status...", true);
-    }
-    eventSource.close();
-  });
-
-  return () => eventSource.close();
-}
-
-function startStatusPolling(
-  sessionId: string,
-  onDone: (data: Record<string, unknown>) => void,
-  onError: (err: string) => void,
-): () => void {
-  let active = true;
-  let timer: ReturnType<typeof setTimeout> | null = null;
-
-  const tick = async () => {
-    if (!active) return;
-    try {
-      const res = await apiGet(`/session/${sessionId}`);
-      if (!res.ok) {
-        throw new Error(`Polling failed (${res.status})`);
-      }
-      const data = (await res.json()) as Record<string, unknown>;
-      const status = data.status as string | undefined;
-      if (status === "processing") {
-        timer = setTimeout(tick, 5000);
-        return;
-      }
-      onDone(data);
-      return;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Polling failed";
-      if (!active) return;
-      onError(message);
-      timer = setTimeout(tick, 5000);
-    }
-  };
-
-  void tick();
-
-  return () => {
-    active = false;
-    if (timer) {
-      clearTimeout(timer);
-    }
-  };
-}
-
-export default function OraclePage() {
-  const [file, setFile] = useState<File | null>(null);
-  const [mode, setMode] = useState<ProcessingMode>("review");
-  const [phase, setPhase] = useState<Phase>({ step: "upload" });
-  const cleanupRef = useRef<(() => void) | null>(null);
-
-  const applyOracleResult = useCallback((result: Record<string, unknown>) => {
-    cleanupRef.current = null;
-    if (result.status === "complete") {
-      setPhase({
-        step: "download",
-        docxUrl: normalizeDownloadUrl((result.docx_url as string) ?? null),
-        pptxUrl: normalizeDownloadUrl((result.pptx_url as string) ?? null),
-      });
-    } else if (result.status === "ready_to_generate") {
-      setPhase({
-        step: "reviewed",
-        sessionId: result.session_id as string,
-        critique: (result.critique as string) ?? "",
-        docxUrl: normalizeDownloadUrl((result.docx_url as string) ?? null),
-        pptxUrl: normalizeDownloadUrl((result.pptx_url as string) ?? null),
-      });
-    } else if (result.status === "error") {
-      toast.error((result.error as string) ?? "Oracle review failed. Try again.");
-      setPhase({ step: "upload" });
-    }
-  }, []);
-
-  const reset = useCallback(() => {
-    if (cleanupRef.current) {
-      cleanupRef.current();
-      cleanupRef.current = null;
-    }
-    setFile(null);
-    setMode("review");
-    setPhase({ step: "upload" });
-  }, []);
-
-  const handleAnalyze = useCallback(async () => {
-    if (!file) return;
-
-    setPhase({ step: "analyzing", logMessages: ["Starting Oracle..."] });
-
-    const form = new FormData();
-    form.append("file", file);
-    form.append("mode", mode);
-
-    try {
-      const res = await apiPost("/analyze", form);
-      if (!res.ok) {
-        const msg =
-          res.status === 401
-            ? "Authentication error — contact admin"
-            : "Oracle encountered an error. Try again.";
-        toast.error(msg);
-        setPhase({ step: "upload" });
-        return;
-      }
-
-      const data = await res.json();
-      const sessionId = data.session_id;
-
-      // Connect to SSE stream for live updates
-      const cleanup = connectSSE(
-        sessionId,
-        // onLog — append message to the live feed
-        (msg) => {
-          setPhase((prev) => {
-            if (prev.step !== "analyzing") return prev;
-            const updated = [...prev.logMessages, msg];
-            // Keep last 20 messages to avoid unbounded growth
-            return {
-              ...prev,
-              logMessages: updated.slice(-20),
-            };
-          });
-        },
-        applyOracleResult,
-        (err, recoverable) => {
-          if (recoverable) {
-            setPhase((prev) => {
-              if (prev.step !== "analyzing") return prev;
-              return {
-                ...prev,
-                logMessages: [...prev.logMessages, err].slice(-20),
-              };
-            });
-
-            const pollCleanup = startStatusPolling(
-              sessionId,
-              applyOracleResult,
-              (pollErr) => {
-                setPhase((prev) => {
-                  if (prev.step !== "analyzing") return prev;
-                  return {
-                    ...prev,
-                    logMessages: [...prev.logMessages, `Polling: ${pollErr}`].slice(-20),
-                  };
-                });
-              },
-            );
-            cleanupRef.current = pollCleanup;
-            return;
-          }
-
-          cleanupRef.current = null;
-          toast.error(err);
-          setPhase({ step: "upload" });
-        },
-      );
-
-      cleanupRef.current = cleanup;
-    } catch {
-      toast.error("Network error — check your connection and try again.");
-      setPhase({ step: "upload" });
-    }
-  }, [applyOracleResult, file, mode]);
-
-  const handleGenerate = useCallback(
-    async (sessionId: string) => {
-      setPhase({ step: "generating", logMessages: ["Building your documents..."] });
-
-      try {
-        const res = await apiPost("/generate", {
-          session_id: sessionId,
-          approved: true,
-        });
-
-        if (!res.ok) {
-          toast.error("Oracle encountered an error. Try again.");
-          setPhase({ step: "upload" });
-          return;
-        }
-
-        const data = await res.json();
-        setPhase({
-          step: "download",
-          docxUrl: normalizeDownloadUrl((data.docx_url as string) ?? null),
-          pptxUrl: normalizeDownloadUrl((data.pptx_url as string) ?? null),
-        });
-      } catch {
-        toast.error("Network error — check your connection and try again.");
-        setPhase({ step: "upload" });
-      }
-    },
-    []
-  );
-
+export default function OracleLandingPage() {
   return (
-    <div className="flex min-h-screen flex-col bg-background">
-      {/* Header */}
-      <header className="sticky top-0 z-50 border-b border-border bg-card/80 backdrop-blur-sm">
-        <div className="mx-auto flex h-14 max-w-3xl items-center justify-between px-4">
+    <div className="min-h-screen bg-background text-foreground">
+      <div className="absolute inset-0 -z-10 overflow-hidden">
+        <div className="absolute left-[-10%] top-[-8rem] h-80 w-80 rounded-full bg-sky-500/12 blur-3xl" />
+        <div className="absolute right-[-8%] top-24 h-96 w-96 rounded-full bg-cyan-400/10 blur-3xl" />
+        <div className="absolute inset-x-0 top-0 h-72 bg-[radial-gradient(circle_at_top,rgba(96,165,250,0.18),transparent_55%)]" />
+      </div>
+
+      <header className="border-b border-border/80 bg-background/70 backdrop-blur-sm">
+        <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
           <div className="flex items-center gap-3">
             <BoundStateLogo variant="full" size="sm" />
             <div className="h-5 w-px bg-border" />
-            <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
+            <span className="text-[10px] font-semibold uppercase tracking-[0.3em] text-muted-foreground">
               Oracle
             </span>
           </div>
-          {/* TODO: Add Clerk UserButton when auth is configured */}
+          <div className="flex items-center gap-3">
+            <Link
+              href="/sign-in"
+              className="inline-flex h-9 items-center rounded-lg border border-border px-4 text-sm font-medium text-foreground transition-colors hover:bg-accent"
+            >
+              Sign In
+            </Link>
+            <Link
+              href="/workspace"
+              className="inline-flex h-9 items-center gap-2 rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:opacity-90"
+            >
+              Open Workspace
+              <ArrowRight className="h-4 w-4" />
+            </Link>
+          </div>
         </div>
       </header>
 
-      {/* Main content */}
-      <main className="flex-1">
-        <div className="mx-auto max-w-3xl px-4 py-8">
-          <div style={{ animation: "fade-in 0.3s ease-out" }}>
-            {/* Phase 1: Upload */}
-            {phase.step === "upload" && (
-              <div className="space-y-6">
-                <div>
-                  <h1 className="text-2xl font-bold tracking-tight text-foreground">
-                    Document Intelligence
-                  </h1>
-                  <p className="mt-1 text-sm text-muted-foreground">
-                    Upload a proposal and let Oracle refine it.
-                  </p>
-                </div>
+      <main className="mx-auto max-w-6xl px-6 py-16">
+        <section className="grid gap-12 lg:grid-cols-[1.2fr_0.8fr] lg:items-center">
+          <div className="space-y-8">
+            <div className="inline-flex items-center gap-2 rounded-full border border-sky-400/20 bg-sky-400/8 px-4 py-1.5 text-xs font-medium uppercase tracking-[0.28em] text-sky-200">
+              <Sparkles className="h-3.5 w-3.5" />
+              Document Intelligence
+            </div>
 
-                <Card className="border-border">
-                  <CardContent className="space-y-6 pt-6">
-                    <DropZone file={file} onFileSelect={setFile} />
-                    <ModeSelector value={mode} onChange={setMode} />
+            <div className="space-y-4">
+              <h1 className="max-w-3xl text-5xl font-semibold tracking-tight text-balance text-foreground md:text-6xl">
+                Review dense drafts with the kind of operator experience they
+                actually deserve.
+              </h1>
+              <p className="max-w-2xl text-lg leading-8 text-muted-foreground">
+                Oracle is BoundState&apos;s document intelligence workspace for
+                reviewing, refining, and returning polished artifacts without
+                losing visibility into what the system is doing.
+              </p>
+            </div>
 
-                    <Button
-                      className="w-full"
-                      size="lg"
-                      disabled={!file}
-                      onClick={handleAnalyze}
-                    >
-                      <Zap className="h-4 w-4" data-icon="inline-start" />
-                      Analyze Document
-                    </Button>
-                  </CardContent>
-                </Card>
+            <div className="flex flex-wrap gap-4">
+              <Link
+                href="/workspace"
+                className="inline-flex h-11 items-center gap-2 rounded-lg bg-primary px-5 text-sm font-medium text-primary-foreground transition-transform hover:-translate-y-0.5"
+              >
+                Enter Oracle
+                <ArrowRight className="h-4 w-4" />
+              </Link>
+              <Link
+                href="/sign-in"
+                className="inline-flex h-11 items-center rounded-lg border border-border bg-card px-5 text-sm font-medium text-foreground transition-colors hover:bg-accent"
+              >
+                Sign In
+              </Link>
+            </div>
+
+            <div className="grid gap-3 pt-2 text-sm text-muted-foreground sm:grid-cols-3">
+              <div className="rounded-2xl border border-border/80 bg-card/70 px-4 py-4">
+                Multi-step critique
               </div>
-            )}
-
-            {/* Phase 2a: Analyzing — live stream */}
-            {phase.step === "analyzing" && (
-              <StatusSpinner messages={phase.logMessages} />
-            )}
-
-            {/* Phase 2b: Critique (review mode) */}
-            {phase.step === "critique" && (
-              <CritiquePanel
-                critique={phase.critique}
-                onStartOver={reset}
-                onGenerate={() => handleGenerate(phase.sessionId)}
-                generating={false}
-              />
-            )}
-
-            {phase.step === "reviewed" && (
-              <div className="space-y-6">
-                <CritiquePanel
-                  critique={phase.critique}
-                  onStartOver={reset}
-                  showGenerate={false}
-                />
-                <DownloadPanel
-                  originalName={file?.name ?? "document"}
-                  docxUrl={phase.docxUrl}
-                  pptxUrl={phase.pptxUrl}
-                  onStartOver={reset}
-                />
+              <div className="rounded-2xl border border-border/80 bg-card/70 px-4 py-4">
+                Live progress visibility
               </div>
-            )}
-
-            {/* Phase 2c: Generating docs */}
-            {phase.step === "generating" && (
-              <StatusSpinner messages={phase.logMessages} />
-            )}
-
-            {/* Phase 3: Download */}
-            {phase.step === "download" && (
-              <DownloadPanel
-                originalName={file?.name ?? "document"}
-                docxUrl={phase.docxUrl}
-                pptxUrl={phase.pptxUrl}
-                onStartOver={reset}
-              />
-            )}
+              <div className="rounded-2xl border border-border/80 bg-card/70 px-4 py-4">
+                Polished deliverables
+              </div>
+            </div>
           </div>
-        </div>
-      </main>
 
-      {/* Footer */}
-      <footer className="border-t border-border py-4">
-        <div className="mx-auto max-w-3xl px-4">
-          <p className="text-xs text-muted-foreground text-center">
-            BoundState Technologies &mdash; All outputs are draft artifacts pending responsible human review.
-          </p>
-        </div>
-      </footer>
+          <div className="rounded-[2rem] border border-border/80 bg-card/70 p-6 shadow-2xl shadow-sky-950/20 backdrop-blur">
+            <div className="rounded-[1.5rem] border border-sky-400/15 bg-[linear-gradient(180deg,rgba(8,47,73,0.65),rgba(15,23,42,0.85))] p-6">
+              <div className="mb-5 flex items-center justify-between">
+                <span className="text-xs font-semibold uppercase tracking-[0.28em] text-sky-200/80">
+                  Workflow
+                </span>
+                <span className="rounded-full border border-sky-400/20 bg-sky-400/10 px-3 py-1 text-xs text-sky-100">
+                  Public entry
+                </span>
+              </div>
+              <div className="space-y-4">
+                {steps.map((step, index) => (
+                  <div
+                    key={step}
+                    className="flex items-start gap-4 rounded-2xl border border-white/8 bg-black/10 px-4 py-4"
+                  >
+                    <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-sky-400/15 text-xs font-semibold text-sky-100">
+                      {index + 1}
+                    </div>
+                    <p className="text-sm leading-6 text-slate-200">{step}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section className="mt-20 grid gap-5 md:grid-cols-3">
+          {capabilities.map(({ title, description, icon: Icon }) => (
+            <div
+              key={title}
+              className="rounded-[1.75rem] border border-border/80 bg-card/70 p-6 shadow-lg shadow-slate-950/10"
+            >
+              <div className="mb-5 inline-flex h-11 w-11 items-center justify-center rounded-2xl bg-sky-400/10 text-sky-200">
+                <Icon className="h-5 w-5" />
+              </div>
+              <h2 className="text-lg font-semibold text-foreground">{title}</h2>
+              <p className="mt-3 text-sm leading-7 text-muted-foreground">
+                {description}
+              </p>
+            </div>
+          ))}
+        </section>
+      </main>
     </div>
   );
 }
