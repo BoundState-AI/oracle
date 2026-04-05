@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import { toast } from "sonner";
 import { BoundStateLogo } from "@/components/BoundStateLogo";
 import { DropZone } from "@/components/DropZone";
@@ -14,13 +14,13 @@ import { Zap } from "lucide-react";
 
 type Phase =
   | { step: "upload" }
-  | { step: "analyzing" }
+  | { step: "analyzing"; logMessages: string[] }
   | {
       step: "critique";
       sessionId: string;
       critique: string;
     }
-  | { step: "generating" }
+  | { step: "generating"; logMessages: string[] }
   | {
       step: "download";
       docxUrl: string | null;
@@ -36,12 +36,52 @@ async function apiPost(path: string, body: FormData | object): Promise<Response>
   });
 }
 
+function connectSSE(
+  sessionId: string,
+  onLog: (msg: string) => void,
+  onDone: (data: Record<string, unknown>) => void,
+  onError: (err: string) => void,
+): () => void {
+  const url = `/api/oracle/stream/${sessionId}`;
+  const eventSource = new EventSource(url);
+
+  eventSource.addEventListener("log", (e) => {
+    onLog(e.data);
+  });
+
+  eventSource.addEventListener("done", (e) => {
+    try {
+      const data = JSON.parse(e.data);
+      onDone(data);
+    } catch {
+      onError("Failed to parse result");
+    }
+    eventSource.close();
+  });
+
+  eventSource.addEventListener("error", (e) => {
+    if (e instanceof MessageEvent) {
+      onError(e.data);
+    } else {
+      onError("Connection lost — Oracle may still be running");
+    }
+    eventSource.close();
+  });
+
+  return () => eventSource.close();
+}
+
 export default function OraclePage() {
   const [file, setFile] = useState<File | null>(null);
   const [mode, setMode] = useState<ProcessingMode>("review");
   const [phase, setPhase] = useState<Phase>({ step: "upload" });
+  const cleanupRef = useRef<(() => void) | null>(null);
 
   const reset = useCallback(() => {
+    if (cleanupRef.current) {
+      cleanupRef.current();
+      cleanupRef.current = null;
+    }
     setFile(null);
     setMode("review");
     setPhase({ step: "upload" });
@@ -50,7 +90,7 @@ export default function OraclePage() {
   const handleAnalyze = useCallback(async () => {
     if (!file) return;
 
-    setPhase({ step: "analyzing" });
+    setPhase({ step: "analyzing", logMessages: ["Starting Oracle..."] });
 
     const form = new FormData();
     form.append("file", file);
@@ -69,20 +109,52 @@ export default function OraclePage() {
       }
 
       const data = await res.json();
+      const sessionId = data.session_id;
 
-      if (data.status === "complete") {
-        setPhase({
-          step: "download",
-          docxUrl: data.docx_url ?? null,
-          pptxUrl: data.pptx_url ?? null,
-        });
-      } else {
-        setPhase({
-          step: "critique",
-          sessionId: data.session_id,
-          critique: data.critique ?? "",
-        });
-      }
+      // Connect to SSE stream for live updates
+      const cleanup = connectSSE(
+        sessionId,
+        // onLog — append message to the live feed
+        (msg) => {
+          setPhase((prev) => {
+            if (prev.step !== "analyzing") return prev;
+            const updated = [...prev.logMessages, msg];
+            // Keep last 20 messages to avoid unbounded growth
+            return {
+              ...prev,
+              logMessages: updated.slice(-20),
+            };
+          });
+        },
+        // onDone — transition to critique or download
+        (result) => {
+          cleanupRef.current = null;
+          if (result.status === "complete") {
+            setPhase({
+              step: "download",
+              docxUrl: (result.docx_url as string) ?? null,
+              pptxUrl: (result.pptx_url as string) ?? null,
+            });
+          } else if (result.status === "ready_to_generate") {
+            setPhase({
+              step: "critique",
+              sessionId: result.session_id as string,
+              critique: (result.critique as string) ?? "",
+            });
+          } else if (result.status === "error") {
+            toast.error("Oracle review failed. Try again.");
+            setPhase({ step: "upload" });
+          }
+        },
+        // onError
+        (err) => {
+          cleanupRef.current = null;
+          toast.error(err);
+          setPhase({ step: "upload" });
+        },
+      );
+
+      cleanupRef.current = cleanup;
     } catch {
       toast.error("Network error — check your connection and try again.");
       setPhase({ step: "upload" });
@@ -91,7 +163,7 @@ export default function OraclePage() {
 
   const handleGenerate = useCallback(
     async (sessionId: string) => {
-      setPhase({ step: "generating" });
+      setPhase({ step: "generating", logMessages: ["Building your documents..."] });
 
       try {
         const res = await apiPost("/generate", {
@@ -170,15 +242,9 @@ export default function OraclePage() {
               </div>
             )}
 
-            {/* Phase 2a: Analyzing */}
+            {/* Phase 2a: Analyzing — live stream */}
             {phase.step === "analyzing" && (
-              <StatusSpinner
-                messages={[
-                  "Extracting document content...",
-                  "Running Oracle analysis...",
-                  "Generating polished outputs...",
-                ]}
-              />
+              <StatusSpinner messages={phase.logMessages} />
             )}
 
             {/* Phase 2b: Critique (review mode) */}
@@ -193,9 +259,7 @@ export default function OraclePage() {
 
             {/* Phase 2c: Generating docs */}
             {phase.step === "generating" && (
-              <StatusSpinner
-                messages={["Building your documents..."]}
-              />
+              <StatusSpinner messages={phase.logMessages} />
             )}
 
             {/* Phase 3: Download */}

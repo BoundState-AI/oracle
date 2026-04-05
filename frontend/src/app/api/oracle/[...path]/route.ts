@@ -29,12 +29,29 @@ async function proxy(req: NextRequest) {
     body,
   });
 
+  const upstreamContentType =
+    upstream.headers.get("content-type") ?? "application/json";
+
+  // Stream SSE responses through without buffering
+  if (upstreamContentType.includes("text/event-stream")) {
+    return new NextResponse(upstream.body, {
+      status: upstream.status,
+      headers: {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+        connection: "keep-alive",
+        "x-accel-buffering": "no",
+      },
+    });
+  }
+
+  // Buffer non-streaming responses normally
   const responseBody = await upstream.arrayBuffer();
 
   return new NextResponse(responseBody, {
     status: upstream.status,
     headers: {
-      "content-type": upstream.headers.get("content-type") ?? "application/json",
+      "content-type": upstreamContentType,
     },
   });
 }
