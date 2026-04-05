@@ -8,15 +8,17 @@ import { RotateCcw, ArrowRight } from "lucide-react";
 interface CritiquePanelProps {
   critique: string;
   onStartOver: () => void;
-  onGenerate: () => void;
-  generating: boolean;
+  onGenerate?: () => void;
+  generating?: boolean;
+  showGenerate?: boolean;
 }
 
 export function CritiquePanel({
   critique,
   onStartOver,
   onGenerate,
-  generating,
+  generating = false,
+  showGenerate = true,
 }: CritiquePanelProps) {
   return (
     <Card className="border-border">
@@ -37,10 +39,12 @@ export function CritiquePanel({
           <RotateCcw className="h-4 w-4" data-icon="inline-start" />
           Start Over
         </Button>
-        <Button onClick={onGenerate} disabled={generating}>
-          {generating ? "Generating..." : "Generate Documents"}
-          {!generating && <ArrowRight className="h-4 w-4" data-icon="inline-end" />}
-        </Button>
+        {showGenerate && onGenerate ? (
+          <Button onClick={onGenerate} disabled={generating}>
+            {generating ? "Generating..." : "Generate Documents"}
+            {!generating && <ArrowRight className="h-4 w-4" data-icon="inline-end" />}
+          </Button>
+        ) : null}
       </CardFooter>
     </Card>
   );

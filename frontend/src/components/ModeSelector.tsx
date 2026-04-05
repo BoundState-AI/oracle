@@ -25,7 +25,7 @@ const MODES: {
     value: "review",
     label: "Review + Polish",
     description:
-      "Oracle reviews first. You approve before docs are generated.",
+      "Oracle reviews first, then returns the critique and polished docs together.",
     isDefault: true,
   },
   {

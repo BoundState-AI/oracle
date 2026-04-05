@@ -20,6 +20,13 @@ type Phase =
       sessionId: string;
       critique: string;
     }
+  | {
+      step: "reviewed";
+      sessionId: string;
+      critique: string;
+      docxUrl: string | null;
+      pptxUrl: string | null;
+    }
   | { step: "generating"; logMessages: string[] }
   | {
       step: "download";
@@ -135,9 +142,11 @@ export default function OraclePage() {
       });
     } else if (result.status === "ready_to_generate") {
       setPhase({
-        step: "critique",
+        step: "reviewed",
         sessionId: result.session_id as string,
         critique: (result.critique as string) ?? "",
+        docxUrl: (result.docx_url as string) ?? null,
+        pptxUrl: (result.pptx_url as string) ?? null,
       });
     } else if (result.status === "error") {
       toast.error((result.error as string) ?? "Oracle review failed. Try again.");
@@ -329,6 +338,22 @@ export default function OraclePage() {
                 onGenerate={() => handleGenerate(phase.sessionId)}
                 generating={false}
               />
+            )}
+
+            {phase.step === "reviewed" && (
+              <div className="space-y-6">
+                <CritiquePanel
+                  critique={phase.critique}
+                  onStartOver={reset}
+                  showGenerate={false}
+                />
+                <DownloadPanel
+                  originalName={file?.name ?? "document"}
+                  docxUrl={phase.docxUrl}
+                  pptxUrl={phase.pptxUrl}
+                  onStartOver={reset}
+                />
+              </div>
             )}
 
             {/* Phase 2c: Generating docs */}
