@@ -569,7 +569,7 @@ async def generate(request: Request, body: GenerateRequest):
 
 @app.get("/oracle/download/{session_id}/{fmt}")
 async def download(request: Request, session_id: str, fmt: str):
-    """Download a generated document."""
+    """Download a generated document (polished formatting)."""
     await verify_api_key(request)
 
     session = _get_session(session_id)
@@ -580,56 +580,59 @@ async def download(request: Request, session_id: str, fmt: str):
     if not review_result:
         raise HTTPException(status_code=400, detail="Review not complete")
 
+    from fastapi.responses import FileResponse
+    try:
+        from oracle.document_generator import generate_docx, generate_pptx
+    except ModuleNotFoundError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Document generation dependency missing: {exc.name}",
+        ) from exc
+
     original_name = session["original_name"]
     base_name = Path(original_name).stem
+    doc_title = f"{base_name} \u2014 Oracle Review"
+    output_dir = Path(session["output_dir"])
 
     if fmt == "docx":
+        out_path = output_dir / f"{base_name}_polished.docx"
         try:
-            from docx import Document
-
-            doc = Document()
-            doc.add_heading(f"{base_name} — Polished", level=1)
-            for paragraph in review_result.final_draft.split("\n\n"):
-                if paragraph.strip():
-                    doc.add_paragraph(paragraph.strip())
-
-            out_path = Path(session["output_dir"]) / f"{base_name}_polished.docx"
-            doc.save(str(out_path))
-
-            from fastapi.responses import FileResponse
-
-            return FileResponse(
-                str(out_path),
-                media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                filename=f"{base_name}_polished.docx",
+            generate_docx(
+                final_draft=review_result.final_draft,
+                output_path=out_path,
+                title=doc_title,
+                subtitle=f"Reviewed by ORACLE \u2022 {review_result.total_rounds} round(s) \u2022 {'Converged' if review_result.converged else 'Max rounds reached'}",
             )
-        except ImportError:
-            raise HTTPException(status_code=500, detail="python-docx not installed")
+        except ModuleNotFoundError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"DOCX generation dependency missing: {exc.name}",
+            ) from exc
+        return FileResponse(
+            str(out_path),
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            filename=f"{base_name}_polished.docx",
+        )
 
     elif fmt == "pptx":
+        out_path = output_dir / f"{base_name}_polished.pptx"
         try:
-            from pptx import Presentation
-            from pptx.util import Inches
-
-            prs = Presentation()
-            slide = prs.slides.add_slide(prs.slide_layouts[1])
-            slide.shapes.title.text = f"{base_name} — Polished"
-
-            body = slide.placeholders[1]
-            body.text = review_result.final_draft[:3000]
-
-            out_path = Path(session["output_dir"]) / f"{base_name}_polished.pptx"
-            prs.save(str(out_path))
-
-            from fastapi.responses import FileResponse
-
-            return FileResponse(
-                str(out_path),
-                media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                filename=f"{base_name}_polished.pptx",
+            generate_pptx(
+                final_draft=review_result.final_draft,
+                output_path=out_path,
+                title=doc_title,
+                subtitle=f"Reviewed by ORACLE \u2022 {review_result.total_rounds} round(s)",
             )
-        except ImportError:
-            raise HTTPException(status_code=500, detail="python-pptx not installed")
+        except ModuleNotFoundError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"PPTX generation dependency missing: {exc.name}",
+            ) from exc
+        return FileResponse(
+            str(out_path),
+            media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            filename=f"{base_name}_polished.pptx",
+        )
 
     else:
         raise HTTPException(status_code=400, detail=f"Invalid format: {fmt}")
