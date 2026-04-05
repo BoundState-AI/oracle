@@ -68,7 +68,7 @@ function connectSSE(
       const data = JSON.parse(e.data);
       onDone(data);
     } catch {
-      onError("Failed to parse result");
+      onError("Failed to parse result", false);
     }
     eventSource.close();
   });
