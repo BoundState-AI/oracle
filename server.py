@@ -353,21 +353,38 @@ async def stream(request: Request, session_id: str):
     )
 
 
-def _format_done_event(session: dict[str, Any]) -> str:
-    """Format the final SSE 'done' event with the result payload."""
+@app.get("/oracle/session/{session_id}")
+async def session_status(request: Request, session_id: str):
+    """Return the latest session status/result payload for polling fallbacks."""
+    await verify_api_key(request)
+
+    session = _sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    return _build_session_payload(session)
+
+
+def _build_session_payload(session: dict[str, Any]) -> dict[str, Any]:
+    """Build the JSON payload returned by done events and polling status."""
     session_id = session["session_id"]
     mode = session.get("mode", "review")
     status = session.get("status", "complete")
     critique = session.get("critique")
-
-    result = {
+    return {
         "session_id": session_id,
         "mode": mode,
         "status": status,
+        "error": session.get("error"),
         "critique": critique if mode == "review" else None,
         "docx_url": f"/oracle/download/{session_id}/docx" if status in ("complete", "ready_to_generate") else None,
         "pptx_url": f"/oracle/download/{session_id}/pptx" if status in ("complete", "ready_to_generate") else None,
     }
+
+
+def _format_done_event(session: dict[str, Any]) -> str:
+    """Format the final SSE 'done' event with the result payload."""
+    result = _build_session_payload(session)
     return f"event: done\ndata: {json.dumps(result)}\n\n"
 
 

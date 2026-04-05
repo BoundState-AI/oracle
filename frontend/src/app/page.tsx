@@ -36,11 +36,18 @@ async function apiPost(path: string, body: FormData | object): Promise<Response>
   });
 }
 
+async function apiGet(path: string): Promise<Response> {
+  return fetch(`/api/oracle${path}`, {
+    method: "GET",
+    cache: "no-store",
+  });
+}
+
 function connectSSE(
   sessionId: string,
   onLog: (msg: string) => void,
   onDone: (data: Record<string, unknown>) => void,
-  onError: (err: string) => void,
+  onError: (err: string, recoverable: boolean) => void,
 ): () => void {
   const url = `/api/oracle/stream/${sessionId}`;
   const eventSource = new EventSource(url);
@@ -61,9 +68,9 @@ function connectSSE(
 
   eventSource.addEventListener("error", (e) => {
     if (e instanceof MessageEvent) {
-      onError(e.data);
+      onError(e.data, false);
     } else {
-      onError("Connection lost — Oracle may still be running");
+      onError("Live connection dropped — checking Oracle status...", true);
     }
     eventSource.close();
   });
@@ -71,11 +78,72 @@ function connectSSE(
   return () => eventSource.close();
 }
 
+function startStatusPolling(
+  sessionId: string,
+  onDone: (data: Record<string, unknown>) => void,
+  onError: (err: string) => void,
+): () => void {
+  let active = true;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const tick = async () => {
+    if (!active) return;
+    try {
+      const res = await apiGet(`/session/${sessionId}`);
+      if (!res.ok) {
+        throw new Error(`Polling failed (${res.status})`);
+      }
+      const data = (await res.json()) as Record<string, unknown>;
+      const status = data.status as string | undefined;
+      if (status === "processing") {
+        timer = setTimeout(tick, 5000);
+        return;
+      }
+      onDone(data);
+      return;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Polling failed";
+      if (!active) return;
+      onError(message);
+      timer = setTimeout(tick, 5000);
+    }
+  };
+
+  void tick();
+
+  return () => {
+    active = false;
+    if (timer) {
+      clearTimeout(timer);
+    }
+  };
+}
+
 export default function OraclePage() {
   const [file, setFile] = useState<File | null>(null);
   const [mode, setMode] = useState<ProcessingMode>("review");
   const [phase, setPhase] = useState<Phase>({ step: "upload" });
   const cleanupRef = useRef<(() => void) | null>(null);
+
+  const applyOracleResult = useCallback((result: Record<string, unknown>) => {
+    cleanupRef.current = null;
+    if (result.status === "complete") {
+      setPhase({
+        step: "download",
+        docxUrl: (result.docx_url as string) ?? null,
+        pptxUrl: (result.pptx_url as string) ?? null,
+      });
+    } else if (result.status === "ready_to_generate") {
+      setPhase({
+        step: "critique",
+        sessionId: result.session_id as string,
+        critique: (result.critique as string) ?? "",
+      });
+    } else if (result.status === "error") {
+      toast.error((result.error as string) ?? "Oracle review failed. Try again.");
+      setPhase({ step: "upload" });
+    }
+  }, []);
 
   const reset = useCallback(() => {
     if (cleanupRef.current) {
@@ -126,28 +194,34 @@ export default function OraclePage() {
             };
           });
         },
-        // onDone — transition to critique or download
-        (result) => {
-          cleanupRef.current = null;
-          if (result.status === "complete") {
-            setPhase({
-              step: "download",
-              docxUrl: (result.docx_url as string) ?? null,
-              pptxUrl: (result.pptx_url as string) ?? null,
+        applyOracleResult,
+        (err, recoverable) => {
+          if (recoverable) {
+            setPhase((prev) => {
+              if (prev.step !== "analyzing") return prev;
+              return {
+                ...prev,
+                logMessages: [...prev.logMessages, err].slice(-20),
+              };
             });
-          } else if (result.status === "ready_to_generate") {
-            setPhase({
-              step: "critique",
-              sessionId: result.session_id as string,
-              critique: (result.critique as string) ?? "",
-            });
-          } else if (result.status === "error") {
-            toast.error("Oracle review failed. Try again.");
-            setPhase({ step: "upload" });
+
+            const pollCleanup = startStatusPolling(
+              sessionId,
+              applyOracleResult,
+              (pollErr) => {
+                setPhase((prev) => {
+                  if (prev.step !== "analyzing") return prev;
+                  return {
+                    ...prev,
+                    logMessages: [...prev.logMessages, `Polling: ${pollErr}`].slice(-20),
+                  };
+                });
+              },
+            );
+            cleanupRef.current = pollCleanup;
+            return;
           }
-        },
-        // onError
-        (err) => {
+
           cleanupRef.current = null;
           toast.error(err);
           setPhase({ step: "upload" });
@@ -159,7 +233,7 @@ export default function OraclePage() {
       toast.error("Network error — check your connection and try again.");
       setPhase({ step: "upload" });
     }
-  }, [file, mode]);
+  }, [applyOracleResult, file, mode]);
 
   const handleGenerate = useCallback(
     async (sessionId: string) => {
