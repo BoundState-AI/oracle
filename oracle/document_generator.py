@@ -1,10 +1,15 @@
 """
 Module: document_generator
-Purpose: Generate polished .docx and .pptx from oracle2 final_draft markdown.
+Purpose: Generate polished .docx and .pptx from oracle2 ReviewResult.
 
-Replaces the bare-minimum generation in server.py with professional formatting:
-  - DOCX: Calibri fonts, styled headings, bullet lists, page numbers, margins, colors
-  - PPTX: Multi-slide deck with title slide, section slides, proper typography
+Matches Beth's output style:
+  - Centered title block (company name, doc title, tagline)
+  - Multi-colored metrics summary line
+  - Navy heading hierarchy (#1F3864 / #2E4D8B) with outline levels for Navigation Pane
+  - Body text in #333333, callouts in amber/red
+  - List Paragraph style for bullets
+  - Centered italic footer with confidentiality notice
+  - PPTX: Dark title/closing slides, light content slides, multi-slide chunking
 
 __safety_critical__: bool = False
 
@@ -18,22 +23,39 @@ Co-Authored-By: Dr. Joseph Wilde, BoundState AI
 from __future__ import annotations
 
 import re
-import textwrap
 from pathlib import Path
-from typing import NamedTuple
+from typing import NamedTuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from oracle.oracle2_adapter import ReviewResult
 
 # ---------------------------------------------------------------------------
-# Markdown Parser — turns final_draft into structured blocks
+# Color palette — matches Beth's docx output
+# ---------------------------------------------------------------------------
+
+NAVY_DARK = "1F3864"     # H1, title, stat labels
+NAVY_MED = "2E4D8B"      # H2, H3, document subtitle
+GRAY_DARK = "333333"     # Body text
+GRAY_MED = "444444"      # Tagline, notes, sub-headers
+GRAY_LIGHT = "888888"    # Separators (pipes in stats line)
+BLACK = "000000"          # Some body text
+RED = "C00000"            # Critical findings
+AMBER = "7F4D00"         # High findings, warnings
+GREEN = "375623"          # Good/resolved items
+
+
+# ---------------------------------------------------------------------------
+# Markdown Parser
 # ---------------------------------------------------------------------------
 
 class Block(NamedTuple):
-    kind: str           # "h1", "h2", "h3", "paragraph", "bullet", "numbered", "code", "hr"
+    kind: str       # "h1","h2","h3","paragraph","bullet","numbered","code","hr"
     text: str
-    level: int          # heading level or bullet indent
+    level: int
 
 
 def parse_markdown(md: str) -> list[Block]:
-    """Parse markdown text into a flat list of typed blocks."""
+    """Parse markdown into typed blocks."""
     blocks: list[Block] = []
     lines = md.split("\n")
     i = 0
@@ -43,7 +65,6 @@ def parse_markdown(md: str) -> list[Block]:
     while i < len(lines):
         line = lines[i]
 
-        # Fenced code blocks
         if line.strip().startswith("```"):
             if in_code:
                 blocks.append(Block("code", "\n".join(code_buf), 0))
@@ -60,18 +81,15 @@ def parse_markdown(md: str) -> list[Block]:
 
         stripped = line.strip()
 
-        # Empty line
         if not stripped:
             i += 1
             continue
 
-        # Horizontal rule
         if re.match(r"^[-*_]{3,}\s*$", stripped):
             blocks.append(Block("hr", "", 0))
             i += 1
             continue
 
-        # Headings
         hm = re.match(r"^(#{1,6})\s+(.*)", stripped)
         if hm:
             level = len(hm.group(1))
@@ -80,7 +98,6 @@ def parse_markdown(md: str) -> list[Block]:
             i += 1
             continue
 
-        # Bullet list
         bm = re.match(r"^(\s*)[-*+]\s+(.*)", line)
         if bm:
             indent = len(bm.group(1)) // 2
@@ -88,7 +105,6 @@ def parse_markdown(md: str) -> list[Block]:
             i += 1
             continue
 
-        # Numbered list
         nm = re.match(r"^(\s*)\d+[.)]\s+(.*)", line)
         if nm:
             indent = len(nm.group(1)) // 2
@@ -100,28 +116,22 @@ def parse_markdown(md: str) -> list[Block]:
         para_lines = [stripped]
         i += 1
         while i < len(lines):
-            next_line = lines[i].strip()
-            if not next_line:
+            nl = lines[i].strip()
+            if not nl or re.match(r"^#{1,6}\s+", nl) or re.match(r"^[-*+]\s+", nl):
                 break
-            if re.match(r"^#{1,6}\s+", next_line):
+            if re.match(r"^\d+[.)]\s+", nl) or re.match(r"^[-*_]{3,}\s*$", nl):
                 break
-            if re.match(r"^[-*+]\s+", next_line):
+            if nl.startswith("```"):
                 break
-            if re.match(r"^\d+[.)]\s+", next_line):
-                break
-            if re.match(r"^[-*_]{3,}\s*$", next_line):
-                break
-            if next_line.startswith("```"):
-                break
-            para_lines.append(next_line)
+            para_lines.append(nl)
             i += 1
         blocks.append(Block("paragraph", " ".join(para_lines), 0))
 
     return blocks
 
 
-def _strip_md_inline(text: str) -> str:
-    """Remove markdown bold/italic markers for plain-text contexts."""
+def _strip_md(text: str) -> str:
+    """Remove markdown inline formatting."""
     text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
     text = re.sub(r"__(.+?)__", r"\1", text)
     text = re.sub(r"\*(.+?)\*", r"\1", text)
@@ -131,197 +141,54 @@ def _strip_md_inline(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Color Palette
+# DOCX: XML helpers
 # ---------------------------------------------------------------------------
 
-# BoundState brand-adjacent: dark navy + teal accent
-PRIMARY = "1B2A4A"      # Dark navy
-ACCENT = "0891B2"       # Teal
-LIGHT_BG = "F0F7FA"     # Ice blue for table headers / callouts
-TEXT_DARK = "1F2937"     # Near-black body text
-TEXT_MED = "4B5563"      # Medium gray for captions
-BORDER = "CBD5E1"        # Light border
-
-
-# ---------------------------------------------------------------------------
-# DOCX Generator
-# ---------------------------------------------------------------------------
-
-def generate_docx(
-    final_draft: str,
-    output_path: Path,
-    title: str = "Oracle Review — Final Document",
-    subtitle: str | None = None,
-) -> Path:
-    """Generate a polished .docx from markdown final_draft.
-
-    Features:
-      - US Letter, 1" margins
-      - Calibri font family
-      - Styled headings (navy, bold, spaced)
-      - Proper bullet and numbered lists
-      - Page numbers in footer
-      - Title page section
-    """
-    from docx import Document
-    from docx.shared import Pt, Inches, Cm, RGBColor, Emu
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
-    from docx.enum.style import WD_STYLE_TYPE
+def _set_outline_level(style, level: int):
+    """Set outlineLevel on a heading style for Navigation Pane support."""
     from docx.oxml.ns import qn
-
-    doc = Document()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # --- Page setup ---
-    for section in doc.sections:
-        section.page_width = Inches(8.5)
-        section.page_height = Inches(11)
-        section.top_margin = Inches(1)
-        section.bottom_margin = Inches(1)
-        section.left_margin = Inches(1)
-        section.right_margin = Inches(1)
-
-    # --- Default style ---
-    style = doc.styles["Normal"]
-    font = style.font
-    font.name = "Calibri"
-    font.size = Pt(11)
-    font.color.rgb = RGBColor.from_string(TEXT_DARK)
-    pf = style.paragraph_format
-    pf.space_after = Pt(6)
-    pf.space_before = Pt(0)
-    pf.line_spacing = 1.15
-
-    # --- Heading styles ---
-    _style_heading(doc, "Heading 1", size=20, color=PRIMARY, space_before=18, space_after=8, bold=True)
-    _style_heading(doc, "Heading 2", size=15, color=ACCENT, space_before=14, space_after=6, bold=True)
-    _style_heading(doc, "Heading 3", size=12, color=TEXT_DARK, space_before=10, space_after=4, bold=True)
-
-    # --- List styles (use built-in List Bullet / List Number) ---
-    for sname in ("List Bullet", "List Bullet 2", "List Bullet 3"):
-        if sname in doc.styles:
-            ls = doc.styles[sname]
-            ls.font.name = "Calibri"
-            ls.font.size = Pt(11)
-            ls.font.color.rgb = RGBColor.from_string(TEXT_DARK)
-
-    for sname in ("List Number", "List Number 2", "List Number 3"):
-        if sname in doc.styles:
-            ls = doc.styles[sname]
-            ls.font.name = "Calibri"
-            ls.font.size = Pt(11)
-            ls.font.color.rgb = RGBColor.from_string(TEXT_DARK)
-
-    # --- Page numbers in footer ---
-    for section in doc.sections:
-        footer = section.footer
-        footer.is_linked_to_previous = False
-        fp = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
-        fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        fp.style = doc.styles["Normal"]
-        _add_page_number(fp)
-        if fp.runs:
-            fp.runs[0].font.size = Pt(9)
-            fp.runs[0].font.color.rgb = RGBColor.from_string(TEXT_MED)
-
-    # --- Title block ---
-    tp = doc.add_paragraph()
-    tp.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    tp.paragraph_format.space_before = Pt(72)
-    tp.paragraph_format.space_after = Pt(4)
-    run = tp.add_run(title)
-    run.bold = True
-    run.font.size = Pt(26)
-    run.font.color.rgb = RGBColor.from_string(PRIMARY)
-    run.font.name = "Calibri"
-
-    if subtitle:
-        sp = doc.add_paragraph()
-        sp.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        sp.paragraph_format.space_after = Pt(2)
-        sr = sp.add_run(subtitle)
-        sr.font.size = Pt(13)
-        sr.font.color.rgb = RGBColor.from_string(ACCENT)
-        sr.font.name = "Calibri"
-
-    # Divider line
-    divider = doc.add_paragraph()
-    divider.paragraph_format.space_before = Pt(8)
-    divider.paragraph_format.space_after = Pt(24)
-    _add_bottom_border(divider, ACCENT)
-
-    # --- Body content ---
-    blocks = parse_markdown(final_draft)
-
-    for block in blocks:
-        if block.kind == "h1":
-            p = doc.add_heading(_strip_md_inline(block.text), level=1)
-        elif block.kind == "h2":
-            p = doc.add_heading(_strip_md_inline(block.text), level=2)
-        elif block.kind == "h3":
-            p = doc.add_heading(_strip_md_inline(block.text), level=3)
-        elif block.kind == "paragraph":
-            p = doc.add_paragraph()
-            _add_rich_runs(p, block.text)
-        elif block.kind == "bullet":
-            style_name = "List Bullet" if block.level == 0 else f"List Bullet {min(block.level + 1, 3)}"
-            if style_name in doc.styles:
-                p = doc.add_paragraph(style=style_name)
-            else:
-                p = doc.add_paragraph(style="List Bullet")
-            _add_rich_runs(p, block.text)
-        elif block.kind == "numbered":
-            style_name = "List Number" if block.level == 0 else f"List Number {min(block.level + 1, 3)}"
-            if style_name in doc.styles:
-                p = doc.add_paragraph(style=style_name)
-            else:
-                p = doc.add_paragraph(style="List Number")
-            _add_rich_runs(p, block.text)
-        elif block.kind == "code":
-            p = doc.add_paragraph()
-            p.paragraph_format.space_before = Pt(4)
-            p.paragraph_format.space_after = Pt(4)
-            run = p.add_run(block.text)
-            run.font.name = "Consolas"
-            run.font.size = Pt(9)
-            run.font.color.rgb = RGBColor.from_string(TEXT_DARK)
-            _shade_paragraph(p, "F1F5F9")
-        elif block.kind == "hr":
-            hr = doc.add_paragraph()
-            hr.paragraph_format.space_before = Pt(8)
-            hr.paragraph_format.space_after = Pt(8)
-            _add_bottom_border(hr, BORDER)
-
-    # --- BoundState footer line ---
-    doc.add_paragraph()  # spacer
-    fp = doc.add_paragraph()
-    fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    fr = fp.add_run("Generated by ORACLE \u2014 BoundState AI")
-    fr.font.size = Pt(8)
-    fr.font.color.rgb = RGBColor.from_string(TEXT_MED)
-    fr.font.name = "Calibri"
-    fr.italic = True
-
-    doc.save(str(output_path))
-    return output_path
+    pPr = style.element.get_or_add_pPr()
+    existing = pPr.find(qn("w:outlineLvl"))
+    if existing is not None:
+        existing.set(qn("w:val"), str(level))
+    else:
+        outline = pPr.makeelement(qn("w:outlineLvl"), {qn("w:val"): str(level)})
+        pPr.append(outline)
 
 
-def _style_heading(doc, style_name: str, size: int, color: str,
-                   space_before: int, space_after: int, bold: bool = True):
-    """Configure a built-in heading style."""
-    from docx.shared import Pt, RGBColor
-    style = doc.styles[style_name]
-    style.font.name = "Calibri"
-    style.font.size = Pt(size)
-    style.font.bold = bold
-    style.font.color.rgb = RGBColor.from_string(color)
-    style.paragraph_format.space_before = Pt(space_before)
-    style.paragraph_format.space_after = Pt(space_after)
-    style.paragraph_format.keep_with_next = True
+def _add_page_number(paragraph):
+    """Add auto page number field to a paragraph."""
+    from docx.oxml.ns import qn
+    run = paragraph.add_run()
+    fld_begin = run._element.makeelement(qn("w:fldChar"), {qn("w:fldCharType"): "begin"})
+    run._element.append(fld_begin)
+
+    run2 = paragraph.add_run()
+    instr = run2._element.makeelement(qn("w:instrText"), {})
+    instr.text = " PAGE "
+    run2._element.append(instr)
+
+    run3 = paragraph.add_run()
+    fld_end = run3._element.makeelement(qn("w:fldChar"), {qn("w:fldCharType"): "end"})
+    run3._element.append(fld_end)
 
 
-def _add_rich_runs(paragraph, text: str):
-    """Add runs with bold/italic/code support from markdown inline formatting."""
+def _shade_paragraph(paragraph, color: str):
+    """Apply background shading to a paragraph."""
+    from docx.oxml.ns import qn
+    pPr = paragraph._element.get_or_add_pPr()
+    shd = pPr.makeelement(qn("w:shd"), {
+        qn("w:val"): "clear", qn("w:color"): "auto", qn("w:fill"): color,
+    })
+    pPr.append(shd)
+
+
+# ---------------------------------------------------------------------------
+# DOCX: Rich text rendering
+# ---------------------------------------------------------------------------
+
+def _add_rich_runs(paragraph, text: str, default_color: str = BLACK):
+    """Add runs with bold/italic/code from markdown inline formatting."""
     from docx.shared import Pt, RGBColor
 
     parts = re.split(r"(\*\*.+?\*\*|__.+?__|`.+?`|\*.+?\*|_.+?_)", text)
@@ -331,66 +198,290 @@ def _add_rich_runs(paragraph, text: str):
         if part.startswith("**") and part.endswith("**"):
             run = paragraph.add_run(part[2:-2])
             run.bold = True
+            run.font.color.rgb = RGBColor.from_string(default_color)
         elif part.startswith("__") and part.endswith("__"):
             run = paragraph.add_run(part[2:-2])
             run.bold = True
+            run.font.color.rgb = RGBColor.from_string(default_color)
         elif part.startswith("`") and part.endswith("`"):
             run = paragraph.add_run(part[1:-1])
             run.font.name = "Consolas"
             run.font.size = Pt(10)
-            run.font.color.rgb = RGBColor.from_string("B91C1C")
+            run.font.color.rgb = RGBColor.from_string(NAVY_MED)
         elif part.startswith("*") and part.endswith("*"):
             run = paragraph.add_run(part[1:-1])
             run.italic = True
+            run.font.color.rgb = RGBColor.from_string(default_color)
         elif part.startswith("_") and part.endswith("_"):
             run = paragraph.add_run(part[1:-1])
             run.italic = True
+            run.font.color.rgb = RGBColor.from_string(default_color)
         else:
-            paragraph.add_run(part)
+            run = paragraph.add_run(part)
+            run.font.color.rgb = RGBColor.from_string(default_color)
 
 
-def _add_page_number(paragraph):
-    """Add auto page number field to a paragraph."""
+def _detect_callout(text: str) -> str | None:
+    """Detect if a paragraph is a callout/note by its opening words.
+
+    Returns color hex if it is, None otherwise.
+    """
+    lower = text.lower()
+    if lower.startswith("critical:") or lower.startswith("critical finding"):
+        return RED
+    if lower.startswith("warning:") or lower.startswith("note:"):
+        return AMBER
+    if lower.startswith("important:"):
+        return AMBER
+    return None
+
+
+# ---------------------------------------------------------------------------
+# DOCX Generator
+# ---------------------------------------------------------------------------
+
+def generate_docx(
+    final_draft: str,
+    output_path: Path,
+    title: str = "Oracle Review",
+    subtitle: str | None = None,
+    review_result: "ReviewResult | None" = None,
+) -> Path:
+    """Generate a polished .docx matching Beth's output style.
+
+    Features:
+      - Centered title block with BoundState branding
+      - Metrics summary with multi-colored runs (if review_result provided)
+      - Heading 1/2/3 with outline levels → Word Navigation Pane
+      - List Paragraph for bullets
+      - Callout detection (Critical/Warning → colored bold)
+      - Page numbers in footer
+      - Confidentiality footer
+    """
+    from docx import Document
+    from docx.shared import Pt, Inches, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.oxml.ns import qn
-    run = paragraph.add_run()
-    fld_char_begin = run._element.makeelement(qn("w:fldChar"), {qn("w:fldCharType"): "begin"})
-    run._element.append(fld_char_begin)
 
-    run2 = paragraph.add_run()
-    instr = run2._element.makeelement(qn("w:instrText"), {})
-    instr.text = " PAGE "
-    run2._element.append(instr)
+    doc = Document()
 
-    run3 = paragraph.add_run()
-    fld_char_end = run3._element.makeelement(qn("w:fldChar"), {qn("w:fldCharType"): "end"})
-    run3._element.append(fld_char_end)
+    # --- Page setup: US Letter, 1" margins ---
+    for section in doc.sections:
+        section.page_width = Inches(8.5)
+        section.page_height = Inches(11)
+        section.top_margin = Inches(1)
+        section.bottom_margin = Inches(1)
+        section.left_margin = Inches(1)
+        section.right_margin = Inches(1)
 
+    # --- Heading styles with outline levels ---
+    h1 = doc.styles["Heading 1"]
+    h1.font.size = Pt(14)
+    h1.font.bold = True
+    h1.font.color.rgb = RGBColor.from_string(NAVY_DARK)
+    h1.paragraph_format.space_before = Pt(18)
+    h1.paragraph_format.space_after = Pt(6)
+    h1.paragraph_format.keep_with_next = True
+    _set_outline_level(h1, 0)
 
-def _add_bottom_border(paragraph, color: str):
-    """Add a bottom border to a paragraph (acts as a horizontal rule)."""
-    from docx.oxml.ns import qn
-    pPr = paragraph._element.get_or_add_pPr()
-    pBdr = pPr.makeelement(qn("w:pBdr"), {})
-    bottom = pBdr.makeelement(qn("w:bottom"), {
-        qn("w:val"): "single",
-        qn("w:sz"): "6",
-        qn("w:space"): "1",
-        qn("w:color"): color,
-    })
-    pBdr.append(bottom)
-    pPr.append(pBdr)
+    h2 = doc.styles["Heading 2"]
+    h2.font.size = Pt(12)
+    h2.font.bold = True
+    h2.font.color.rgb = RGBColor.from_string(NAVY_MED)
+    h2.paragraph_format.space_before = Pt(12)
+    h2.paragraph_format.space_after = Pt(5)
+    h2.paragraph_format.keep_with_next = True
+    _set_outline_level(h2, 1)
 
+    if "Heading 3" in doc.styles:
+        h3s = doc.styles["Heading 3"]
+        h3s.font.bold = True
+        h3s.font.color.rgb = RGBColor.from_string(NAVY_MED)
+        h3s.paragraph_format.space_before = Pt(9)
+        h3s.paragraph_format.space_after = Pt(4)
+        h3s.paragraph_format.keep_with_next = True
+        _set_outline_level(h3s, 2)
 
-def _shade_paragraph(paragraph, color: str):
-    """Apply background shading to a paragraph."""
-    from docx.oxml.ns import qn
-    pPr = paragraph._element.get_or_add_pPr()
-    shd = pPr.makeelement(qn("w:shd"), {
-        qn("w:val"): "clear",
-        qn("w:color"): "auto",
-        qn("w:fill"): color,
-    })
-    pPr.append(shd)
+    # --- Page numbers in footer ---
+    for section in doc.sections:
+        footer = section.footer
+        footer.is_linked_to_previous = False
+        fp = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
+        fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        _add_page_number(fp)
+        for r in fp.runs:
+            r.font.size = Pt(9)
+            r.font.color.rgb = RGBColor.from_string(GRAY_MED)
+
+    # ===================================================================
+    # TITLE BLOCK (centered, matching Beth's style)
+    # ===================================================================
+
+    # Company name — 16pt bold navy, centered
+    p_co = doc.add_paragraph()
+    p_co.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p_co.paragraph_format.space_after = Pt(3)
+    r_co = p_co.add_run("BoundState AI LLC")
+    r_co.bold = True
+    r_co.font.size = Pt(16)
+    r_co.font.color.rgb = RGBColor.from_string(NAVY_DARK)
+
+    # Document title — 13pt bold medium navy, centered
+    p_title = doc.add_paragraph()
+    p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p_title.paragraph_format.space_after = Pt(3)
+    r_title = p_title.add_run(title)
+    r_title.bold = True
+    r_title.font.size = Pt(13)
+    r_title.font.color.rgb = RGBColor.from_string(NAVY_MED)
+
+    # Subtitle / tagline — italic gray, centered
+    if subtitle:
+        p_sub = doc.add_paragraph()
+        p_sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p_sub.paragraph_format.space_after = Pt(12)
+        r_sub = p_sub.add_run(subtitle)
+        r_sub.italic = True
+        r_sub.font.color.rgb = RGBColor.from_string(GRAY_MED)
+
+    # Spacers (matches Beth's empty paragraph spacing)
+    for _ in range(2):
+        sp = doc.add_paragraph()
+        sp.paragraph_format.space_after = Pt(0)
+
+    # ===================================================================
+    # METRICS SUMMARY (if review_result provided)
+    # ===================================================================
+
+    if review_result is not None:
+        m = review_result.metrics
+
+        # "Session Results" heading
+        doc.add_heading("Session Results", level=1)
+        doc.add_paragraph()  # spacer
+
+        # Multi-colored stats line
+        total_accepted = m.total_issues_accepted
+        crit_count = m.accepted_by_severity.get("critical", 0)
+        high_count = m.accepted_by_severity.get("high", 0)
+        rejected = m.rejected_count
+
+        p_stats = doc.add_paragraph()
+        p_stats.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p_stats.paragraph_format.space_before = Pt(3)
+        p_stats.paragraph_format.space_after = Pt(3)
+
+        def _stat_run(text, color, bold=True):
+            r = p_stats.add_run(text)
+            r.bold = bold
+            r.font.size = Pt(13)
+            r.font.color.rgb = RGBColor.from_string(color)
+
+        def _pipe():
+            _stat_run("   |   ", GRAY_LIGHT, bold=False)
+
+        _stat_run(f"{total_accepted} Accepted Defects", NAVY_DARK)
+        _pipe()
+        _stat_run(f"{crit_count} Critical", RED)
+        _pipe()
+        _stat_run(f"{high_count} High", AMBER)
+        _pipe()
+        _stat_run(f"{rejected} Rejected", GREEN)
+
+        doc.add_paragraph()  # spacer
+
+        # Convergence note
+        if not review_result.converged:
+            p_note_title = doc.add_paragraph()
+            p_note_title.paragraph_format.space_before = Pt(3)
+            r_nt = p_note_title.add_run("Why Not Converged Does Not Mean Weak")
+            r_nt.bold = True
+            r_nt.font.color.rgb = RGBColor.from_string(NAVY_DARK)
+
+            p_note = doc.add_paragraph()
+            p_note.paragraph_format.space_after = Pt(6)
+            r_nb = p_note.add_run(
+                f"Oracle2 ran {review_result.total_rounds} round(s). "
+                f"Non-convergence typically means later rounds surfaced novel "
+                f"issues rather than repeating prior ones \u2014 a sign of thorough review."
+            )
+            r_nb.font.color.rgb = RGBColor.from_string(GRAY_DARK)
+
+        doc.add_paragraph()  # spacer
+
+    # ===================================================================
+    # BODY CONTENT
+    # ===================================================================
+
+    blocks = parse_markdown(final_draft)
+
+    for block in blocks:
+        if block.kind == "h1":
+            doc.add_heading(_strip_md(block.text), level=1)
+
+        elif block.kind == "h2":
+            doc.add_heading(_strip_md(block.text), level=2)
+
+        elif block.kind == "h3":
+            doc.add_heading(_strip_md(block.text), level=3)
+
+        elif block.kind == "paragraph":
+            clean = _strip_md(block.text)
+
+            # Detect callout paragraphs (Critical:, Warning:, Note:)
+            callout_color = _detect_callout(clean)
+            if callout_color:
+                p = doc.add_paragraph()
+                p.paragraph_format.space_before = Pt(3)
+                r = p.add_run(clean)
+                r.bold = True
+                r.font.color.rgb = RGBColor.from_string(callout_color)
+            else:
+                p = doc.add_paragraph()
+                _add_rich_runs(p, block.text, default_color=BLACK)
+
+        elif block.kind == "bullet":
+            p = doc.add_paragraph(style="List Paragraph" if "List Paragraph" in doc.styles else "List Bullet")
+            _add_rich_runs(p, block.text, default_color=BLACK)
+
+        elif block.kind == "numbered":
+            style_name = "List Number" if "List Number" in doc.styles else "List Paragraph"
+            p = doc.add_paragraph(style=style_name)
+            _add_rich_runs(p, block.text, default_color=BLACK)
+
+        elif block.kind == "code":
+            p = doc.add_paragraph()
+            p.paragraph_format.space_before = Pt(4)
+            p.paragraph_format.space_after = Pt(4)
+            run = p.add_run(block.text)
+            run.font.name = "Consolas"
+            run.font.size = Pt(9)
+            run.font.color.rgb = RGBColor.from_string(GRAY_DARK)
+            _shade_paragraph(p, "F1F5F9")
+
+        elif block.kind == "hr":
+            doc.add_paragraph()  # empty spacer, matching Beth's style
+
+    # ===================================================================
+    # CONFIDENTIALITY FOOTER
+    # ===================================================================
+
+    for _ in range(3):
+        doc.add_paragraph()
+
+    p_footer = doc.add_paragraph()
+    p_footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    footer_text = (
+        "This communication and its attachments are privileged and confidential. "
+        "Generated by ORACLE \u2014 BoundState AI LLC."
+    )
+    r_ft = p_footer.add_run(footer_text)
+    r_ft.italic = True
+    r_ft.font.size = Pt(9)
+    r_ft.font.color.rgb = RGBColor.from_string(GRAY_MED)
+
+    doc.save(str(output_path))
+    return output_path
 
 
 # ---------------------------------------------------------------------------
@@ -400,31 +491,32 @@ def _shade_paragraph(paragraph, color: str):
 def generate_pptx(
     final_draft: str,
     output_path: Path,
-    title: str = "Oracle Review \u2014 Final Document",
+    title: str = "Oracle Review",
     subtitle: str | None = None,
+    review_result: "ReviewResult | None" = None,
 ) -> Path:
-    """Generate a polished multi-slide .pptx from markdown final_draft.
+    """Generate a polished multi-slide .pptx.
 
     Features:
-      - Title slide with branding
-      - One slide per H1/H2 section
-      - Proper typography (Calibri family)
-      - Dark title/conclusion slides, light content slides
-      - Content broken across slides (not crammed onto one)
+      - Dark navy title slide + teal accent
+      - Metrics summary slide (if review_result provided)
+      - Content grouped by H1/H2 → one slide per section
+      - Auto-chunking at ~8 lines per slide
+      - Dark closing slide with branding
+      - Widescreen 13.333" x 7.5"
     """
     from pptx import Presentation
-    from pptx.util import Inches, Pt, Emu
+    from pptx.util import Inches, Pt
     from pptx.dml.color import RGBColor
-    from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
+    from pptx.enum.text import PP_ALIGN
 
     prs = Presentation()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
     prs.slide_width = Inches(13.333)
     prs.slide_height = Inches(7.5)
 
     blocks = parse_markdown(final_draft)
 
-    # --- Group blocks into sections ---
+    # --- Group blocks into sections by H1/H2 ---
     sections: list[dict] = []
     current: dict | None = None
 
@@ -432,7 +524,7 @@ def generate_pptx(
         if block.kind in ("h1", "h2"):
             if current:
                 sections.append(current)
-            current = {"title": _strip_md_inline(block.text), "level": block.kind, "blocks": []}
+            current = {"title": _strip_md(block.text), "level": block.kind, "blocks": []}
         else:
             if current is None:
                 current = {"title": title, "level": "h1", "blocks": []}
@@ -440,209 +532,267 @@ def generate_pptx(
 
     if current:
         sections.append(current)
-
     if not sections:
         sections = [{"title": title, "level": "h1", "blocks": blocks}]
 
     # --- Title slide (dark) ---
-    _add_title_slide(prs, title, subtitle or "Reviewed by ORACLE \u2014 BoundState AI")
+    _pptx_title_slide(prs, title, subtitle or "Reviewed by ORACLE \u2014 BoundState AI")
+
+    # --- Metrics slide (if available) ---
+    if review_result is not None:
+        _pptx_metrics_slide(prs, review_result)
 
     # --- Content slides ---
     for sec in sections:
-        content_lines = _blocks_to_slide_text(sec["blocks"])
+        content_lines = _blocks_to_lines(sec["blocks"])
         if not content_lines:
             continue
-
-        # Split into chunks of ~8 bullets per slide
         chunks = _chunk_lines(content_lines, max_lines=8)
         for ci, chunk in enumerate(chunks):
             slide_title = sec["title"]
             if len(chunks) > 1:
                 slide_title += f" ({ci + 1}/{len(chunks)})"
-            _add_content_slide(prs, slide_title, chunk)
+            _pptx_content_slide(prs, slide_title, chunk)
 
     # --- Closing slide (dark) ---
-    _add_closing_slide(prs)
+    _pptx_closing_slide(prs)
 
     prs.save(str(output_path))
     return output_path
 
 
-def _add_title_slide(prs, title: str, subtitle: str):
-    """Add a dark-background title slide."""
+# ---------------------------------------------------------------------------
+# PPTX: Slide builders
+# ---------------------------------------------------------------------------
+
+def _pptx_fill_bg(slide, color_hex: str):
+    from pptx.dml.color import RGBColor
+    fill = slide.background.fill
+    fill.solid()
+    fill.fore_color.rgb = RGBColor.from_string(color_hex)
+
+
+def _pptx_title_slide(prs, title: str, subtitle: str):
     from pptx.util import Inches, Pt
     from pptx.dml.color import RGBColor
     from pptx.enum.text import PP_ALIGN
 
     slide = prs.slides.add_slide(prs.slide_layouts[6])  # blank
-    _fill_slide_bg(slide, PRIMARY)
+    _pptx_fill_bg(slide, NAVY_DARK)
 
     # Title
-    txBox = slide.shapes.add_textbox(Inches(1.2), Inches(2.2), Inches(10.9), Inches(1.8))
-    tf = txBox.text_frame
+    tb = slide.shapes.add_textbox(Inches(1.2), Inches(2.0), Inches(10.9), Inches(1.8))
+    tf = tb.text_frame
     tf.word_wrap = True
     p = tf.paragraphs[0]
     p.text = title
     p.font.size = Pt(40)
     p.font.bold = True
     p.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
-    p.font.name = "Calibri"
     p.alignment = PP_ALIGN.LEFT
 
+    # Accent bar
+    bar = slide.shapes.add_shape(1, Inches(1.2), Inches(3.9), Inches(3), Pt(3))
+    bar.fill.solid()
+    bar.fill.fore_color.rgb = RGBColor.from_string("0891B2")  # teal
+    bar.line.fill.background()
+
     # Subtitle
-    txBox2 = slide.shapes.add_textbox(Inches(1.2), Inches(4.2), Inches(10.9), Inches(0.8))
-    tf2 = txBox2.text_frame
+    tb2 = slide.shapes.add_textbox(Inches(1.2), Inches(4.2), Inches(10.9), Inches(0.8))
+    tf2 = tb2.text_frame
     tf2.word_wrap = True
     p2 = tf2.paragraphs[0]
     p2.text = subtitle
     p2.font.size = Pt(18)
-    p2.font.color.rgb = RGBColor.from_string(ACCENT)
-    p2.font.name = "Calibri"
+    p2.font.color.rgb = RGBColor.from_string("0891B2")
     p2.alignment = PP_ALIGN.LEFT
 
-    # Accent line
-    shape = slide.shapes.add_shape(
-        1,  # MSO_SHAPE.RECTANGLE
-        Inches(1.2), Inches(4.0), Inches(3), Pt(3)
-    )
-    shape.fill.solid()
-    shape.fill.fore_color.rgb = RGBColor.from_string(ACCENT)
-    shape.line.fill.background()
+    # Company name (bottom)
+    tb3 = slide.shapes.add_textbox(Inches(1.2), Inches(6.5), Inches(4), Inches(0.5))
+    tf3 = tb3.text_frame
+    p3 = tf3.paragraphs[0]
+    p3.text = "BoundState AI LLC"
+    p3.font.size = Pt(12)
+    p3.font.color.rgb = RGBColor.from_string(GRAY_LIGHT)
 
 
-def _add_content_slide(prs, title: str, lines: list[str]):
-    """Add a light-background content slide."""
-    from pptx.util import Inches, Pt
-    from pptx.dml.color import RGBColor
-    from pptx.enum.text import PP_ALIGN
-
-    slide = prs.slides.add_slide(prs.slide_layouts[6])  # blank
-    _fill_slide_bg(slide, "FFFFFF")
-
-    # Title bar background
-    bar = slide.shapes.add_shape(1, Inches(0), Inches(0), Inches(13.333), Inches(1.1))
-    bar.fill.solid()
-    bar.fill.fore_color.rgb = RGBColor.from_string(LIGHT_BG)
-    bar.line.fill.background()
-
-    # Title text
-    txBox = slide.shapes.add_textbox(Inches(0.8), Inches(0.2), Inches(11.7), Inches(0.7))
-    tf = txBox.text_frame
-    tf.word_wrap = True
-    p = tf.paragraphs[0]
-    p.text = title
-    p.font.size = Pt(26)
-    p.font.bold = True
-    p.font.color.rgb = RGBColor.from_string(PRIMARY)
-    p.font.name = "Calibri"
-
-    # Content
-    txBox2 = slide.shapes.add_textbox(Inches(0.8), Inches(1.4), Inches(11.7), Inches(5.5))
-    tf2 = txBox2.text_frame
-    tf2.word_wrap = True
-
-    for i, line in enumerate(lines):
-        if i == 0:
-            p = tf2.paragraphs[0]
-        else:
-            p = tf2.add_paragraph()
-
-        # Detect bullet prefix
-        clean = line
-        is_bullet = False
-        if line.startswith("\u2022 ") or line.startswith("- "):
-            clean = line[2:]
-            is_bullet = True
-            p.level = 0
-
-        # Bold detection for "Label: value" patterns
-        bold_match = re.match(r"^(.+?):\s*(.+)$", clean)
-        if bold_match and len(bold_match.group(1)) < 60:
-            run1 = p.add_run()
-            run1.text = ("\u2022 " if is_bullet else "") + bold_match.group(1) + ": "
-            run1.font.bold = True
-            run1.font.size = Pt(14)
-            run1.font.color.rgb = RGBColor.from_string(TEXT_DARK)
-            run1.font.name = "Calibri"
-
-            run2 = p.add_run()
-            run2.text = bold_match.group(2)
-            run2.font.size = Pt(14)
-            run2.font.color.rgb = RGBColor.from_string(TEXT_DARK)
-            run2.font.name = "Calibri"
-        else:
-            prefix = "\u2022 " if is_bullet else ""
-            p.text = prefix + clean
-            p.font.size = Pt(14)
-            p.font.color.rgb = RGBColor.from_string(TEXT_DARK)
-            p.font.name = "Calibri"
-
-        p.space_after = Pt(6)
-        p.space_before = Pt(2)
-
-    # Footer
-    footer_box = slide.shapes.add_textbox(Inches(0.8), Inches(7.0), Inches(4), Inches(0.3))
-    ftf = footer_box.text_frame
-    fp = ftf.paragraphs[0]
-    fp.text = "ORACLE \u2014 BoundState AI"
-    fp.font.size = Pt(8)
-    fp.font.color.rgb = RGBColor.from_string(TEXT_MED)
-    fp.font.name = "Calibri"
-    fp.font.italic = True
-
-
-def _add_closing_slide(prs):
-    """Add a dark closing/thank-you slide."""
+def _pptx_metrics_slide(prs, review_result):
     from pptx.util import Inches, Pt
     from pptx.dml.color import RGBColor
     from pptx.enum.text import PP_ALIGN
 
     slide = prs.slides.add_slide(prs.slide_layouts[6])
-    _fill_slide_bg(slide, PRIMARY)
+    _pptx_fill_bg(slide, "FFFFFF")
 
-    txBox = slide.shapes.add_textbox(Inches(1.2), Inches(2.8), Inches(10.9), Inches(1.2))
-    tf = txBox.text_frame
+    m = review_result.metrics
+
+    # Title bar
+    bar = slide.shapes.add_shape(1, Inches(0), Inches(0), Inches(13.333), Inches(1.1))
+    bar.fill.solid()
+    bar.fill.fore_color.rgb = RGBColor.from_string("F0F7FA")
+    bar.line.fill.background()
+
+    tb = slide.shapes.add_textbox(Inches(0.8), Inches(0.2), Inches(11.7), Inches(0.7))
+    p = tb.text_frame.paragraphs[0]
+    p.text = "Session Results"
+    p.font.size = Pt(26)
+    p.font.bold = True
+    p.font.color.rgb = RGBColor.from_string(NAVY_DARK)
+
+    # Big stat boxes
+    stats = [
+        (str(m.total_issues_accepted), "Accepted\nDefects", NAVY_DARK),
+        (str(m.accepted_by_severity.get("critical", 0)), "Critical", RED),
+        (str(m.accepted_by_severity.get("high", 0)), "High", AMBER),
+        (str(m.rejected_count), "Rejected", GREEN),
+        (str(review_result.total_rounds), "Rounds", NAVY_MED),
+    ]
+
+    x_start = 0.8
+    box_w = 2.2
+    gap = 0.3
+    for i, (num, label, color) in enumerate(stats):
+        x = x_start + i * (box_w + gap)
+
+        # Number
+        ntb = slide.shapes.add_textbox(Inches(x), Inches(2.5), Inches(box_w), Inches(1.2))
+        np = ntb.text_frame.paragraphs[0]
+        np.text = num
+        np.font.size = Pt(48)
+        np.font.bold = True
+        np.font.color.rgb = RGBColor.from_string(color)
+        np.alignment = PP_ALIGN.CENTER
+
+        # Label
+        ltb = slide.shapes.add_textbox(Inches(x), Inches(3.8), Inches(box_w), Inches(0.5))
+        lp = ltb.text_frame.paragraphs[0]
+        lp.text = label
+        lp.font.size = Pt(14)
+        lp.font.color.rgb = RGBColor.from_string(GRAY_MED)
+        lp.alignment = PP_ALIGN.CENTER
+
+    # Convergence status
+    status = "Converged" if review_result.converged else "Did Not Converge (novel issues in later rounds)"
+    stb = slide.shapes.add_textbox(Inches(0.8), Inches(5.5), Inches(11.7), Inches(0.5))
+    sp = stb.text_frame.paragraphs[0]
+    sp.text = status
+    sp.font.size = Pt(14)
+    sp.font.italic = True
+    sp.font.color.rgb = RGBColor.from_string(GRAY_MED)
+    sp.alignment = PP_ALIGN.CENTER
+
+
+def _pptx_content_slide(prs, title: str, lines: list[str]):
+    from pptx.util import Inches, Pt
+    from pptx.dml.color import RGBColor
+    from pptx.enum.text import PP_ALIGN
+
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _pptx_fill_bg(slide, "FFFFFF")
+
+    # Title bar
+    bar = slide.shapes.add_shape(1, Inches(0), Inches(0), Inches(13.333), Inches(1.1))
+    bar.fill.solid()
+    bar.fill.fore_color.rgb = RGBColor.from_string("F0F7FA")
+    bar.line.fill.background()
+
+    tb = slide.shapes.add_textbox(Inches(0.8), Inches(0.2), Inches(11.7), Inches(0.7))
+    tf = tb.text_frame
+    tf.word_wrap = True
     p = tf.paragraphs[0]
+    p.text = title
+    p.font.size = Pt(26)
+    p.font.bold = True
+    p.font.color.rgb = RGBColor.from_string(NAVY_DARK)
+
+    # Content body
+    ctb = slide.shapes.add_textbox(Inches(0.8), Inches(1.4), Inches(11.7), Inches(5.5))
+    ctf = ctb.text_frame
+    ctf.word_wrap = True
+
+    for i, line in enumerate(lines):
+        p = ctf.paragraphs[0] if i == 0 else ctf.add_paragraph()
+
+        clean = line
+        is_bullet = False
+        if line.startswith("\u2022 ") or line.startswith("- "):
+            clean = line[2:]
+            is_bullet = True
+
+        # Bold "Label: value" patterns
+        bm = re.match(r"^(.+?):\s*(.+)$", clean)
+        if bm and len(bm.group(1)) < 60:
+            prefix = "\u2022 " if is_bullet else ""
+            r1 = p.add_run()
+            r1.text = prefix + bm.group(1) + ": "
+            r1.font.bold = True
+            r1.font.size = Pt(14)
+            r1.font.color.rgb = RGBColor.from_string(NAVY_DARK)
+
+            r2 = p.add_run()
+            r2.text = bm.group(2)
+            r2.font.size = Pt(14)
+            r2.font.color.rgb = RGBColor.from_string(GRAY_DARK)
+        else:
+            prefix = "\u2022 " if is_bullet else ""
+            p.text = prefix + clean
+            p.font.size = Pt(14)
+            p.font.color.rgb = RGBColor.from_string(GRAY_DARK)
+
+        p.space_after = Pt(6)
+        p.space_before = Pt(2)
+
+    # Footer
+    ftb = slide.shapes.add_textbox(Inches(0.8), Inches(7.0), Inches(4), Inches(0.3))
+    fp = ftb.text_frame.paragraphs[0]
+    fp.text = "ORACLE \u2014 BoundState AI"
+    fp.font.size = Pt(8)
+    fp.font.color.rgb = RGBColor.from_string(GRAY_MED)
+    fp.font.italic = True
+
+
+def _pptx_closing_slide(prs):
+    from pptx.util import Inches, Pt
+    from pptx.dml.color import RGBColor
+    from pptx.enum.text import PP_ALIGN
+
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _pptx_fill_bg(slide, NAVY_DARK)
+
+    tb = slide.shapes.add_textbox(Inches(1.2), Inches(2.8), Inches(10.9), Inches(1.2))
+    p = tb.text_frame.paragraphs[0]
     p.text = "Review Complete"
     p.font.size = Pt(36)
     p.font.bold = True
     p.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
-    p.font.name = "Calibri"
     p.alignment = PP_ALIGN.LEFT
 
-    txBox2 = slide.shapes.add_textbox(Inches(1.2), Inches(4.2), Inches(10.9), Inches(0.6))
-    tf2 = txBox2.text_frame
-    p2 = tf2.paragraphs[0]
-    p2.text = "Generated by ORACLE \u2022 BoundState AI"
+    tb2 = slide.shapes.add_textbox(Inches(1.2), Inches(4.2), Inches(10.9), Inches(0.6))
+    p2 = tb2.text_frame.paragraphs[0]
+    p2.text = "Generated by ORACLE \u2022 BoundState AI LLC"
     p2.font.size = Pt(16)
-    p2.font.color.rgb = RGBColor.from_string(ACCENT)
-    p2.font.name = "Calibri"
+    p2.font.color.rgb = RGBColor.from_string("0891B2")
     p2.alignment = PP_ALIGN.LEFT
 
 
-def _fill_slide_bg(slide, color_hex: str):
-    """Fill slide background with a solid color."""
-    from pptx.dml.color import RGBColor
-    bg = slide.background
-    fill = bg.fill
-    fill.solid()
-    fill.fore_color.rgb = RGBColor.from_string(color_hex)
+# ---------------------------------------------------------------------------
+# PPTX: helpers
+# ---------------------------------------------------------------------------
 
-
-def _blocks_to_slide_text(blocks: list[Block]) -> list[str]:
-    """Convert blocks into simple text lines for slide content."""
+def _blocks_to_lines(blocks: list[Block]) -> list[str]:
+    """Convert blocks into simple text lines for slides."""
     lines: list[str] = []
     for b in blocks:
         if b.kind == "paragraph":
-            text = _strip_md_inline(b.text)
+            text = _strip_md(b.text)
             if text:
                 lines.append(text)
         elif b.kind == "bullet":
-            lines.append(f"\u2022 {_strip_md_inline(b.text)}")
+            lines.append(f"\u2022 {_strip_md(b.text)}")
         elif b.kind == "numbered":
-            lines.append(f"\u2022 {_strip_md_inline(b.text)}")
+            lines.append(f"\u2022 {_strip_md(b.text)}")
         elif b.kind == "h3":
-            lines.append(_strip_md_inline(b.text))
+            lines.append(_strip_md(b.text))
         elif b.kind == "code":
             snippet = b.text[:200]
             if len(b.text) > 200:
@@ -652,10 +802,7 @@ def _blocks_to_slide_text(blocks: list[Block]) -> list[str]:
 
 
 def _chunk_lines(lines: list[str], max_lines: int = 8) -> list[list[str]]:
-    """Split lines into chunks that fit on one slide."""
+    """Split lines into slide-sized chunks."""
     if not lines:
         return []
-    chunks = []
-    for i in range(0, len(lines), max_lines):
-        chunks.append(lines[i:i + max_lines])
-    return chunks
+    return [lines[i:i + max_lines] for i in range(0, len(lines), max_lines)]
