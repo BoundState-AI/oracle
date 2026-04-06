@@ -1,0 +1,182 @@
+{
+  "pack_id": "tocr-guidance-v1",
+  "version": "1.0.0",
+  "spec": "BS-SPEC-TOCR-001-REV1",
+  "description": "Plain-English guidance for every TOCR and SCAN rule. Written for the person who does not know FAR.",
+  "entries": {
+    "TOCR-001": {
+      "what_it_means": "A change was made to the task order but it wasn't listed in the Summary of Changes section. This means the reviewer might not know about it.",
+      "why_it_matters": "The Summary of Changes is how everyone knows what changed. If something isn't listed there, the Contracting Officer can't review it properly. This is like making edits to a legal document without telling anyone.",
+      "what_to_do": "Go to the Summary of Changes section and add a clear description of what changed and why. Be specific — don't just say 'updated scope', say what was added or removed.",
+      "who_needs_to_act": "The revision author (task lead) needs to update the Summary of Changes before submitting."
+    },
+    "TOCR-002": {
+      "what_it_means": "A fundamentally new work domain was inserted into the task order scope — for example, AI software development added to a materials engineering task order. The new work type does not match the task order's authorized Skill field or the IDIQ contract statement of work.",
+      "why_it_matters": "FAR 16.505(a)(2) requires task orders to stay within the scope of the parent IDIQ contract. FAR 43.102(a) restricts contract modifications to Contracting Officers — if the person who inserted the scope is not a CO, the modification is unauthorized. FAR 43.102(a)(3) prohibits other Government personnel from directing work that should be a contract modification. Out-of-scope work cannot be authorized through a task order description edit. It requires a separate procurement action.",
+      "what_to_do": "Compare the inserted work type against the task order Skill field (unchanged across revisions) and the IDIQ contract statement of work. If the new domain falls outside the authorized scope, remove it from this task order. Initiate a separate procurement: either a new task order under an appropriate contract vehicle, or a contract amendment to expand the IDIQ scope. Do not attempt to force out-of-scope work into an existing TO.",
+      "who_needs_to_act": "The CO must determine if the work is within scope. Legal should review if the scope change constitutes an unauthorized commitment. The task lead must remove out-of-scope language until proper procurement is initiated."
+    },
+    "TOCR-003": {
+      "what_it_means": "Scope was added to the task order but no formal Task Order Change Request (TOCR) was filed through ATOMS. The standard review flow — Branch Chief → Technical Monitor → COR → CO — was bypassed.",
+      "why_it_matters": "NFS 1816.506-70 and ESSCA/MSFC ordering procedures require TOCR documentation for all scope changes. Without a TOCR, the change is invisible to the approval chain. The Technical Monitor, COR, and CO cannot review what they do not know exists. FAR 43.102(b) requires modifications to be priced before execution.",
+      "what_to_do": "File TOCR documentation through ATOMS before submitting the revision. The TOCR must include: rationale for the scope addition, a corresponding sub-task in ATOMS, WBS codes and funding allocation, defined deliverables and acceptance criteria. Route through the standard review flow.",
+      "who_needs_to_act": "The task lead must file the TOCR and create the ATOMS sub-task. The CO must approve it through the standard review flow."
+    },
+    "TOCR-004": {
+      "what_it_means": "New work was added to the task order, but no money was allocated to pay for it. There's no funding, no WBS code, and no charge code.",
+      "why_it_matters": "Without funding, the contractor cannot legally perform the work. If they do, it creates an unauthorized commitment — the government could be liable for costs it didn't agree to pay.",
+      "what_to_do": "Before adding scope, make sure there's money to pay for it. Add the funding amount, assign a WBS code for tracking, and provide a charge code so costs can be properly recorded.",
+      "who_needs_to_act": "The task lead and financial manager need to identify funding. The CO needs to verify funding availability."
+    },
+    "TOCR-005": {
+      "what_it_means": "New scope was added but there are no deliverables — nothing the contractor has to produce or submit to show the work is done.",
+      "why_it_matters": "Without deliverables, there's no way to measure progress or verify that the work was actually completed. This is a common finding in NASA Inspector General audits.",
+      "what_to_do": "Define what the contractor needs to deliver: reports, software, test results, etc. Include acceptance criteria and due dates.",
+      "who_needs_to_act": "The task lead needs to define deliverables. The PM or QA should review them."
+    },
+    "TOCR-006": {
+      "what_it_means": "New scope was added to the task order description, but no corresponding sub-task was created in ATOMS (the contract management system).",
+      "why_it_matters": "ATOMS sub-tasks are how costs are tracked and work is managed at MSFC. Without a sub-task, costs may be charged to the wrong place.",
+      "what_to_do": "Create a sub-task in ATOMS that maps to the new scope. This ensures proper cost tracking.",
+      "who_needs_to_act": "The task lead needs to create the ATOMS sub-task."
+    },
+    "TOCR-007": {
+      "what_it_means": "The task order is marked as an emergency, but the justification for the emergency doesn't seem to cover all the changes being made.",
+      "why_it_matters": "Emergency procedures bypass normal competition and review. They can only be used for the specific emergency, not to sneak in other changes.",
+      "what_to_do": "Either update the emergency justification to cover all changes, or split the revision — emergency changes in one, non-emergency changes in another.",
+      "who_needs_to_act": "The CO needs to review the emergency justification against all changes."
+    },
+    "TOCR-008": {
+      "what_it_means": "The revision adds software development work, but there's no Quality Management System plan in place for software.",
+      "why_it_matters": "NASA requires all software development to follow NASA-STD-8739.8B. This isn't optional — it's a safety requirement. Software without QMS oversight could end up in safety-critical systems.",
+      "what_to_do": "Add a QMS plan that addresses NASA-STD-8739.8B requirements. If software is a new scope area, the software assurance team needs to be involved.",
+      "who_needs_to_act": "The software lead and QA team need to develop the QMS plan. Legal/contracts should verify compliance."
+    },
+    "TOCR-009": {
+      "what_it_means": "This is a draft revision — it hasn't been signed by the Contracting Officer yet. Any scope in a draft has no legal force.",
+      "why_it_matters": "If the contractor starts working on draft scope before it's officially released, they're working at their own risk. The government isn't obligated to pay for work on unsigned revisions.",
+      "what_to_do": "Don't start work on the new scope until the revision is released and signed. If work is urgent, get written authorization from the CO.",
+      "who_needs_to_act": "The task lead should not authorize work. The CO should expedite release if needed."
+    },
+    "TOCR-010": {
+      "what_it_means": "The new scope requires skills that aren't listed in the task order's labor categories. For example, adding AI development scope but having no AI engineers in the staffing plan.",
+      "why_it_matters": "If the right skills aren't in the labor plan, the work might not be done properly, or staff might be charged at incorrect rates.",
+      "what_to_do": "Update the labor categories to include the skills needed, or adjust the scope to match what the current team can do.",
+      "who_needs_to_act": "The task lead and PM need to align scope with available skills."
+    },
+    "TOCR-011": {
+      "what_it_means": "The Quality Plan was changed, but there's no corresponding scope change to explain why. Quality plans should change because the work changed, not independently.",
+      "why_it_matters": "Unexplained quality plan changes could mean someone is reducing oversight requirements without a valid reason.",
+      "what_to_do": "Either provide a scope justification for the quality plan change, or revert the quality plan to what it was in the previous revision.",
+      "who_needs_to_act": "The QA team should review. The task lead should provide justification."
+    },
+    "TOCR-012": {
+      "what_it_means": "The team working on this task order was changed (companies added or removed), but this wasn't mentioned in the Summary of Changes.",
+      "why_it_matters": "Team changes affect who does the work, how costs are allocated, and whether there are organizational conflicts of interest. The CO needs to know.",
+      "what_to_do": "Add the team change to the Summary of Changes with an explanation of who was added/removed and why.",
+      "who_needs_to_act": "The task lead needs to disclose the change."
+    },
+    "TOCR-013": {
+      "what_it_means": "One sub-task appears to be paying for work that's described in a different sub-task. Costs might be going to the wrong place.",
+      "why_it_matters": "Federal cost accounting rules (FAR 31) require that costs are charged to the right place. Mis-charging costs can trigger DCAA audit findings and potential False Claims Act liability.",
+      "what_to_do": "Review how costs are allocated across sub-tasks. Make sure each sub-task only pays for its own work.",
+      "who_needs_to_act": "The financial manager and contracts team need to review. Legal should be involved if misallocation is confirmed."
+    },
+    "TOCR-014": {
+      "what_it_means": "The new scope language seems to describe work that was already done before this revision was approved. Someone may be trying to retroactively authorize work that was never properly approved.",
+      "why_it_matters": "Only a Contracting Officer can authorize work. If work was done without authorization, it requires a formal ratification process. This is a serious compliance issue.",
+      "what_to_do": "Do not use a scope revision to cover previously unauthorized work. Instead, initiate the formal ratification process under FAR 1.602-3.",
+      "who_needs_to_act": "Legal and the CO must handle this. The task lead should not proceed without legal guidance."
+    },
+    "SCAN-001": {
+      "what_it_means": "One or more sub-tasks have no funding at all — no dollar amount, no WBS code, no charge code. There is literally no way for the contractor to bill for this work.",
+      "why_it_matters": "Without funding authorization, any work performed is at the contractor's risk. The government has no obligation to pay for unfunded work, and it creates unauthorized commitment liability.",
+      "what_to_do": "For each unfunded sub-task, assign a funding amount, a WBS code for cost tracking, and a charge code for billing. If funding isn't available yet, document a funding plan and do not authorize performance.",
+      "who_needs_to_act": "The task lead and financial manager need to identify funding sources. The CO must verify availability before release."
+    },
+    "SCAN-002": {
+      "what_it_means": "Some sub-tasks have no deliverables — there's nothing the contractor has to produce or hand over to prove the work was done.",
+      "why_it_matters": "Without deliverables, there's no objective way to measure progress, verify completion, or hold the contractor accountable. NASA OIG has flagged this as a recurring oversight weakness.",
+      "what_to_do": "Add at least one deliverable to every sub-task. Each deliverable should have a description, acceptance criteria, and a due date.",
+      "who_needs_to_act": "The task lead defines deliverables. The PM or QA should review them for measurability."
+    },
+    "SCAN-003": {
+      "what_it_means": "The task order includes software development work (code, AI, data pipelines, etc.) but there's no Quality Management System plan in place.",
+      "why_it_matters": "NASA-STD-8739.8B requires quality management for ALL software development — this includes AI/ML, test automation, and data processing. It's a safety requirement, not a suggestion.",
+      "what_to_do": "Add a QMS plan to the Quality Plan section that references NASA-STD-8739.8B. Identify a software assurance lead and define the software development lifecycle processes.",
+      "who_needs_to_act": "The software lead and QA team need to develop the QMS plan. The CO should verify the clause is included."
+    },
+    "SCAN-004": {
+      "what_it_means": "The task order is marked as an emergency but there's no written justification explaining why emergency procedures are needed.",
+      "why_it_matters": "Emergency authority bypasses normal competition and review safeguards. Without documentation, there's no record that the emergency was legitimate.",
+      "what_to_do": "Write an emergency justification explaining the nature of the emergency, why normal procedures can't be followed, and the impact of delay.",
+      "who_needs_to_act": "The CO must document the emergency justification. The task lead should provide supporting details."
+    },
+    "SCAN-005": {
+      "what_it_means": "The scope language uses phrases like 'previously performed' or 'already completed' — suggesting this revision is trying to retroactively authorize work that was done without proper approval.",
+      "why_it_matters": "Only a Contracting Officer can authorize work. Retroactive scope capture is a serious compliance issue that may require formal ratification under FAR 1.602-3.",
+      "what_to_do": "Do NOT use a scope revision to cover previously unauthorized work. If work was already performed, initiate the formal ratification process. Remove retroactive language from the scope.",
+      "who_needs_to_act": "Legal and the CO must handle ratification. The task lead should stop any further unauthorized work immediately."
+    },
+    "SCAN-006": {
+      "what_it_means": "The task order has scope text describing work to be done, but no sub-tasks to organize that work. It's like having a project plan with no tasks.",
+      "why_it_matters": "Sub-tasks are the management structure for execution — they drive cost tracking, staffing, deliverables, and billing. Without them, there's no way to manage or measure the work.",
+      "what_to_do": "Create sub-tasks that break the scope into manageable pieces. Each sub-task needs an ID, description, funding, WBS code, skills/labor categories, and deliverables.",
+      "who_needs_to_act": "The task lead needs to structure the scope into sub-tasks."
+    },
+    "SCAN-007": {
+      "what_it_means": "One or more sub-tasks have no skills or labor categories defined. There's no specification of who should do the work or what qualifications they need.",
+      "why_it_matters": "Labor categories determine billing rates and staffing qualifications. Without them, there's no way to ensure the right people are assigned or that billing rates are appropriate.",
+      "what_to_do": "Define skills and labor categories for every sub-task. Make sure they align with the scope of work described in each sub-task.",
+      "who_needs_to_act": "The task lead and PM need to define labor requirements."
+    },
+    "SCAN-008": {
+      "what_it_means": "The scope includes software or AI work, but the sub-task skills don't include any software engineering roles. The people assigned might not be qualified.",
+      "why_it_matters": "Software scope requires qualified software personnel. If skills don't match scope, work may be done by under-qualified staff or billed at incorrect rates.",
+      "what_to_do": "Add software engineering, AI/ML engineering, or related labor categories to the sub-tasks that include software scope.",
+      "who_needs_to_act": "The task lead and PM need to update labor categories."
+    },
+    "SCAN-009": {
+      "what_it_means": "Two or more sub-tasks have very similar descriptions — it's unclear which sub-task should carry which costs. This creates risk of billing work to the wrong place.",
+      "why_it_matters": "Federal cost accounting rules (FAR 31) require costs to be charged to the right contract element. Overlapping sub-tasks make proper cost allocation impossible and create DCAA audit exposure.",
+      "what_to_do": "Rewrite sub-task descriptions so each one has a clearly distinct scope. Eliminate overlap and ensure each sub-task covers unique work.",
+      "who_needs_to_act": "The task lead should clarify sub-task boundaries. The financial manager should review cost allocation."
+    },
+    "SCAN-010": {
+      "what_it_means": "This task order is still in draft — it hasn't been signed or released by the Contracting Officer. Nothing in it is legally binding yet.",
+      "why_it_matters": "Work performed against draft scope is at the contractor's risk. The government has no obligation to pay for work authorized only by a draft.",
+      "what_to_do": "Do not authorize work against this task order until it is released and signed. If the work is urgent, get explicit written authorization from the CO.",
+      "who_needs_to_act": "The task lead should not authorize performance. The CO should expedite release if needed."
+    },
+    "SCAN-011": {
+      "what_it_means": "The task order's total funding is $0. There is no money allocated for any work.",
+      "why_it_matters": "A task order with zero funding cannot authorize any performance. Any work done would be an unauthorized commitment.",
+      "what_to_do": "Assign appropriate funding before release. If this is a no-cost administrative modification, document that clearly in the Summary of Changes.",
+      "who_needs_to_act": "The task lead and financial manager need to secure funding. The CO must verify before release."
+    },
+    "SCAN-012": {
+      "what_it_means": "The Summary of Changes section is completely empty. There's no record of what changed in this revision or why.",
+      "why_it_matters": "The Summary of Changes is the primary way reviewers understand what's different. Without it, the CO and oversight chain have to read the entire document to find changes.",
+      "what_to_do": "Write a Summary of Changes that lists every material modification with a brief explanation of what changed and why.",
+      "who_needs_to_act": "The revision author (task lead) must write the Summary of Changes before submitting."
+    },
+    "SCAN-013": {
+      "what_it_means": "One or more sub-tasks have no description at all. A sub-task without a description has no defined scope — nobody knows what work it covers.",
+      "why_it_matters": "Without a description, there's no basis for determining if work is within scope, for staffing the sub-task, or for evaluating contractor performance.",
+      "what_to_do": "Add a clear, specific description to every sub-task that defines the scope of work to be performed under that sub-task.",
+      "who_needs_to_act": "The task lead needs to write sub-task descriptions."
+    },
+    "TOCR-015": {
+      "what_it_means": "The task order is marked as an emergency, and there IS a justification written — but it only describes what's needed, not why it's urgent. It says 'we need X' without saying 'and it can't wait because Y.'",
+      "why_it_matters": "Emergency authority under FAR 16.505(b)(4) bypasses normal review and competition safeguards. It exists for genuine emergencies — safety risks, critical path schedule jeopardy, hardware in danger. Using it for routine changes that could go through standard review undermines the procurement process and creates legal exposure. If challenged, the government must demonstrate that the emergency was real.",
+      "what_to_do": "Rewrite the emergency justification to answer three specific questions: (1) What makes this urgent RIGHT NOW — not what the work is, but what external pressure (safety concern, test window closing, hardware at risk, mission deadline) requires immediate action? (2) Why can't this wait 2-3 weeks for standard task order review — what specific harm occurs during that delay? (3) What is the consequence of NOT using emergency procedures — schedule slip, safety risk, cost escalation, mission impact? If you cannot answer these three questions with specific, factual answers, the requirement is not an emergency. Remove the emergency designation and process through standard review.",
+      "who_needs_to_act": "The CO must validate the emergency justification against FAR 16.505(b)(4). Legal should review if the justification is marginal. The task lead must provide the factual basis for urgency."
+    },
+    "SCAN-014": {
+      "what_it_means": "The task order is marked as an emergency, but the justification only describes what is needed — it doesn't explain why it's urgent or why normal review procedures can't be followed.",
+      "why_it_matters": "Emergency authority bypasses normal competition and review safeguards. Without documented urgency, there is no legal basis for the bypass. If challenged, the emergency designation is unsupported.",
+      "what_to_do": "Rewrite the emergency justification to address three FAR 16.505(b)(4) requirements: (1) What circumstances create the urgency — not the scope, but the time pressure. (2) Why normal ordering procedures cannot be followed — what breaks if you wait? (3) What harm results from delay — mission impact, safety risk, schedule jeopardy. If no genuine urgency exists, remove the emergency designation.",
+      "who_needs_to_act": "The CO must validate the emergency justification. Legal should review. The task lead must provide the factual basis for urgency."
+    }
+  }
+}

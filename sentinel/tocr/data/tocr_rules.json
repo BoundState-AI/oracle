@@ -1,0 +1,304 @@
+{
+  "pack_id": "tocr-core-v1",
+  "version": "1.0.0",
+  "spec": "BS-SPEC-TOCR-001-REV1",
+  "description": "TOCR initial rule set — 14 rules across four basis types (Section 7)",
+  "rules": [
+    {
+      "rule_id": "TOCR-001",
+      "title": "Undisclosed Material Change",
+      "basis_type": "internal_control",
+      "authority_basis": ["FAR 1.602-1", "FAR 43.201", "Contract TO modification procedures"],
+      "applicability": {
+        "contract_type": ["IDIQ", "Task Order"],
+        "agency": ["NASA"],
+        "revision_status": ["draft", "released"]
+      },
+      "trigger": {
+        "all": ["material_change_detected", "not_listed_in_summary_of_changes"]
+      },
+      "finding": "Material revision change detected but not disclosed in Summary of Changes.",
+      "severity": "CRITICAL",
+      "review_priority": "CO",
+      "confidence_method": "deterministic",
+      "guidance": "Undisclosed material changes reduce reviewability and may bypass formal approval. Every material change must be visible to the Contracting Officer.",
+      "remediation": "Add change to Summary of Changes with description and rationale before submission."
+    },
+    {
+      "rule_id": "TOCR-002",
+      "title": "Out-of-Scope Work Type",
+      "basis_type": "regulatory",
+      "authority_basis": ["FAR 16.505(a)(2)", "FAR 16.505(b)(2)", "NFS 1816.506-70", "FAR 43.102(a)", "FAR 43.102(a)(3)"],
+      "applicability": {
+        "contract_type": ["IDIQ", "Task Order"],
+        "agency": ["NASA"],
+        "revision_status": ["draft", "released"]
+      },
+      "trigger": {
+        "all": ["scope_change_detected", "new_work_type_detected"]
+      },
+      "finding": "A fundamentally new work domain was introduced into an existing scope description. FAR 16.505(a)(2) requires orders to be within the scope of the contract. FAR 43.102(a) restricts contract modifications to Contracting Officers. FAR 43.102(a)(3) prohibits other Government personnel from directing or encouraging work that should be the subject of a contract modification. If the new work type does not match the task order's Skill field or the IDIQ contract statement of work, it requires a separate task order or contract amendment — not insertion into an existing description.",
+      "severity": "CRITICAL",
+      "review_priority": "LEGAL",
+      "confidence_method": "high",
+      "guidance": "FAR 16.505(a)(2): 'Orders must be within the scope, issued within the period of performance, and be within the maximum value of the contract.' NFS 1816.506-70: Task orders must align with the contract statement of work. FAR 43.102(a): 'Only contracting officers acting within the scope of their authority are empowered to execute contract modifications on behalf of the Government.' If the person who modified the TO is not a CO, and the modification constitutes a material scope change, FAR 43.102(a)(3) applies.",
+      "remediation": "Compare the new work type against the task order Skill field and the IDIQ contract statement of work. If the new domain (e.g., software/AI development) does not fall within the authorized skill category (e.g., 'Materials Research, Analysis, Testing, Process, and Hardware Development'), the scope change is out-of-scope. Remove the out-of-scope language and initiate a separate procurement action: either a new task order under an appropriate contract vehicle, or a contract amendment if the IDIQ scope needs to be expanded. Do not attempt to authorize out-of-scope work through a task order revision."
+    },
+    {
+      "rule_id": "TOCR-003",
+      "title": "Missing TOCR Documentation",
+      "basis_type": "contractual",
+      "authority_basis": ["NFS 1816.506-70", "FAR 43.102(b)", "ESSCA/MSFC ATOMS procedures"],
+      "applicability": {
+        "contract_type": ["IDIQ", "Task Order"],
+        "agency": ["NASA"],
+        "revision_status": ["draft", "released"]
+      },
+      "trigger": {
+        "all": ["scope_addition_detected"]
+      },
+      "finding": "Scope addition detected without corresponding TOCR documentation. NFS 1816.506-70 requires a Task Order Change Request with rationale, filed through ATOMS with sub-tasks, WBS codes, and justification. FAR 43.102(b) requires contract modifications to be priced before execution. The TOCR review flow requires: Branch Chief/Task Initiator creates TOCR, Technical Monitor verifies, COR reviews/approves, CO finalizes.",
+      "severity": "HIGH",
+      "review_priority": "CO",
+      "confidence_method": "deterministic",
+      "guidance": "NFS 1816.506-70 and ESSCA/MSFC ordering procedures require formal TOCR documentation for all scope additions. The ATOMS system tracks sub-tasks, requirements, funding WBS codes, and rationale. Without a TOCR, the change bypasses the standard review flow (Technical Monitor → COR → CO) and is not visible to the approval chain.",
+      "remediation": "File TOCR documentation through ATOMS before submitting the revision. The TOCR must include: (1) rationale for the scope addition, (2) a corresponding sub-task in ATOMS, (3) WBS codes and funding allocation, (4) defined deliverables and acceptance criteria. Route through the standard review flow: Branch Chief → Technical Monitor → COR → CO."
+    },
+    {
+      "rule_id": "TOCR-004",
+      "title": "Unfunded Scope",
+      "basis_type": "regulatory",
+      "authority_basis": ["FAR 52.232-22", "FAR 31.201-2(a)"],
+      "applicability": {
+        "contract_type": ["IDIQ", "Task Order"],
+        "agency": ["NASA"],
+        "revision_status": ["draft", "released"]
+      },
+      "trigger": {
+        "all": ["scope_addition_detected", "unfunded_scope"]
+      },
+      "finding": "Scope addition detected with $0 funding, no WBS code, and no charge code. Work cannot proceed without funding authorization.",
+      "severity": "CRITICAL",
+      "review_priority": "CO",
+      "confidence_method": "deterministic",
+      "guidance": "FAR 52.232-22 (Limitation of Funds) prohibits the contractor from performing work in excess of funded amounts. Scope without funding creates unauthorized commitment risk.",
+      "remediation": "Add funding, WBS code, and charge code for the new scope before submission. If funding is pending, document the funding plan."
+    },
+    {
+      "rule_id": "TOCR-005",
+      "title": "Missing Deliverables",
+      "basis_type": "contractual",
+      "authority_basis": ["NFS 1816.506", "NASA OIG guidance"],
+      "applicability": {
+        "contract_type": ["IDIQ", "Task Order"],
+        "agency": ["NASA"],
+        "revision_status": ["draft", "released"]
+      },
+      "trigger": {
+        "all": ["scope_addition_detected", "scope_with_no_deliverables"]
+      },
+      "finding": "Scope addition detected with zero deliverables in any sub-task. Every scope item should have measurable deliverables.",
+      "severity": "HIGH",
+      "review_priority": "SUPERVISORY",
+      "confidence_method": "deterministic",
+      "guidance": "NASA OIG has cited missing deliverables as a contract oversight deficiency. Deliverables enable progress tracking and acceptance criteria.",
+      "remediation": "Define deliverables for the new scope with acceptance criteria and due dates."
+    },
+    {
+      "rule_id": "TOCR-006",
+      "title": "ATOMS Process Bypass",
+      "basis_type": "local_policy",
+      "authority_basis": ["ESSCA/MSFC ordering procedures"],
+      "applicability": {
+        "contract_type": ["IDIQ", "Task Order"],
+        "agency": ["NASA"],
+        "local_pack": ["ESSCA-MSFC"],
+        "revision_status": ["draft", "released"]
+      },
+      "trigger": {
+        "all": ["scope_addition_detected", "scope_addition_no_sub_task"]
+      },
+      "finding": "Scope addition detected with no corresponding sub-task in ATOMS. ESSCA procedures require sub-task creation for all scope additions.",
+      "severity": "HIGH",
+      "review_priority": "SUPERVISORY",
+      "confidence_method": "deterministic",
+      "guidance": "ESSCA/MSFC ordering procedures require that all scope additions be tracked as sub-tasks in ATOMS for cost tracking and oversight.",
+      "remediation": "Create sub-task in ATOMS for the new scope before submitting revision."
+    },
+    {
+      "rule_id": "TOCR-007",
+      "title": "Emergency Justification Mismatch",
+      "basis_type": "regulatory",
+      "authority_basis": ["FAR 16.505(b)(4)"],
+      "applicability": {
+        "contract_type": ["IDIQ", "Task Order"],
+        "revision_status": ["draft", "released"]
+      },
+      "trigger": {
+        "all": ["emergency_designated", "emergency_justification_mismatch"]
+      },
+      "finding": "Emergency justification does not appear to cover all changes in this revision.",
+      "severity": "CRITICAL",
+      "review_priority": "CO",
+      "confidence_method": "medium",
+      "guidance": "FAR 16.505(b)(4) permits emergency procedures only when justified. The justification must cover all changes made under the emergency authority.",
+      "remediation": "Update emergency justification to address all changes in the revision, or remove non-emergency changes to a separate revision."
+    },
+    {
+      "rule_id": "TOCR-008",
+      "title": "Software QMS Trigger",
+      "basis_type": "regulatory",
+      "authority_basis": ["NASA-STD-8739.8B", "NFS 1852.223-70"],
+      "applicability": {
+        "contract_type": ["IDIQ", "Task Order"],
+        "agency": ["NASA"],
+        "revision_status": ["draft", "released"]
+      },
+      "trigger": {
+        "all": ["software_scope_present", "software_without_qms"]
+      },
+      "finding": "Software scope detected without a Quality Management System (QMS) plan. NASA-STD-8739.8B requires QMS for software development.",
+      "severity": "CRITICAL",
+      "review_priority": "LEGAL",
+      "confidence_method": "high",
+      "guidance": "NASA-STD-8739.8B mandates software assurance processes for all NASA software development. NFS 1852.223-70 requires contractor compliance with NASA safety and quality standards.",
+      "remediation": "Add QMS plan reference to the quality plan section. If software scope is new, initiate NASA-STD-8739.8B compliance planning."
+    },
+    {
+      "rule_id": "TOCR-009",
+      "title": "Unenforceable Draft Language",
+      "basis_type": "regulatory",
+      "authority_basis": ["FAR 43.301"],
+      "applicability": {
+        "contract_type": ["IDIQ", "Task Order"],
+        "revision_status": ["draft"]
+      },
+      "trigger": {
+        "all": ["scope_addition_detected", "revision_is_draft"]
+      },
+      "finding": "Scope language in unreleased draft has no contractual force. Work performed against draft scope is at contractor risk.",
+      "severity": "MEDIUM",
+      "review_priority": "ADVISORY",
+      "confidence_method": "deterministic",
+      "guidance": "FAR 43.301 requires formal modification for scope changes. Draft revisions are not binding until released and signed by the Contracting Officer.",
+      "remediation": "Do not authorize work against draft scope. Expedite revision release or obtain written CO authorization."
+    },
+    {
+      "rule_id": "TOCR-010",
+      "title": "Skills Mismatch",
+      "basis_type": "internal_control",
+      "authority_basis": ["ESSCA labor categories"],
+      "applicability": {
+        "contract_type": ["IDIQ", "Task Order"],
+        "agency": ["NASA"],
+        "revision_status": ["draft", "released"]
+      },
+      "trigger": {
+        "all": ["scope_change_detected", "skills_mismatch_detected"]
+      },
+      "finding": "Scope language requires skills not present in the defined labor category requirements.",
+      "severity": "HIGH",
+      "review_priority": "SUPERVISORY",
+      "confidence_method": "medium",
+      "guidance": "Task order labor categories should match the work described. Mismatched skills may indicate under-qualified staffing or scope creep beyond authorized capabilities.",
+      "remediation": "Update labor category requirements to include skills needed for the new scope, or adjust scope to match available skills."
+    },
+    {
+      "rule_id": "TOCR-011",
+      "title": "Quality Plan Inconsistency",
+      "basis_type": "internal_control",
+      "authority_basis": ["ESSCA QMS requirements"],
+      "applicability": {
+        "contract_type": ["IDIQ", "Task Order"],
+        "agency": ["NASA"],
+        "revision_status": ["draft", "released"]
+      },
+      "trigger": {
+        "all": ["quality_plan_change_detected", "quality_plan_changed_without_scope"]
+      },
+      "finding": "Quality Plan changed without matching scope justification.",
+      "severity": "HIGH",
+      "review_priority": "SUPERVISORY",
+      "confidence_method": "deterministic",
+      "guidance": "Quality plan changes should be driven by scope changes. Unexplained quality plan modifications may indicate reduced oversight.",
+      "remediation": "Provide scope justification for the quality plan change, or revert quality plan to prior revision."
+    },
+    {
+      "rule_id": "TOCR-012",
+      "title": "Undisclosed Team Change",
+      "basis_type": "internal_control",
+      "authority_basis": ["ESSCA ordering procedures"],
+      "applicability": {
+        "contract_type": ["IDIQ", "Task Order"],
+        "agency": ["NASA"],
+        "revision_status": ["draft", "released"]
+      },
+      "trigger": {
+        "all": ["team_change_detected", "not_listed_in_summary_of_changes"]
+      },
+      "finding": "Participating team modified without disclosure in Summary of Changes.",
+      "severity": "MEDIUM",
+      "review_priority": "SUPERVISORY",
+      "confidence_method": "deterministic",
+      "guidance": "Team changes affect cost allocation, subcontractor oversight, and organizational conflict of interest reviews. All team changes should be disclosed.",
+      "remediation": "Add team change to Summary of Changes with rationale."
+    },
+    {
+      "rule_id": "TOCR-013",
+      "title": "Cost Misallocation Risk",
+      "basis_type": "regulatory",
+      "authority_basis": ["FAR 31.205", "FAR 31.201-2"],
+      "applicability": {
+        "contract_type": ["IDIQ", "Task Order"],
+        "revision_status": ["draft", "released"]
+      },
+      "trigger": {
+        "all": ["cost_misallocation_risk"]
+      },
+      "finding": "Sub-task carrying costs for work described in another sub-task. Potential cost misallocation.",
+      "severity": "CRITICAL",
+      "review_priority": "LEGAL",
+      "confidence_method": "medium",
+      "guidance": "FAR 31.205 and FAR 31.201-2 require costs to be allocable to the contract and properly distributed. Cross-charging between sub-tasks may indicate cost misallocation.",
+      "remediation": "Review sub-task cost allocation. Ensure each sub-task carries only costs for work performed under that sub-task."
+    },
+    {
+      "rule_id": "TOCR-014",
+      "title": "Retroactive Scope Capture",
+      "basis_type": "regulatory",
+      "authority_basis": ["FAR 1.602-1"],
+      "applicability": {
+        "contract_type": ["IDIQ", "Task Order"],
+        "revision_status": ["draft", "released"]
+      },
+      "trigger": {
+        "all": ["scope_change_detected", "retroactive_scope_language"]
+      },
+      "finding": "Scope language describes previously performed unauthorized work. Potential ratification required.",
+      "severity": "CRITICAL",
+      "review_priority": "LEGAL",
+      "confidence_method": "medium",
+      "guidance": "FAR 1.602-1 establishes that only Contracting Officers have authority to obligate the government. Work performed before authorization requires ratification under FAR 1.602-3.",
+      "remediation": "Initiate ratification process per FAR 1.602-3. Do not use scope revision to retroactively authorize previously performed work."
+    },
+    {
+      "rule_id": "TOCR-015",
+      "title": "Emergency Justification Lacks Substantive Urgency",
+      "basis_type": "regulatory",
+      "authority_basis": ["FAR 16.505(b)(4)", "FAR 6.302-2", "ESSCA ordering procedures"],
+      "applicability": {
+        "contract_type": ["IDIQ", "Task Order"],
+        "revision_status": ["draft", "released"]
+      },
+      "trigger": {
+        "all": ["emergency_designated", "emergency_justification_no_urgency"]
+      },
+      "finding": "Emergency justification describes what is needed but does not explain why it is urgent. FAR 16.505(b)(4) requires documented urgency: (1) circumstances justifying the exception, (2) why normal ordering procedures cannot be followed, and (3) the impact of delay. A scope description is not an emergency justification.",
+      "severity": "CRITICAL",
+      "review_priority": "LEGAL",
+      "confidence_method": "deterministic",
+      "guidance": "Emergency authority under FAR 16.505(b)(4) exists to bypass normal competition and review when delay would cause unacceptable harm. The justification must explain urgency — not just what the change is, but why it cannot wait for standard review. Without substantive urgency language, the emergency designation is unsupported and the bypass of normal procedures is unauthorized.",
+      "remediation": "Rewrite the emergency justification to address all three FAR 16.505(b)(4) requirements: (1) What specific circumstances create the emergency — not the scope, but the urgency. (2) Why normal task order review procedures cannot be followed — what breaks if you wait 2-3 weeks for standard processing? (3) What harm results from delay — schedule impact, safety risk, hardware jeopardy, or mission consequence. If no genuine urgency exists, remove the emergency designation and process through standard review."
+    }
+  ]
+}

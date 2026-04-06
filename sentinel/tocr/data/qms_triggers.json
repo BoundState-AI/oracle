@@ -1,0 +1,37 @@
+{
+  "pack_id": "tocr-qms-triggers-v1",
+  "version": "1.0.0",
+  "description": "Scope language patterns that trigger QMS requirements. References NASA-STD-8739.8B and NFS 1852.223-70.",
+  "patterns": [
+    {
+      "category": "software_development",
+      "keywords": ["software", "code", "programming", "application", "database", "web service", "API development"],
+      "triggers_qms": true,
+      "standard": "NASA-STD-8739.8B"
+    },
+    {
+      "category": "ai_ml",
+      "keywords": ["artificial intelligence", "AI", "machine learning", "ML", "neural network", "deep learning", "algorithm", "model training"],
+      "triggers_qms": true,
+      "standard": "NASA-STD-8739.8B"
+    },
+    {
+      "category": "safety_critical",
+      "keywords": ["safety critical", "safety-critical", "life support", "flight software", "avionics", "GN&C"],
+      "triggers_qms": true,
+      "standard": "NASA-STD-8739.8B"
+    },
+    {
+      "category": "testing",
+      "keywords": ["test automation", "automated testing", "test framework", "verification software"],
+      "triggers_qms": true,
+      "standard": "NASA-STD-8739.8B"
+    },
+    {
+      "category": "integration",
+      "keywords": ["system integration", "software integration", "tool integration", "data integration"],
+      "triggers_qms": true,
+      "standard": "NASA-STD-8739.8B"
+    }
+  ]
+}
