@@ -61,11 +61,15 @@ import shutil
 import subprocess
 import sys
 import time
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from xml.etree import ElementTree as ET
 
 LOGGER = logging.getLogger("oracle")
+
+DOCX_NS = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
 
 BUILTIN_PACK_SPECS: tuple[dict[str, str], ...] = (
     {
@@ -1575,6 +1579,42 @@ def _apply_budget_reduction(
 # Review (wraps oracle2) — Section 7
 # ---------------------------------------------------------------------------
 
+def _extract_docx_text_fallback(document_path: Path) -> str:
+    """Extract readable text from a DOCX without external converters."""
+    try:
+        with zipfile.ZipFile(document_path) as docx_zip:
+            document_xml = docx_zip.read("word/document.xml")
+    except KeyError as exc:
+        raise RuntimeError(f"DOCX is missing word/document.xml: {document_path}") from exc
+    except zipfile.BadZipFile as exc:
+        raise RuntimeError(f"Invalid DOCX container: {document_path}") from exc
+
+    try:
+        root = ET.fromstring(document_xml)
+    except ET.ParseError as exc:
+        raise RuntimeError(f"Failed to parse DOCX XML: {document_path}") from exc
+
+    paragraphs: list[str] = []
+    for para in root.findall(".//w:p", DOCX_NS):
+        parts: list[str] = []
+        for node in para.iter():
+            tag = node.tag.rsplit("}", 1)[-1] if "}" in node.tag else node.tag
+            if tag == "t" and node.text:
+                parts.append(node.text)
+            elif tag == "tab":
+                parts.append("\t")
+            elif tag in {"br", "cr"}:
+                parts.append("\n")
+        text = "".join(parts).strip()
+        if text:
+            paragraphs.append(re.sub(r"[ \t]+", " ", text))
+
+    draft = "\n\n".join(paragraphs).strip()
+    if not draft:
+        raise RuntimeError(f"No readable text found in DOCX: {document_path}")
+    return draft
+
+
 def run_review(
     document_path: Path,
     pack_names: list[str],
@@ -1615,12 +1655,11 @@ def run_review(
         # PDF text quality check (Section 7.1)
         avg_chars = len(draft) / max(page_count, 1)
         if avg_chars < 100 and not force_text_only:
-            LOGGER.error(
+            raise RuntimeError(
                 f"PDF appears to be scanned/image-only (avg {avg_chars:.0f} chars/page). "
                 f"Use --force-text-only to proceed with extracted text as-is, "
                 f"or convert to text-based PDF first."
             )
-            sys.exit(1)
         elif avg_chars < 100:
             LOGGER.warning(
                 f"Low-quality PDF text extraction (avg {avg_chars:.0f} chars/page). "
@@ -1628,22 +1667,27 @@ def run_review(
             )
 
     elif suffix == ".docx":
-        # DOCX requires pandoc — no silent fallback (Section 7.1)
+        draft = ""
+        pandoc_error: str | None = None
         try:
             result = subprocess.run(
                 ["pandoc", str(document_path), "-t", "markdown"],
                 capture_output=True, text=True, timeout=30,
             )
             if result.returncode != 0:
-                raise RuntimeError(f"pandoc failed: {result.stderr}")
-            draft = result.stdout
+                pandoc_error = (result.stderr or "").strip() or "pandoc returned a non-zero exit code"
+            else:
+                draft = result.stdout
         except FileNotFoundError:
-            LOGGER.error(
-                "DOCX conversion requires pandoc. Install pandoc "
-                "(https://pandoc.org/installing.html) or convert the document "
-                "to PDF/markdown first."
-            )
-            sys.exit(1)
+            pandoc_error = "pandoc not installed"
+
+        if not draft.strip():
+            if pandoc_error:
+                LOGGER.warning(
+                    "DOCX markdown conversion unavailable (%s). Falling back to built-in DOCX text extraction.",
+                    pandoc_error,
+                )
+            draft = _extract_docx_text_fallback(document_path)
     else:
         draft = document_path.read_text(encoding="utf-8")
 

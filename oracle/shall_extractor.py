@@ -3,7 +3,7 @@
 Shall Statement Extractor - Local-Only Processing
 
 Extracts obligation statements from PDF text:
-  Pass 1: PyMuPDF text extraction + regex + MPR/FCR tag-aware parsing
+  Pass 1: PyMuPDF text extraction + regex + tagged requirement parsing
   Pass 1b: Header/footer dedup, enrichment (justification, keywords, applies_to)
   Pass 2: Local Ollama LLM classification (optional)
 
@@ -54,7 +54,7 @@ OBLIGATION_KEYWORDS = {
 OBLIGATION_PATTERN = re.compile(
     r"(?:^|(?<=\.\s)|(?<=\n))"
     r"([^.;\n]*?"
-    r"\b(shall not|shall|must not|must|is required to|is required|required|"
+    r"\b(shall not|shall|must not|must|is required to|is required|"
     r"is prohibited|prohibited|should not|should|may not|may|will)\b"
     r"[^.;\n]*)"
     r"[.;]?",
@@ -65,17 +65,22 @@ OBLIGATION_PATTERN = re.compile(
 SECTION_PATTERN = re.compile(
     r"(?:^|\n)\s*"
     r"(\d+(?:\.\d+)*[a-z]?(?:\(\d+\))*)"
-    r"[\s.:\-]+"
-    r"([A-Z][^\n]{0,120})",
+    r"(?:[\s.:\-]+([A-Z][^\n]{0,120})|\s*\n\s*([A-Z][^\n]{0,120}))",
     re.MULTILINE,
 )
 
-# MPR/FCR tag extraction
-MPR_TAG_PATTERN = re.compile(r"\[(MPR|FCR)\s*(\d+[a-z]?)\]", re.IGNORECASE)
+# Tagged requirement extraction
+MPR_TAG_PATTERN = re.compile(r"\[(MPR|FCR|NER)\s*(\d+[a-z]?)\]", re.IGNORECASE)
+TAGGED_SECTION_PATTERN = re.compile(
+    r"(?:^|\n)\s*"
+    r"(\d+(?:\.\d+)*[a-z]?(?:\(\d+\))*)"
+    r"\s+\[(?:MPR|FCR|NER)\s*\d+[a-z]?\]",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 # Justification/rationale markers
 RATIONALE_PATTERN = re.compile(
-    r"(?:Rationale|Note|Justification|Basis)\s*[:\-]\s*(.+?)(?=\n\s*\n|\n\s*\[(?:MPR|FCR)|\n\s*\d+(?:\.\d+)+\s+[A-Z]|\Z)",
+    r"(?:Rationale|Note|Justification|Basis)\s*[:\-]\s*(.+?)(?=\n\s*\n|\n\s*\[(?:MPR|FCR|NER)|\n\s*\d+(?:\.\d+)+\s+[A-Z]|\Z)",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -173,7 +178,7 @@ def _preprocess_page_text(raw_text: str) -> str:
     """Rejoin lines broken by PDF column/page layout.
 
     Preserves line breaks before section headers (e.g. '4.1.2 Title')
-    and before [MPR X]/[FCR X] tags.  Everything else gets joined so
+    and before tagged requirement markers. Everything else gets joined so
     that sentence-boundary regex can work on complete paragraphs.
     """
     lines = raw_text.split("\n")
@@ -190,10 +195,11 @@ def _preprocess_page_text(raw_text: str) -> str:
             joined.append("")
             continue
 
-        # New paragraph if line starts with section number or [MPR/FCR tag
+        # New paragraph if line starts with section number or a tagged requirement.
         starts_new = bool(
             re.match(r"\s*\d+(?:\.\d+)+[a-z]?\s+[A-Z]", line)
-            or re.match(r"\s*\[(?:MPR|FCR)\s*\d+", line, re.IGNORECASE)
+            or re.match(r"\s*\d+(?:\.\d+)+[a-z]?(?:\(\d+\))?\s*$", line)
+            or re.match(r"\s*\[(?:MPR|FCR|NER)\s*\d+", line, re.IGNORECASE)
         )
 
         if starts_new:
@@ -218,14 +224,13 @@ def _preprocess_page_text(raw_text: str) -> str:
 _MPR_NEXT_SECTION_PATTERN = re.compile(
     r"(?:^|\n)\s*"
     r"(\d+(?:\.\d+)*[a-z]?(?:\(\d+\))*)"
-    r"[\s.:\-]+"
-    r"([A-Z][^\n]{0,120})",
+    r"(?:[\s.:\-]+([A-Z][^\n]{0,120})|\s*\n\s*([A-Z][^\n]{0,120}))",
     re.MULTILINE,
 )
 
 
 def _find_mpr_block_end(text: str, start: int) -> int:
-    """Find the end of a tagged MPR/FCR block.
+    """Find the end of a tagged requirement block.
 
     Tagged requirements in NASA standards often continue across blank lines
     and sub-items like ``a.``, ``b.``, ``(1)``, etc.  We therefore do not
@@ -246,7 +251,7 @@ def _find_mpr_block_end(text: str, start: int) -> int:
 
 
 def _extract_mpr_blocks(text: str, page: int) -> list[dict]:
-    """Extract full requirement text between consecutive [MPR/FCR] tags."""
+    """Extract full requirement text between consecutive tagged requirement ids."""
     results = []
     for match in MPR_TAG_PATTERN.finditer(text):
         tag_type = match.group(1).upper()
@@ -257,7 +262,9 @@ def _extract_mpr_blocks(text: str, page: int) -> list[dict]:
         start = match.end()
         end = _find_mpr_block_end(text, start)
 
-        block = re.sub(r"\s+", " ", text[start:end]).strip().rstrip(".")
+        block = re.sub(r"\s+", " ", text[start:end]).strip()
+        block = re.sub(r"\s+(?:[a-z]\.|\(\d+\))\s*$", "", block, flags=re.IGNORECASE)
+        block = block.rstrip(".")
 
         if len(block) < 10:
             continue
@@ -319,6 +326,39 @@ def _extract_justification(full_page_text: str, tag_end_pos: int) -> str:
     return ""
 
 
+def _split_inline_rationale(text: str) -> tuple[str, str]:
+    parts = re.split(r"\bRationale:\s*", text, maxsplit=1, flags=re.IGNORECASE)
+    if len(parts) == 2:
+        lead = parts[0].strip()
+        rationale = parts[1].strip()
+        return lead, rationale
+    return text, ""
+
+
+def _clean_tagged_requirement_text(text: str) -> str:
+    cleaned = re.sub(
+        r"\s+\d+\.\d+\.\d+(?:\.\d+)*[a-z]?(?:\(\d+\))?\s*$",
+        "",
+        text.strip(),
+        flags=re.IGNORECASE,
+    )
+    return cleaned.strip().rstrip(".")
+
+
+def _statement_is_covered_by_tagged_requirement(
+    sentence: str,
+    page_number: int,
+    tagged_by_page: dict[int, list[str]],
+) -> bool:
+    sentence_norm = re.sub(r"\s+", " ", sentence).strip().lower()
+    if not sentence_norm:
+        return False
+    for tagged_text in tagged_by_page.get(page_number, []):
+        if sentence_norm in tagged_text or tagged_text in sentence_norm:
+            return True
+    return False
+
+
 # ============================================================================
 # Pass 1 extraction (improved)
 # ============================================================================
@@ -331,15 +371,63 @@ NOISE_TERMS = (
     "proprietary",
 )
 
+GENERIC_SKIP_PAGE_PATTERNS = (
+    re.compile(r"requirements identification matrix", re.IGNORECASE),
+    re.compile(r"requirement in this standard", re.IGNORECASE),
+    re.compile(r"for example purposes only", re.IGNORECASE),
+    re.compile(r"not requirements related to this standard", re.IGNORECASE),
+)
 
-def _detect_current_section(text: str, char_pos: int) -> str:
-    best_section = ""
+STRONG_GENERIC_KEYWORDS = {
+    "shall",
+    "shall not",
+    "must",
+    "must not",
+    "is required to",
+    "is required",
+    "is prohibited",
+    "prohibited",
+}
+
+
+def _detect_current_section(text: str, char_pos: int, carry_section: str = "") -> str:
+    best_section = carry_section
+    best_pos = -1
     for match in SECTION_PATTERN.finditer(text):
         if match.start() <= char_pos:
-            best_section = match.group(1).strip()
+            if match.start() >= best_pos:
+                best_section = match.group(1).strip()
+                best_pos = match.start()
+        else:
+            break
+    for match in TAGGED_SECTION_PATTERN.finditer(text):
+        if match.start() <= char_pos:
+            if match.start() >= best_pos:
+                best_section = match.group(1).strip()
+                best_pos = match.start()
         else:
             break
     return best_section
+
+
+def _detect_subitem_suffix(text: str, char_pos: int) -> str:
+    line_start = text.rfind("\n", 0, char_pos) + 1
+    prefix = text[line_start:char_pos]
+    letter_match = re.match(r"\s*([a-z])\.\s*$", prefix, re.IGNORECASE)
+    if letter_match:
+        return letter_match.group(1).lower()
+    numeric_match = re.match(r"\s*(\(\d+\))\s*$", prefix)
+    if numeric_match:
+        return numeric_match.group(1)
+    return ""
+
+
+def _append_subitem_suffix(section: str, suffix: str) -> str:
+    if not section or not suffix:
+        return section
+    if section.endswith(suffix):
+        return section
+    return f"{section}{suffix}"
 
 
 def _extract_subject_requirement(statement: str, keyword: str) -> tuple[str, str]:
@@ -363,6 +451,10 @@ def extract_pass1(pdf_path: Path) -> ExtractionResult:
     statements: list[ShallStatement] = []
     stmt_id = 0
     seen_mpr_ids: set[str] = set()
+    tagged_texts_by_page: dict[int, list[str]] = {}
+    first_tagged_page: int | None = None
+    last_tagged_page: int | None = None
+    carry_base_section = ""
 
     logger.info("Pass 1: extracting from %s (%d pages)", pdf_path.name, total_pages)
 
@@ -381,7 +473,8 @@ def extract_pass1(pdf_path: Path) -> ExtractionResult:
             if mpr_id in seen_mpr_ids:
                 continue
 
-            full_text = block["text"]
+            full_text, inline_rationale = _split_inline_rationale(block["text"])
+            full_text = _clean_tagged_requirement_text(full_text)
 
             # Skip change-log / front-matter noise: require obligation keyword
             # in the block text and minimum meaningful length
@@ -396,8 +489,20 @@ def extract_pass1(pdf_path: Path) -> ExtractionResult:
                 continue
 
             seen_mpr_ids.add(mpr_id)
+            tagged_texts_by_page.setdefault(block["page"], []).append(
+                re.sub(r"\s+", " ", full_text).strip().lower()
+            )
+            if first_tagged_page is None:
+                first_tagged_page = block["page"]
+            last_tagged_page = block["page"]
 
-            section = _detect_current_section(text, block["tag_start"])
+            base_section = _detect_current_section(text, block["tag_start"], carry_base_section)
+            section = _append_subitem_suffix(
+                base_section,
+                _detect_subitem_suffix(text, block["tag_start"]),
+            )
+            if base_section:
+                carry_base_section = base_section
 
             # Determine obligation keyword from the block text
             kw_match = re.search(
@@ -413,6 +518,9 @@ def extract_pass1(pdf_path: Path) -> ExtractionResult:
             justification = _extract_justification(
                 text, block["tag_start"] + len(full_text)
             )
+            if inline_rationale:
+                inline_rationale = re.sub(r"\s+", " ", inline_rationale).strip()
+                justification = f"{inline_rationale} {justification}".strip() if justification else inline_rationale
             keywords = _extract_keywords(full_text)
             applies_to = _classify_applicability(full_text, justification)
 
@@ -442,6 +550,8 @@ def extract_pass1(pdf_path: Path) -> ExtractionResult:
     # ------------------------------------------------------------------
     generic_statements: list[ShallStatement] = []
     raw_texts: list[str] = []
+    tagged_standard = len(seen_mpr_ids) >= 20
+    generic_carry_section = ""
 
     for page_idx in range(len(doc)):
         raw_text = doc[page_idx].get_text()
@@ -451,6 +561,13 @@ def extract_pass1(pdf_path: Path) -> ExtractionResult:
 
         text = _preprocess_page_text(raw_text)
         raw_texts.append(text)
+        page_number = page_idx + 1
+
+        if tagged_standard and first_tagged_page is not None and last_tagged_page is not None:
+            if page_number < first_tagged_page or page_number > last_tagged_page:
+                continue
+            if any(pattern.search(text) for pattern in GENERIC_SKIP_PAGE_PATTERNS):
+                continue
 
         for match in OBLIGATION_PATTERN.finditer(text):
             sentence = match.group(1).strip()
@@ -459,13 +576,21 @@ def extract_pass1(pdf_path: Path) -> ExtractionResult:
                 continue
             if any(noise in sentence.lower() for noise in NOISE_TERMS):
                 continue
+            if tagged_standard and keyword not in STRONG_GENERIC_KEYWORDS:
+                continue
 
-            # Skip if this text is already covered by an MPR block
+            # Skip if this text is already covered by a tagged requirement block.
             if MPR_TAG_PATTERN.search(sentence):
+                continue
+            if _statement_is_covered_by_tagged_requirement(
+                sentence,
+                page_number,
+                tagged_texts_by_page,
+            ):
                 continue
 
             obligation_type = OBLIGATION_KEYWORDS.get(keyword, "mandatory")
-            section = _detect_current_section(text, match.start())
+            section = _detect_current_section(text, match.start(), generic_carry_section)
             subject, requirement = _extract_subject_requirement(sentence, keyword)
             ctx_start = max(0, match.start() - 120)
             ctx_end = min(len(text), match.end() + 120)
@@ -478,7 +603,7 @@ def extract_pass1(pdf_path: Path) -> ExtractionResult:
             generic_statements.append(
                 ShallStatement(
                     id=stmt_id,
-                    page=page_idx + 1,
+                    page=page_number,
                     section=section,
                     obligation_keyword=keyword,
                     obligation_type=obligation_type,
@@ -490,6 +615,10 @@ def extract_pass1(pdf_path: Path) -> ExtractionResult:
                     applies_to=applies_to,
                 )
             )
+
+        page_tail_section = _detect_current_section(text, len(text), generic_carry_section)
+        if page_tail_section:
+            generic_carry_section = page_tail_section
 
     doc.close()
 
@@ -554,15 +683,15 @@ The following requirement tags were found on this page: {mpr_list}
 
 For EACH tagged requirement on this page, extract these fields by reading the actual document:
 
-1. "mpr_id": The tag exactly as written (e.g., "MPR 15", "FCR 3")
+1. "mpr_id": The tag exactly as written (e.g., "MPR 15", "FCR 3", "NER 12")
 2. "section": The section number this requirement falls under (e.g., "4.1.2", "4.2.1.3.a"). Read the section heading above the requirement.
-3. "shall_text": The COMPLETE requirement text from the [MPR/FCR X] tag through the end of the requirement. Include all sentences — do not truncate.
+3. "shall_text": The COMPLETE requirement text from the tagged requirement through the end of the requirement. Include all sentences — do not truncate.
 4. "justification": Any rationale, note, or guidance text that follows the requirement. This is often italicized, indented, or preceded by "Rationale:", "Note:", "Guidance:", or appears as explanatory text below the requirement. If none, use empty string.
 5. "keywords": 3-7 domain-specific technical terms from the requirement (e.g., "flammability", "hydrogen", "fracture-critical", "NDE", "outgassing")
 6. "applies_to": Classification tags that describe what this requirement applies to. Choose from: human_rated, mission_critical, oxygen_service, hydrogen_service, propellant, pressure_systems, structural, thermal, contamination_control, metallic, nonmetallic, electrical, welding_joining, testing, documentation, vendor_control, additive_manufacturing
 
 Return ONLY valid JSON in this format:
-{{"requirements": [{{"mpr_id": "MPR 15", "section": "4.1.2", "shall_text": "...", "justification": "...", "keywords": [...], "applies_to": [...]}}]}}
+{{"requirements": [{{"mpr_id": "NER 12", "section": "4.1.2", "shall_text": "...", "justification": "...", "keywords": [...], "applies_to": [...]}}]}}
 """
 
 

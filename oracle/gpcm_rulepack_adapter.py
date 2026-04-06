@@ -22,8 +22,8 @@ from typing import Any
 import fitz  # PyMuPDF
 
 
-TAG_RE = re.compile(r"\[(MPR|FCR)\s+(\d+)\]", re.IGNORECASE)
-TAG_VALUE_RE = re.compile(r"\b(MPR|FCR)\s+(\d+)\b", re.IGNORECASE)
+TAG_RE = re.compile(r"\[(MPR|FCR|NER)\s+(\d+[a-z]?)\]", re.IGNORECASE)
+TAG_VALUE_RE = re.compile(r"\b(MPR|FCR|NER)\s+(\d+[a-z]?)\b", re.IGNORECASE)
 SECTION_RE = re.compile(r"^\d+(?:\.\d+)*(?:[a-z](?:\(\d+\))?)?$", re.IGNORECASE)
 OBLIGATION_RE = re.compile(
     r"\b(shall not|shall|must not|must|required|may not)\b", re.IGNORECASE
@@ -207,7 +207,7 @@ def canonical_requirement_id(statement: dict[str, Any], source_tag: str | None =
     tag = normalize_source_tag(source_tag or statement.get("mpr_id", ""))
     if tag:
         tag_type, tag_num = tag.split()
-        if tag_type == "MPR":
+        if tag_type in {"MPR", "NER"}:
             return tag_num
         return f"{tag_type.lower()}-{tag_num}"
     return _normalized_requirement_id(statement.get("id"))
@@ -385,6 +385,8 @@ def clean_justification(text: str) -> str:
     cleaned = re.sub(r"^\[?Rationale:\s*", "", cleaned, flags=re.IGNORECASE)
     cleaned = cleaned.rstrip("]")
     cleaned = normalize_space(cleaned)
+    if not re.search(r"[A-Za-z0-9]", cleaned):
+        return ""
     return cleaned
 
 
@@ -688,7 +690,7 @@ def dedupe_requirements(requirements: list[dict[str, Any]]) -> list[dict[str, An
     best_by_key: dict[str, dict[str, Any]] = {}
 
     for requirement in requirements:
-        key = normalize_line(requirement["shall_text"])
+        key = normalize_line(strip_leading_subitem_marker(strip_leading_tag(requirement["shall_text"])))
         score = 0
         if requirement.get("section"):
             score += 2
