@@ -30,10 +30,22 @@ from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
-from oracle.oracle2 import run_review
+from oracle.cli import (
+    _load_manifest,
+    _render_pack_for_oracle,
+    _resolve_pack_dir,
+    format_findings_report,
+    generate_pack as cli_generate_pack,
+    load_pack as cli_load_pack,
+    promote_pack as cli_promote_pack,
+    register_pack as cli_register_pack,
+    remove_pack as cli_remove_pack,
+    run_review as cli_run_review,
+)
+from oracle.oracle2 import compute_metrics
 from oracle.oracle2_adapter import build_review_result
 
 LOGGER = logging.getLogger("oracle.server")
@@ -168,13 +180,20 @@ def _session_manifest(session: dict[str, Any]) -> dict[str, Any]:
     """Return the JSON-serializable subset of a session."""
     return {
         "session_id": session["session_id"],
+        "job_type": session.get("job_type", "review"),
         "mode": session.get("mode", "review"),
         "status": session.get("status", "processing"),
         "error": session.get("error"),
         "critique": session.get("critique"),
+        "findings_report": session.get("findings_report"),
+        "metrics": session.get("metrics"),
         "original_name": session.get("original_name"),
         "file_path": session.get("file_path"),
         "output_dir": session.get("output_dir"),
+        "pack_names": session.get("pack_names", []),
+        "pack_parts": session.get("pack_parts", {}),
+        "generated_pack": session.get("generated_pack"),
+        "pack_manifest_snapshot": session.get("pack_manifest_snapshot"),
     }
 
 
@@ -214,10 +233,11 @@ def _load_session_from_disk(session_id: str) -> dict[str, Any] | None:
 
     output_dir = session.get("output_dir")
     if output_dir and session.get("status") in ("complete", "ready_to_generate"):
-        try:
-            session["review_result"] = build_review_result(Path(output_dir))
-        except Exception:
-            LOGGER.exception("Failed to rebuild review result for session %s", session_id)
+        if session.get("job_type", "review") == "review":
+            try:
+                session["review_result"] = build_review_result(Path(output_dir))
+            except Exception:
+                LOGGER.exception("Failed to rebuild review result for session %s", session_id)
 
     return session
 
@@ -236,6 +256,79 @@ def _get_session(session_id: str) -> dict[str, Any] | None:
     return None
 
 
+def _pack_dir() -> Path:
+    return _resolve_pack_dir()
+
+
+def _pack_summary(entry: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "name": entry.get("name") or entry.get("slug"),
+        "slug": entry.get("slug"),
+        "schema": entry.get("schema"),
+        "status": entry.get("status"),
+        "standard_id": entry.get("standard_id"),
+        "description": entry.get("description"),
+        "rule_count": entry.get("rule_count"),
+        "version": entry.get("version"),
+        "extraction_status": entry.get("extraction_status"),
+        "failed_page_ranges": entry.get("failed_page_ranges", []),
+        "added_at": entry.get("added_at"),
+        "promoted_at": entry.get("promoted_at"),
+        "promoted_by": entry.get("promoted_by"),
+        "content_hash": entry.get("content_hash"),
+        "source_document": entry.get("source_document"),
+        "source_document_hash": entry.get("source_document_hash"),
+    }
+
+
+def _pack_detail(pack_name: str, verbose: bool = False) -> dict[str, Any]:
+    pack_dir = _pack_dir()
+    pack_data, resolved = cli_load_pack(pack_name, pack_dir)
+    manifest = _load_manifest(pack_dir)
+    entry = manifest["packs"].get(resolved, {})
+    meta = pack_data.get("oracle_metadata", {})
+
+    detail = {
+        **_pack_summary(entry),
+        "slug": resolved,
+        "schema_version": pack_data.get("schema_version"),
+        "standard_title": pack_data.get("standard_title"),
+        "oracle_metadata": meta,
+        "chunk_failures": pack_data.get("chunk_failures", []),
+        "rule_pack_id": pack_data.get("rule_pack_id", resolved),
+        "raw": pack_data if verbose else None,
+        "rendered": (
+            _render_pack_for_oracle(
+                pack_data,
+                pack_data.get("rule_pack_id", resolved),
+            )
+            if verbose
+            else None
+        ),
+    }
+    return detail
+
+
+def _pack_snapshot(output_dir: Path) -> dict[str, Any] | None:
+    snapshot_path = output_dir / "pack_manifest_snapshot.json"
+    if not snapshot_path.exists():
+        return None
+    try:
+        return json.loads(snapshot_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        LOGGER.warning("Failed to decode pack manifest snapshot at %s", snapshot_path)
+        return None
+
+
+def _parse_json_string(value: str | None, default: Any) -> Any:
+    if not value:
+        return default
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON payload: {exc}") from exc
+
+
 # ---------------------------------------------------------------------------
 # Background Review Runner
 # ---------------------------------------------------------------------------
@@ -243,64 +336,71 @@ def _get_session(session_id: str) -> dict[str, Any] | None:
 
 def _run_review_background(
     session_id: str,
-    draft_text: str,
     file_path: Path,
     mode: str,
     output_dir: Path,
     msg_queue: queue.Queue[str | None],
+    pack_names: list[str],
+    pack_parts: dict[str, list[int]] | None,
+    max_rounds: int,
 ) -> None:
-    """Run oracle2 review in a background thread, pushing log messages to queue."""
+    """Run CLI-backed oracle review in a background thread."""
 
-    # Attach log handler to capture oracle2 + httpx output
     handler = SessionLogHandler(msg_queue)
     handler.setFormatter(logging.Formatter("%(message)s"))
 
+    oracle_logger = logging.getLogger("oracle")
     oracle2_logger = logging.getLogger("oracle2")
     httpx_logger = logging.getLogger("httpx")
+    oracle_logger.addHandler(handler)
     oracle2_logger.addHandler(handler)
     httpx_logger.addHandler(handler)
 
     try:
-        msg_queue.put("Extracting document content...")
-
-        msg_queue.put(f"Document loaded — {len(draft_text):,} characters extracted")
         msg_queue.put(f"Mode: {mode} — starting Oracle review...")
-        max_rounds = _max_rounds_for_mode(mode)
+        if pack_names:
+            msg_queue.put(f"Authority packs: {', '.join(pack_names)}")
         msg_queue.put(f"Review budget: {max_rounds} round(s)")
 
-        run_review(
-            draft=draft_text,
-            document_path=str(file_path),
+        review_session = cli_run_review(
+            document_path=file_path,
+            pack_names=pack_names,
+            pack_dir=_pack_dir(),
+            pack_parts=pack_parts,
             max_rounds=max_rounds,
             output_dir=output_dir,
+            force_text_only=False,
         )
 
         msg_queue.put("Review complete — parsing results...")
 
-        result = build_review_result(output_dir)
+        review_result = build_review_result(output_dir)
+        findings_report = format_findings_report(
+            review_session,
+            _pack_dir(),
+            pack_names=pack_names,
+            output_path=output_dir / "findings_report.md",
+        )
+        metrics = compute_metrics(review_session)
+        (output_dir / "metrics.json").write_text(
+            json.dumps(metrics, indent=2),
+            encoding="utf-8",
+        )
 
-        # Build critique markdown
-        critique_lines: list[str] = []
-        for rd in result.rounds:
-            for issue in rd.normalized_issues:
-                severity_badge = f"**[{issue.severity.upper()}]**"
-                critique_lines.append(
-                    f"- {severity_badge} **{issue.title}**: {issue.core_problem}"
-                )
-                if issue.recommended_fix:
-                    critique_lines.append(f"  - *Fix:* {issue.recommended_fix}")
-        critique_md = "\n".join(critique_lines) if critique_lines else "No issues found."
-
-        # Store session
         _sessions[session_id] = {
             "session_id": session_id,
+            "job_type": "review",
             "mode": mode,
             "original_name": file_path.name,
             "file_path": str(file_path),
-            "draft_text": draft_text,
-            "review_result": result,
+            "review_result": review_result,
             "output_dir": str(output_dir),
-            "critique": critique_md,
+            "pack_names": pack_names,
+            "pack_parts": pack_parts or {},
+            "critique": findings_report,
+            "findings_report": findings_report,
+            "metrics": metrics,
+            "pack_manifest_snapshot": _pack_snapshot(output_dir),
             "status": "complete" if mode in ("polish", "rewrite") else "ready_to_generate",
             "error": None,
         }
@@ -308,14 +408,17 @@ def _run_review_background(
 
         msg_queue.put("All oracles have reported — finalizing...")
 
-    except Exception as e:
-        LOGGER.exception("oracle2 review failed")
+    except BaseException as e:
+        LOGGER.exception("oracle review failed")
         _sessions[session_id] = {
             "session_id": session_id,
+            "job_type": "review",
             "mode": mode,
             "original_name": file_path.name,
             "file_path": str(file_path),
             "output_dir": str(output_dir),
+            "pack_names": pack_names,
+            "pack_parts": pack_parts or {},
             "status": "error",
             "error": str(e),
         }
@@ -323,9 +426,76 @@ def _run_review_background(
         msg_queue.put(f"ERROR: {e}")
 
     finally:
+        oracle_logger.removeHandler(handler)
         oracle2_logger.removeHandler(handler)
         httpx_logger.removeHandler(handler)
         msg_queue.put(None)  # Sentinel: stream is done
+
+
+def _run_pack_generate_background(
+    session_id: str,
+    pdf_path: Path,
+    output_dir: Path,
+    msg_queue: queue.Queue[str | None],
+    name: str | None,
+    force_type: str | None,
+    use_vision: bool,
+    allow_partial: bool,
+    overwrite: bool,
+) -> None:
+    """Generate and register a compliance pack in the background."""
+    handler = SessionLogHandler(msg_queue)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+
+    oracle_logger = logging.getLogger("oracle")
+    httpx_logger = logging.getLogger("httpx")
+    oracle_logger.addHandler(handler)
+    httpx_logger.addHandler(handler)
+
+    try:
+        msg_queue.put("Starting pack generation...")
+        pack_slug = cli_generate_pack(
+            pdf_path=pdf_path,
+            name=name,
+            output_dir=output_dir,
+            pack_dir=_pack_dir(),
+            use_vision=use_vision,
+            force_type=force_type,
+            register=True,
+            allow_partial=allow_partial,
+            overwrite=overwrite,
+            non_interactive=True,
+        )
+        detail = _pack_detail(pack_slug, verbose=False)
+        _sessions[session_id] = {
+            "session_id": session_id,
+            "job_type": "pack_generate",
+            "status": "complete",
+            "error": None,
+            "original_name": pdf_path.name,
+            "file_path": str(pdf_path),
+            "output_dir": str(output_dir),
+            "generated_pack": detail,
+        }
+        _persist_session_state(_sessions[session_id])
+        msg_queue.put(f"Pack generated: {pack_slug}")
+    except BaseException as e:
+        LOGGER.exception("pack generation failed")
+        _sessions[session_id] = {
+            "session_id": session_id,
+            "job_type": "pack_generate",
+            "status": "error",
+            "error": str(e),
+            "original_name": pdf_path.name,
+            "file_path": str(pdf_path),
+            "output_dir": str(output_dir),
+        }
+        _persist_session_state(_sessions[session_id])
+        msg_queue.put(f"ERROR: {e}")
+    finally:
+        oracle_logger.removeHandler(handler)
+        httpx_logger.removeHandler(handler)
+        msg_queue.put(None)
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +508,9 @@ async def analyze(
     request: Request,
     file: UploadFile = File(...),
     mode: str = Form("review"),
+    packs: str = Form("[]"),
+    pack_parts: str = Form("{}"),
+    max_rounds: int | None = Form(None),
 ):
     """Upload a document and start review in background.
 
@@ -353,31 +526,33 @@ async def analyze(
     session_dir = SESSIONS_DIR / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
 
+    pack_names = _parse_json_string(packs, [])
+    parsed_pack_parts = _parse_json_string(pack_parts, {})
+    if not isinstance(pack_names, list):
+        raise HTTPException(status_code=400, detail="packs must be a JSON array")
+    if not isinstance(parsed_pack_parts, dict):
+        raise HTTPException(status_code=400, detail="pack_parts must be a JSON object")
+
     original_name = file.filename or "document"
     file_path = session_dir / original_name
     content = await file.read()
     file_path.write_bytes(content)
 
-    # Extract text before spawning thread (fast, validates file)
-    try:
-        draft_text = extract_text(file_path)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-    if not draft_text.strip():
-        raise HTTPException(status_code=400, detail="Could not extract text from document")
-
     # Create message queue and start background thread
     msg_queue: queue.Queue[str | None] = queue.Queue()
     output_dir = session_dir / "oracle_output"
+    review_budget = max_rounds or _max_rounds_for_mode(mode)
 
     # Store queue for the stream endpoint to read
     _sessions[session_id] = {
         "session_id": session_id,
+        "job_type": "review",
         "mode": mode,
         "original_name": original_name,
         "file_path": str(file_path),
         "output_dir": str(output_dir),
+        "pack_names": pack_names,
+        "pack_parts": parsed_pack_parts,
         "status": "processing",
         "msg_queue": msg_queue,
         "error": None,
@@ -386,12 +561,25 @@ async def analyze(
 
     thread = threading.Thread(
         target=_run_review_background,
-        args=(session_id, draft_text, file_path, mode, output_dir, msg_queue),
+        args=(
+            session_id,
+            file_path,
+            mode,
+            output_dir,
+            msg_queue,
+            pack_names,
+            parsed_pack_parts,
+            review_budget,
+        ),
         daemon=True,
     )
     thread.start()
 
-    return {"session_id": session_id, "status": "processing"}
+    return {
+        "session_id": session_id,
+        "status": "processing",
+        "job_type": "review",
+    }
 
 
 @app.get("/oracle/stream/{session_id}")
@@ -439,7 +627,7 @@ async def stream(request: Request, session_id: str):
             if msg is None:
                 # Sentinel — review is done, send final result
                 # Re-fetch session (background thread updated it)
-                final = _sessions.get(session_id, {})
+                final = _get_session(session_id) or {}
                 if final.get("status") == "error":
                     yield f"event: error\ndata: {final.get('error', 'Unknown error')}\n\n"
                 else:
@@ -477,17 +665,43 @@ async def session_status(request: Request, session_id: str):
 def _build_session_payload(session: dict[str, Any]) -> dict[str, Any]:
     """Build the JSON payload returned by done events and polling status."""
     session_id = session["session_id"]
+    job_type = session.get("job_type", "review")
     mode = session.get("mode", "review")
     status = session.get("status", "complete")
-    critique = session.get("critique")
-    return {
+    base = {
         "session_id": session_id,
+        "job_type": job_type,
         "mode": mode,
         "status": status,
         "error": session.get("error"),
+    }
+
+    if job_type == "pack_generate":
+        return {
+            **base,
+            "pack": session.get("generated_pack"),
+        }
+
+    critique = session.get("critique")
+    report_available = status in ("complete", "ready_to_generate")
+    return {
+        **base,
         "critique": critique if mode == "review" else None,
-        "docx_url": f"/oracle/download/{session_id}/docx" if status in ("complete", "ready_to_generate") else None,
-        "pptx_url": f"/oracle/download/{session_id}/pptx" if status in ("complete", "ready_to_generate") else None,
+        "findings_report": session.get("findings_report"),
+        "metrics": session.get("metrics"),
+        "pack_names": session.get("pack_names", []),
+        "pack_parts": session.get("pack_parts", {}),
+        "pack_manifest_snapshot": session.get("pack_manifest_snapshot"),
+        "docx_url": f"/oracle/download/{session_id}/docx" if report_available else None,
+        "pptx_url": f"/oracle/download/{session_id}/pptx" if report_available else None,
+        "report_url": f"/oracle/download/{session_id}/report.md" if report_available else None,
+        "metrics_url": f"/oracle/download/{session_id}/metrics.json" if report_available else None,
+        "compliance_context_url": (
+            f"/oracle/download/{session_id}/compliance_context.txt" if report_available else None
+        ),
+        "pack_snapshot_url": (
+            f"/oracle/download/{session_id}/pack_manifest_snapshot.json" if report_available else None
+        ),
     }
 
 
@@ -538,7 +752,152 @@ def _clean_log_message(msg: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Generate + Download (unchanged)
+# Pack Library
+# ---------------------------------------------------------------------------
+
+
+class PromotePackRequest(BaseModel):
+    reviewer: str
+    notes: str | None = None
+    allow_partial_promotion: bool = False
+    override_hash_mismatch: bool = False
+
+
+@app.get("/oracle/packs")
+async def list_packs(request: Request):
+    await verify_api_key(request)
+    manifest = _load_manifest(_pack_dir())
+    packs = [
+        _pack_summary(entry)
+        for entry in sorted(
+            manifest.get("packs", {}).values(),
+            key=lambda item: item.get("slug", ""),
+        )
+    ]
+    return {"packs": packs}
+
+
+@app.post("/oracle/packs/import")
+async def import_pack(
+    request: Request,
+    file: UploadFile = File(...),
+    name: str | None = Form(None),
+    description: str | None = Form(None),
+    allow_partial: bool = Form(False),
+    overwrite: bool = Form(False),
+):
+    await verify_api_key(request)
+
+    session_dir = SESSIONS_DIR / f"pack-import-{uuid.uuid4().hex[:12]}"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    file_path = session_dir / (file.filename or "rulepack.json")
+    file_path.write_bytes(await file.read())
+
+    try:
+        pack_slug = cli_register_pack(
+            file_path,
+            _pack_dir(),
+            name=name,
+            description=description,
+            allow_partial=allow_partial,
+            overwrite=overwrite,
+        )
+        return {"status": "complete", "pack": _pack_detail(pack_slug, verbose=False)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/oracle/packs/generate")
+async def generate_pack_endpoint(
+    request: Request,
+    file: UploadFile = File(...),
+    name: str | None = Form(None),
+    force_type: str | None = Form(None),
+    use_vision: bool = Form(True),
+    allow_partial: bool = Form(False),
+    overwrite: bool = Form(False),
+):
+    await verify_api_key(request)
+
+    session_id = uuid.uuid4().hex[:12]
+    session_dir = SESSIONS_DIR / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    original_name = file.filename or "pack-source.pdf"
+    file_path = session_dir / original_name
+    file_path.write_bytes(await file.read())
+    output_dir = session_dir / "pack_output"
+    msg_queue: queue.Queue[str | None] = queue.Queue()
+
+    _sessions[session_id] = {
+        "session_id": session_id,
+        "job_type": "pack_generate",
+        "status": "processing",
+        "error": None,
+        "original_name": original_name,
+        "file_path": str(file_path),
+        "output_dir": str(output_dir),
+        "msg_queue": msg_queue,
+    }
+    _persist_session_state(_sessions[session_id])
+
+    thread = threading.Thread(
+        target=_run_pack_generate_background,
+        args=(
+            session_id,
+            file_path,
+            output_dir,
+            msg_queue,
+            name,
+            force_type,
+            use_vision,
+            allow_partial,
+            overwrite,
+        ),
+        daemon=True,
+    )
+    thread.start()
+
+    return {"session_id": session_id, "status": "processing", "job_type": "pack_generate"}
+
+
+@app.get("/oracle/packs/{name}")
+async def show_pack(request: Request, name: str, verbose: bool = False):
+    await verify_api_key(request)
+    try:
+        return _pack_detail(name, verbose=verbose)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/oracle/packs/{name}/promote")
+async def promote_pack_endpoint(request: Request, name: str, body: PromotePackRequest):
+    await verify_api_key(request)
+    try:
+        cli_promote_pack(
+            pack_name=name,
+            pack_dir=_pack_dir(),
+            reviewer=body.reviewer,
+            notes=body.notes,
+            allow_partial=body.allow_partial_promotion,
+            override_hash_mismatch=body.override_hash_mismatch,
+            auto_confirm=True,
+        )
+        return {"status": "complete", "pack": _pack_detail(name, verbose=False)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/oracle/packs/{name}")
+async def delete_pack(request: Request, name: str):
+    await verify_api_key(request)
+    if not cli_remove_pack(name, _pack_dir()):
+        raise HTTPException(status_code=404, detail=f"Pack not found: {name}")
+    return {"status": "complete", "removed": name}
+
+
+# ---------------------------------------------------------------------------
+# Generate + Download
 # ---------------------------------------------------------------------------
 
 
@@ -576,11 +935,54 @@ async def download(request: Request, session_id: str, fmt: str):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
+    original_name = session["original_name"]
+    base_name = Path(original_name).stem
+    output_dir = Path(session["output_dir"])
+
+    if fmt == "report.md":
+        report_path = output_dir / "findings_report.md"
+        if not report_path.exists():
+            raise HTTPException(status_code=404, detail="Findings report not found")
+        return FileResponse(
+            str(report_path),
+            media_type="text/markdown; charset=utf-8",
+            filename=f"{base_name}_findings_report.md",
+        )
+
+    if fmt == "metrics.json":
+        metrics_path = output_dir / "metrics.json"
+        if not metrics_path.exists():
+            raise HTTPException(status_code=404, detail="Metrics not found")
+        return FileResponse(
+            str(metrics_path),
+            media_type="application/json",
+            filename=f"{base_name}_metrics.json",
+        )
+
+    if fmt == "compliance_context.txt":
+        context_path = output_dir / "compliance_context.txt"
+        if not context_path.exists():
+            raise HTTPException(status_code=404, detail="Compliance context not found")
+        return FileResponse(
+            str(context_path),
+            media_type="text/plain; charset=utf-8",
+            filename=f"{base_name}_compliance_context.txt",
+        )
+
+    if fmt == "pack_manifest_snapshot.json":
+        snapshot_path = output_dir / "pack_manifest_snapshot.json"
+        if not snapshot_path.exists():
+            raise HTTPException(status_code=404, detail="Pack snapshot not found")
+        return FileResponse(
+            str(snapshot_path),
+            media_type="application/json",
+            filename=f"{base_name}_pack_manifest_snapshot.json",
+        )
+
     review_result = session.get("review_result")
     if not review_result:
         raise HTTPException(status_code=400, detail="Review not complete")
 
-    from fastapi.responses import FileResponse
     try:
         from oracle.document_generator import generate_docx, generate_pptx
     except ModuleNotFoundError as exc:
@@ -589,10 +991,7 @@ async def download(request: Request, session_id: str, fmt: str):
             detail=f"Document generation dependency missing: {exc.name}",
         ) from exc
 
-    original_name = session["original_name"]
-    base_name = Path(original_name).stem
     doc_title = f"{base_name} \u2014 Oracle Review"
-    output_dir = Path(session["output_dir"])
 
     if fmt == "docx":
         out_path = output_dir / f"{base_name}_polished.docx"
@@ -601,7 +1000,7 @@ async def download(request: Request, session_id: str, fmt: str):
                 final_draft=review_result.final_draft,
                 output_path=out_path,
                 title=doc_title,
-                subtitle=f"Reviewed by ORACLE \u2022 {review_result.total_rounds} round(s) \u2022 {'Converged' if review_result.converged else 'Max rounds reached'}",
+                subtitle=f"Oracle2 Multi-Oracle Review | {review_result.total_rounds} round(s) | {'Converged' if review_result.converged else 'Maximum Reasoning'}",
             )
         except ModuleNotFoundError as exc:
             raise HTTPException(
@@ -621,7 +1020,7 @@ async def download(request: Request, session_id: str, fmt: str):
                 final_draft=review_result.final_draft,
                 output_path=out_path,
                 title=doc_title,
-                subtitle=f"Reviewed by ORACLE \u2022 {review_result.total_rounds} round(s)",
+                subtitle=f"Oracle2 Multi-Oracle Review | {review_result.total_rounds} round(s)",
             )
         except ModuleNotFoundError as exc:
             raise HTTPException(

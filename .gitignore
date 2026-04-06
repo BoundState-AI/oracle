@@ -28,6 +28,7 @@ venv/
 # ORACLE runtime artifacts (generated, not committed)
 oracle_packs/
 oracle_reviews/
+oracle_sessions/
 
 # OS
 .DS_Store

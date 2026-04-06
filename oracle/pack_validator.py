@@ -306,12 +306,15 @@ def validate_pack(pack_data: dict[str, Any]) -> list[str]:
     # Try jsonschema library first (full validation)
     try:
         import jsonschema
-        validator = jsonschema.Draft202012Validator(schema)
+        validator_cls = getattr(jsonschema, "Draft202012Validator", None)
+        if validator_cls is None:
+            validator_cls = jsonschema.validators.validator_for(schema)
+        validator = validator_cls(schema)
         for error in sorted(validator.iter_errors(pack_data), key=lambda e: list(e.path)):
             path = " → ".join(str(p) for p in error.absolute_path) or "(root)"
             errors.append(f"[{path}] {error.message}")
         return errors
-    except ImportError:
+    except (ImportError, AttributeError):
         LOGGER.debug("jsonschema not installed — using structural validation fallback")
 
     # Fallback: manual structural checks for required fields
