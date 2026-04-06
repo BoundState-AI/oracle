@@ -132,6 +132,7 @@ function startStatusPolling(
   sessionId: string,
   onDone: (data: Record<string, unknown>) => void,
   onError: (err: string) => void,
+  onProgress?: (data: Record<string, unknown>) => void,
 ): () => void {
   let active = true;
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -154,6 +155,7 @@ function startStatusPolling(
       const data = (await res.json()) as Record<string, unknown>;
       const status = data.status as string | undefined;
       if (status === "processing") {
+        onProgress?.(data);
         timer = setTimeout(tick, 5000);
         return;
       }
@@ -186,6 +188,12 @@ function parsePackParts(parts: string): number[] {
     .split(",")
     .map((part) => Number(part.trim()))
     .filter((part) => Number.isInteger(part) && part > 0);
+}
+
+function readLogMessages(data: Record<string, unknown>): string[] {
+  const value = data.log_messages;
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry): entry is string => typeof entry === "string").slice(-20);
 }
 
 export function OracleWorkspace() {
@@ -364,7 +372,10 @@ export function OracleWorkspace() {
               if (prev.step !== "analyzing") return prev;
               return {
                 ...prev,
-                logMessages: [...prev.logMessages, err].slice(-20),
+                logMessages: [
+                  ...prev.logMessages,
+                  `${err} Oracle is still running — continuing via polling.`,
+                ].slice(-20),
               };
             });
 
@@ -377,6 +388,17 @@ export function OracleWorkspace() {
                   return {
                     ...prev,
                     logMessages: [...prev.logMessages, `Polling: ${pollErr}`].slice(-20),
+                  };
+                });
+              },
+              (data) => {
+                const logMessages = readLogMessages(data);
+                if (logMessages.length === 0) return;
+                setPhase((prev) => {
+                  if (prev.step !== "analyzing") return prev;
+                  return {
+                    ...prev,
+                    logMessages,
                   };
                 });
               },
@@ -529,7 +551,13 @@ export function OracleWorkspace() {
           if (recoverable) {
             setPackJob((prev) =>
               prev
-                ? { ...prev, logMessages: [...prev.logMessages, err].slice(-20) }
+                ? {
+                    ...prev,
+                    logMessages: [
+                      ...prev.logMessages,
+                      `${err} Oracle is still running — continuing via polling.`,
+                    ].slice(-20),
+                  }
                 : prev,
             );
             cleanupRef.current = startStatusPolling(
@@ -543,6 +571,18 @@ export function OracleWorkspace() {
                     ? {
                         ...prev,
                         logMessages: [...prev.logMessages, `Polling: ${pollErr}`].slice(-20),
+                      }
+                    : prev,
+                );
+              },
+              (data) => {
+                const logMessages = readLogMessages(data);
+                if (logMessages.length === 0) return;
+                setPackJob((prev) =>
+                  prev
+                    ? {
+                        ...prev,
+                        logMessages,
                       }
                     : prev,
                 );

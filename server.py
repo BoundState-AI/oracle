@@ -26,7 +26,7 @@ import queue
 import threading
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -96,14 +96,21 @@ _sessions: dict[str, dict[str, Any]] = {}
 class SessionLogHandler(logging.Handler):
     """Logging handler that routes oracle2 log records into a per-session queue."""
 
-    def __init__(self, msg_queue: queue.Queue[str | None]) -> None:
+    def __init__(
+        self,
+        msg_queue: queue.Queue[str | None],
+        on_log: Callable[[str], None] | None = None,
+    ) -> None:
         super().__init__()
         self._queue = msg_queue
+        self._on_log = on_log
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
             msg = self.format(record)
             self._queue.put(msg)
+            if self._on_log:
+                self._on_log(msg)
         except Exception:
             pass
 
@@ -115,6 +122,7 @@ class SessionLogHandler(logging.Handler):
 SESSIONS_DIR = Path(os.environ.get("ORACLE_SESSIONS_DIR", "oracle_sessions"))
 SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 SESSION_STATE_FILE = "session_state.json"
+MAX_LOG_MESSAGES = 200
 
 
 def _max_rounds_for_mode(mode: str) -> int:
@@ -190,6 +198,7 @@ def _session_manifest(session: dict[str, Any]) -> dict[str, Any]:
         "original_name": session.get("original_name"),
         "file_path": session.get("file_path"),
         "output_dir": session.get("output_dir"),
+        "log_messages": session.get("log_messages", []),
         "pack_names": session.get("pack_names", []),
         "pack_parts": session.get("pack_parts", {}),
         "generated_pack": session.get("generated_pack"),
@@ -320,6 +329,22 @@ def _pack_snapshot(output_dir: Path) -> dict[str, Any] | None:
         return None
 
 
+def _append_session_log(session_id: str, raw_message: str) -> None:
+    """Persist a rolling tail of clean log messages for polling fallbacks."""
+    clean = _clean_log_message(raw_message)
+    if not clean:
+        return
+
+    session = _sessions.get(session_id)
+    if not session:
+        return
+
+    logs = list(session.get("log_messages", []))
+    logs.append(clean)
+    session["log_messages"] = logs[-MAX_LOG_MESSAGES:]
+    _persist_session_state(session)
+
+
 def _parse_json_string(value: str | None, default: Any) -> Any:
     if not value:
         return default
@@ -346,7 +371,10 @@ def _run_review_background(
 ) -> None:
     """Run CLI-backed oracle review in a background thread."""
 
-    handler = SessionLogHandler(msg_queue)
+    handler = SessionLogHandler(
+        msg_queue,
+        on_log=lambda msg: _append_session_log(session_id, msg),
+    )
     handler.setFormatter(logging.Formatter("%(message)s"))
 
     oracle_logger = logging.getLogger("oracle")
@@ -395,6 +423,7 @@ def _run_review_background(
             "file_path": str(file_path),
             "review_result": review_result,
             "output_dir": str(output_dir),
+            "log_messages": _sessions.get(session_id, {}).get("log_messages", []),
             "pack_names": pack_names,
             "pack_parts": pack_parts or {},
             "critique": findings_report,
@@ -417,6 +446,7 @@ def _run_review_background(
             "original_name": file_path.name,
             "file_path": str(file_path),
             "output_dir": str(output_dir),
+            "log_messages": _sessions.get(session_id, {}).get("log_messages", []),
             "pack_names": pack_names,
             "pack_parts": pack_parts or {},
             "status": "error",
@@ -444,7 +474,10 @@ def _run_pack_generate_background(
     overwrite: bool,
 ) -> None:
     """Generate and register a compliance pack in the background."""
-    handler = SessionLogHandler(msg_queue)
+    handler = SessionLogHandler(
+        msg_queue,
+        on_log=lambda msg: _append_session_log(session_id, msg),
+    )
     handler.setFormatter(logging.Formatter("%(message)s"))
 
     oracle_logger = logging.getLogger("oracle")
@@ -475,6 +508,7 @@ def _run_pack_generate_background(
             "original_name": pdf_path.name,
             "file_path": str(pdf_path),
             "output_dir": str(output_dir),
+            "log_messages": _sessions.get(session_id, {}).get("log_messages", []),
             "generated_pack": detail,
         }
         _persist_session_state(_sessions[session_id])
@@ -489,6 +523,7 @@ def _run_pack_generate_background(
             "original_name": pdf_path.name,
             "file_path": str(pdf_path),
             "output_dir": str(output_dir),
+            "log_messages": _sessions.get(session_id, {}).get("log_messages", []),
         }
         _persist_session_state(_sessions[session_id])
         msg_queue.put(f"ERROR: {e}")
@@ -551,6 +586,7 @@ async def analyze(
         "original_name": original_name,
         "file_path": str(file_path),
         "output_dir": str(output_dir),
+        "log_messages": [],
         "pack_names": pack_names,
         "pack_parts": parsed_pack_parts,
         "status": "processing",
@@ -674,6 +710,7 @@ def _build_session_payload(session: dict[str, Any]) -> dict[str, Any]:
         "mode": mode,
         "status": status,
         "error": session.get("error"),
+        "log_messages": session.get("log_messages", []),
     }
 
     if job_type == "pack_generate":
@@ -837,6 +874,7 @@ async def generate_pack_endpoint(
         "original_name": original_name,
         "file_path": str(file_path),
         "output_dir": str(output_dir),
+        "log_messages": [],
         "msg_queue": msg_queue,
     }
     _persist_session_state(_sessions[session_id])

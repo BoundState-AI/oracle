@@ -77,3 +77,37 @@ def test_session_status_rehydrates_completed_session(tmp_path, monkeypatch):
     assert data["status"] == "ready_to_generate"
     assert data["docx_url"] == f"/oracle/download/{session_id}/docx"
     assert data["pptx_url"] == f"/oracle/download/{session_id}/pptx"
+
+
+def test_session_status_returns_persisted_log_messages(tmp_path, monkeypatch):
+    session_id = "cafefeed9012"
+    monkeypatch.setattr(server, "SESSIONS_DIR", tmp_path)
+    server._sessions.pop(session_id, None)
+
+    _write_session_manifest(
+        tmp_path,
+        session_id,
+        {
+            "session_id": session_id,
+            "job_type": "pack_generate",
+            "status": "processing",
+            "error": None,
+            "original_name": "source.pdf",
+            "file_path": str(tmp_path / session_id / "source.pdf"),
+            "output_dir": str(tmp_path / session_id / "oracle_output"),
+            "log_messages": [
+                "Page 48/55 (p.66): 3/3 enriched (16.5s, ETA ~115s)",
+                "Anthropic responded",
+            ],
+        },
+    )
+
+    client = TestClient(server.app)
+    response = client.get(f"/oracle/session/{session_id}")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "error"
+    assert data["log_messages"] == [
+        "Page 48/55 (p.66): 3/3 enriched (16.5s, ETA ~115s)",
+        "Anthropic responded",
+    ]
