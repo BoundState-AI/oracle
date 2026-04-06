@@ -1,5 +1,7 @@
 from oracle.gpcm_rulepack_adapter import (
     canonical_requirement_id,
+    clean_justification,
+    dedupe_requirements,
     derive_shall_text,
     vision_repair_reasons,
 )
@@ -19,7 +21,38 @@ def test_derive_shall_text_prefers_richer_block_text():
 def test_canonical_requirement_id_uses_tag_identity():
     statement = {"id": 224, "mpr_id": "MPR 3"}
     assert canonical_requirement_id(statement, "MPR 3") == "3"
+    assert canonical_requirement_id(statement, "NER 12") == "12"
     assert canonical_requirement_id(statement, "FCR 7") == "fcr-7"
+
+
+def test_dedupe_requirements_strips_tag_prefix_from_key():
+    requirements = [
+        {
+            "id": "12",
+            "source_tag": "NER 12",
+            "section": "4.1",
+            "shall_text": "[NER 12] Programs shall verify fracture-critical parts.",
+            "justification": "",
+            "applies_to": ["all_programs"],
+        },
+        {
+            "id": "99",
+            "source_tag": None,
+            "section": "Appendix A",
+            "shall_text": "Programs shall verify fracture-critical parts.",
+            "justification": "Matrix repeat",
+            "applies_to": ["all_programs"],
+        },
+    ]
+
+    deduped = dedupe_requirements(requirements)
+
+    assert len(deduped) == 1
+    assert deduped[0]["shall_text"] == "Programs shall verify fracture-critical parts."
+
+
+def test_clean_justification_drops_punctuation_only_tail():
+    assert clean_justification(".") == ""
 
 
 def test_vision_repair_reasons_flags_single_letter_capture():
