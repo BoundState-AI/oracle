@@ -64,7 +64,7 @@ OBLIGATION_PATTERN = re.compile(
 # Improved section pattern: tolerant of PDF line-break artifacts
 SECTION_PATTERN = re.compile(
     r"(?:^|\n)\s*"
-    r"(\d+(?:\.\d+)*[a-z]?)"
+    r"(\d+(?:\.\d+)*[a-z]?(?:\(\d+\))*)"
     r"[\s.:\-]+"
     r"([A-Z][^\n]{0,120})",
     re.MULTILINE,

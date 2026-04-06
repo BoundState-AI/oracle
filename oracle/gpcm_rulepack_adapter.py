@@ -197,6 +197,22 @@ def extract_tag_number(tag: str | None) -> int:
     return int(match.group(1)) if match else 0
 
 
+def strip_leading_subitem_marker(text: str) -> str:
+    cleaned = normalize_space(text)
+    cleaned = re.sub(r"^(?:[a-z]\.|[a-z]\)|\(\d+\)|\d+\.)\s+", "", cleaned, count=1, flags=re.IGNORECASE)
+    return normalize_space(cleaned)
+
+
+def canonical_requirement_id(statement: dict[str, Any], source_tag: str | None = None) -> str:
+    tag = normalize_source_tag(source_tag or statement.get("mpr_id", ""))
+    if tag:
+        tag_type, tag_num = tag.split()
+        if tag_type == "MPR":
+            return tag_num
+        return f"{tag_type.lower()}-{tag_num}"
+    return _normalized_requirement_id(statement.get("id"))
+
+
 def build_page_bundle(pdf_path: Path) -> tuple[list[dict[str, Any]], set[str], dict[str, str]]:
     doc = fitz.open(pdf_path)
     raw_pages: list[dict[str, Any]] = []
@@ -486,7 +502,16 @@ def extract_justification_from_block_text(block_text: str, statement_text: str) 
 
 
 def derive_shall_text(block_text: str, statement_text: str, justification: str) -> str:
-    block_requirement = strip_leading_tag(block_text)
+    block_requirement = strip_leading_subitem_marker(strip_leading_tag(block_text))
+    statement_requirement = strip_leading_subitem_marker(strip_leading_tag(statement_text))
+
+    block_has_obligation = bool(OBLIGATION_RE.search(block_requirement))
+    statement_has_obligation = bool(OBLIGATION_RE.search(statement_requirement))
+    if block_has_obligation and (
+        not statement_has_obligation or len(block_requirement) >= len(statement_requirement) + 20
+    ):
+        return block_requirement
+
     if justification:
         lower_block = block_requirement.lower()
         lower_justification = justification.lower()
@@ -495,7 +520,7 @@ def derive_shall_text(block_text: str, statement_text: str, justification: str) 
             candidate = normalize_space(block_requirement[:split_at]).rstrip(".")
             if candidate:
                 return candidate
-    return strip_leading_tag(statement_text)
+    return statement_requirement
 
 
 def split_subject_requirement(shall_text: str) -> tuple[str, str]:
@@ -555,7 +580,7 @@ def build_tagged_requirements(
 
             context = normalize_space(statement.get("context", ""))
             requirement = {
-                "id": _normalized_requirement_id(statement.get("id")),
+                "id": canonical_requirement_id(statement, tag),
                 "source_tag": tag,
                 "section": normalize_space(statement.get("section", "")) or normalize_space(block.get("section", "")),
                 "shall_text": shall_text,
@@ -644,7 +669,7 @@ def enrich_statement(
     mua_relevant = bool(re.search(r"\bMUA\b", shall_text, re.IGNORECASE))
 
     return {
-        "id": _normalized_requirement_id(statement.get("id")),
+        "id": canonical_requirement_id(statement, source_tag),
         "source_tag": source_tag,
         "section": normalize_space(statement.get("section", "")),
         "shall_text": shall_text,
@@ -779,11 +804,15 @@ def vision_repair_reasons(requirement: dict[str, Any]) -> list[str]:
     shall_text = normalize_space(requirement.get("shall_text", ""))
     justification = normalize_space(requirement.get("justification", ""))
     last_word = re.sub(r"[^A-Za-z-]+", "", shall_text.split()[-1]).lower() if shall_text.split() else ""
+    stripped = strip_leading_subitem_marker(shall_text)
+    token_count = len(stripped.split())
 
     if not justification:
         reasons.append("missing_justification")
     if "[" in shall_text or "Rationale:" in shall_text:
         reasons.append("inline_rationale")
+    if token_count <= 3 or not OBLIGATION_RE.search(stripped):
+        reasons.append("too_short_or_missing_obligation")
     if shall_text.endswith(","):
         reasons.append("trailing_comma")
     if shall_text.endswith("Selection, Control, and") or shall_text.endswith("Materials and"):
