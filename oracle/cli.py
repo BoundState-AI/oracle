@@ -67,6 +67,24 @@ from typing import Any
 
 LOGGER = logging.getLogger("oracle")
 
+BUILTIN_PACK_SPECS: tuple[dict[str, str], ...] = (
+    {
+        "filename": "far_rulepack_enriched.json",
+        "name": "FAR",
+        "description": "Bundled FAR starter pack",
+    },
+    {
+        "filename": "nfs_rulepack.json",
+        "name": "NFS",
+        "description": "Bundled NASA FAR Supplement starter pack",
+    },
+    {
+        "filename": "essca_j21_rulepack.json",
+        "name": "ESSCA J-21",
+        "description": "Bundled ESSCA task order content requirements pack",
+    },
+)
+
 # ---------------------------------------------------------------------------
 # Pack Library Location Resolution
 # Precedence: --pack-dir CLI flag > ORACLE_PACK_DIR env var > ~/.oracle/packs/
@@ -90,7 +108,45 @@ def _resolve_pack_dir(cli_override: str | None = None) -> Path:
         pack_dir = Path.home() / ".oracle" / "packs"
 
     pack_dir.mkdir(parents=True, exist_ok=True)
+    _bootstrap_builtin_packs(pack_dir)
     return pack_dir
+
+
+def _builtin_pack_dir() -> Path:
+    """Return the repository-shipped builtin pack directory."""
+    return Path(__file__).resolve().parent / "builtin_packs"
+
+
+def _bootstrap_builtin_packs(pack_dir: Path) -> None:
+    """Seed an empty pack library with bundled starter packs."""
+    if os.environ.get("ORACLE_DISABLE_BOOTSTRAP_PACKS", "").lower() in {"1", "true", "yes"}:
+        return
+
+    builtin_dir = _builtin_pack_dir()
+    if not builtin_dir.exists():
+        return
+
+    existing_pack_files = [
+        p for p in pack_dir.glob("*.json") if p.name != "manifest.json"
+    ]
+    if _manifest_path(pack_dir).exists() or existing_pack_files:
+        return
+
+    for spec in BUILTIN_PACK_SPECS:
+        src = builtin_dir / spec["filename"]
+        if not src.exists():
+            LOGGER.warning("Builtin pack missing: %s", src)
+            continue
+        try:
+            register_pack(
+                src,
+                pack_dir,
+                name=spec["name"],
+                description=spec["description"],
+                overwrite=True,
+            )
+        except Exception as exc:
+            LOGGER.warning("Failed to bootstrap builtin pack %s: %s", src.name, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -316,7 +372,11 @@ def register_pack(
         ValueError: On validation failure, partial extraction without flag, or
                     existing pack without overwrite flag.
     """
-    from oracle.pack_validator import validate_pack, normalize_oracle_metadata
+    from oracle.pack_validator import (
+        normalize_oracle_metadata,
+        normalize_pack_structure,
+        validate_pack,
+    )
 
     pack_data = json.loads(pack_path.read_text(encoding="utf-8"))
 
@@ -331,6 +391,7 @@ def register_pack(
 
     # Normalize oracle_metadata (adds defaults if missing)
     normalize_oracle_metadata(pack_data, slug=slug)
+    normalize_pack_structure(pack_data)
 
     # Validate against JSON Schema
     errors = validate_pack(pack_data)

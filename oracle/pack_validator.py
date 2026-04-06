@@ -27,6 +27,7 @@ from __future__ import annotations
 __safety_critical__: bool = True
 
 import logging
+import re
 from typing import Any
 
 LOGGER = logging.getLogger("pack_validator")
@@ -391,5 +392,43 @@ def normalize_oracle_metadata(
     meta.setdefault("promotion_notes", None)
     meta.setdefault("source_document_hash", None)
     meta.setdefault("detection_override", None)
+
+    return pack_data
+
+
+def normalize_pack_structure(pack_data: dict[str, Any]) -> dict[str, Any]:
+    """Normalize legacy pack field types before schema validation.
+
+    Older FAR-style pack builders sometimes emitted numeric rule ids and
+    string page values like ``"4, 10"``. The current schemas require string
+    ids and integer page values, so coerce these cases during registration.
+    """
+    schema_version = pack_data.get("schema_version")
+
+    if schema_version == "far_rulepack/v1":
+        for rules in pack_data.get("parts", {}).values():
+            if not isinstance(rules, list):
+                continue
+            for rule in rules:
+                if not isinstance(rule, dict):
+                    continue
+                if "id" in rule and not isinstance(rule["id"], str):
+                    rule["id"] = str(rule["id"])
+                page = rule.get("page")
+                if page is None or isinstance(page, int):
+                    continue
+                if isinstance(page, str):
+                    match = re.search(r"\d+", page)
+                    if match:
+                        rule["page"] = int(match.group(0))
+                    else:
+                        rule.pop("page", None)
+                else:
+                    rule.pop("page", None)
+
+    if schema_version == "oracle_generic/v1":
+        for rule in pack_data.get("rules", []):
+            if isinstance(rule, dict) and "rule_id" in rule and not isinstance(rule["rule_id"], str):
+                rule["rule_id"] = str(rule["rule_id"])
 
     return pack_data

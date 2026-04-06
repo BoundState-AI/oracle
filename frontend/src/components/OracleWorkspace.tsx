@@ -205,6 +205,8 @@ export function OracleWorkspace() {
   const [generateForceType, setGenerateForceType] = useState("");
   const [packJob, setPackJob] = useState<PackJob | null>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
+  const generateInputRef = useRef<HTMLInputElement | null>(null);
 
   const clearLiveJob = useCallback(() => {
     if (cleanupRef.current) {
@@ -477,6 +479,20 @@ export function OracleWorkspace() {
     }
   }, [importFile, loadPacks]);
 
+  const clearImportFile = useCallback(() => {
+    setImportFile(null);
+    if (importInputRef.current) {
+      importInputRef.current.value = "";
+    }
+  }, []);
+
+  const clearGenerateFile = useCallback(() => {
+    setGenerateFile(null);
+    if (generateInputRef.current) {
+      generateInputRef.current.value = "";
+    }
+  }, []);
+
   const handleGeneratePack = useCallback(async () => {
     if (!generateFile) return;
 
@@ -742,16 +758,48 @@ export function OracleWorkspace() {
                       </CardHeader>
                       <CardContent className="space-y-4">
                         <input
+                          ref={importInputRef}
                           type="file"
                           accept=".json,application/json"
                           onChange={(event) => setImportFile(event.target.files?.[0] ?? null)}
-                          className="block w-full text-sm text-foreground"
+                          className="hidden"
                         />
-                        <Button
-                          className="w-full"
-                          onClick={handleImportPack}
-                          disabled={!importFile}
-                        >
+                        <div className="rounded-xl border border-dashed border-border bg-muted/20 p-4">
+                          <div className="flex flex-wrap items-center gap-3">
+                            <Button
+                              type="button"
+                              variant="outline"
+                              onClick={() => importInputRef.current?.click()}
+                            >
+                              <Upload className="h-4 w-4" data-icon="inline-start" />
+                              Choose Pack JSON
+                            </Button>
+                            {importFile ? (
+                              <>
+                                <span className="text-sm text-foreground">{importFile.name}</span>
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={clearImportFile}
+                                >
+                                  Clear
+                                </Button>
+                              </>
+                            ) : (
+                              <span className="text-sm text-muted-foreground">
+                                Upload an existing Oracle rule pack in JSON format.
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                        <input
+                          value={importFile?.name ?? ""}
+                          readOnly
+                          placeholder="No JSON pack selected"
+                          className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-muted-foreground outline-none ring-0"
+                        />
+                        <Button className="w-full" onClick={handleImportPack} disabled={!importFile}>
                           <Upload className="h-4 w-4" data-icon="inline-start" />
                           Import Pack
                         </Button>
@@ -766,10 +814,48 @@ export function OracleWorkspace() {
                       </CardHeader>
                       <CardContent className="space-y-4">
                         <input
+                          ref={generateInputRef}
                           type="file"
                           accept=".pdf,application/pdf"
                           onChange={(event) => setGenerateFile(event.target.files?.[0] ?? null)}
-                          className="block w-full text-sm text-foreground"
+                          className="hidden"
+                        />
+                        <div className="rounded-xl border border-dashed border-border bg-muted/20 p-4">
+                          <div className="flex flex-wrap items-center gap-3">
+                            <Button
+                              type="button"
+                              variant="outline"
+                              onClick={() => generateInputRef.current?.click()}
+                            >
+                              <Upload className="h-4 w-4" data-icon="inline-start" />
+                              Choose Source PDF
+                            </Button>
+                            {generateFile ? (
+                              <>
+                                <span className="text-sm text-foreground">
+                                  {generateFile.name}
+                                </span>
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={clearGenerateFile}
+                                >
+                                  Clear
+                                </Button>
+                              </>
+                            ) : (
+                              <span className="text-sm text-muted-foreground">
+                                Upload a regulatory PDF and Oracle will build a draft pack.
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                        <input
+                          value={generateFile?.name ?? ""}
+                          readOnly
+                          placeholder="No source PDF selected"
+                          className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-muted-foreground outline-none ring-0"
                         />
                         <input
                           value={generateName}
