@@ -405,6 +405,26 @@ def normalize_pack_structure(pack_data: dict[str, Any]) -> dict[str, Any]:
     """
     schema_version = pack_data.get("schema_version")
 
+    def _normalize_id_and_page(item: dict[str, Any]) -> None:
+        if "id" in item and not isinstance(item["id"], str):
+            item["id"] = str(item["id"])
+        page = item.get("page")
+        if page is None or isinstance(page, int):
+            return
+        if isinstance(page, str):
+            match = re.search(r"\d+", page)
+            if match:
+                item["page"] = int(match.group(0))
+            else:
+                item.pop("page", None)
+        else:
+            item.pop("page", None)
+
+    if schema_version == "gpcm_rulepack/v1":
+        for requirement in pack_data.get("requirements", []):
+            if isinstance(requirement, dict):
+                _normalize_id_and_page(requirement)
+
     if schema_version == "far_rulepack/v1":
         for rules in pack_data.get("parts", {}).values():
             if not isinstance(rules, list):
@@ -412,19 +432,7 @@ def normalize_pack_structure(pack_data: dict[str, Any]) -> dict[str, Any]:
             for rule in rules:
                 if not isinstance(rule, dict):
                     continue
-                if "id" in rule and not isinstance(rule["id"], str):
-                    rule["id"] = str(rule["id"])
-                page = rule.get("page")
-                if page is None or isinstance(page, int):
-                    continue
-                if isinstance(page, str):
-                    match = re.search(r"\d+", page)
-                    if match:
-                        rule["page"] = int(match.group(0))
-                    else:
-                        rule.pop("page", None)
-                else:
-                    rule.pop("page", None)
+                _normalize_id_and_page(rule)
 
     if schema_version == "oracle_generic/v1":
         for rule in pack_data.get("rules", []):

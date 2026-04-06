@@ -509,6 +509,13 @@ def split_subject_requirement(shall_text: str) -> tuple[str, str]:
     return subject, requirement
 
 
+def _normalized_requirement_id(value: Any) -> str:
+    """Emit schema-compliant requirement ids in the final rule pack."""
+    if value is None:
+        return ""
+    return str(value)
+
+
 def build_tagged_requirements(
     statements: list[dict[str, Any]],
     tag_blocks: list[dict[str, Any]],
@@ -548,7 +555,7 @@ def build_tagged_requirements(
 
             context = normalize_space(statement.get("context", ""))
             requirement = {
-                "id": statement.get("id"),
+                "id": _normalized_requirement_id(statement.get("id")),
                 "source_tag": tag,
                 "section": normalize_space(statement.get("section", "")) or normalize_space(block.get("section", "")),
                 "shall_text": shall_text,
@@ -637,7 +644,7 @@ def enrich_statement(
     mua_relevant = bool(re.search(r"\bMUA\b", shall_text, re.IGNORECASE))
 
     return {
-        "id": statement.get("id"),
+        "id": _normalized_requirement_id(statement.get("id")),
         "source_tag": source_tag,
         "section": normalize_space(statement.get("section", "")),
         "shall_text": shall_text,

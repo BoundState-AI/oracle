@@ -40,6 +40,34 @@ def _generic_pack_payload() -> dict:
     }
 
 
+def _gpcm_pack_payload() -> dict:
+    return {
+        "schema_version": "gpcm_rulepack/v1",
+        "rule_pack_id": "gpcm-test-pack",
+        "standard_id": "NASA-STD-TEST",
+        "version": "1.0.0",
+        "generated_at": "2026-04-05T00:00:00Z",
+        "source_document": "test.pdf",
+        "source_extract": "test_shall.json",
+        "extraction_status": "complete",
+        "total_requirements": 1,
+        "oracle_metadata": {
+            "name": "GPCM Test Pack",
+            "slug": "gpcm_test_pack",
+            "description": "Test GPCM pack",
+            "status": "draft",
+            "added_at": "2026-04-05T00:00:00Z",
+        },
+        "requirements": [
+            {
+                "id": 1,
+                "shall_text": "The system shall do the thing.",
+                "page": "9, 11",
+            }
+        ],
+    }
+
+
 def _write_pack_json(path: Path) -> None:
     path.write_text(json.dumps(_generic_pack_payload()), encoding="utf-8")
 
@@ -85,3 +113,18 @@ def test_import_pack_endpoint(tmp_path, monkeypatch):
     body = response.json()
     assert body["status"] == "complete"
     assert body["pack"]["slug"] == "test_std_1"
+
+
+def test_register_pack_persists_normalized_gpcm_ids(tmp_path):
+    pack_dir = tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+
+    source = tmp_path / "gpcm.json"
+    source.write_text(json.dumps(_gpcm_pack_payload()), encoding="utf-8")
+
+    slug = register_pack(source, pack_dir)
+    stored = json.loads((pack_dir / f"{slug}.json").read_text(encoding="utf-8"))
+
+    requirement = stored["requirements"][0]
+    assert requirement["id"] == "1"
+    assert requirement["page"] == 9
