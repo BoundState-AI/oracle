@@ -215,13 +215,34 @@ def _preprocess_page_text(raw_text: str) -> str:
 # Fix 2 + 3: MPR-aware extraction with full text capture
 # ============================================================================
 
-# Boundary for ending an MPR block: next tag, next section header, or double-newline
-_MPR_BLOCK_END = re.compile(
-    r"\[(?:MPR|FCR)\s*\d+[a-z]?\]"        # next tag
-    r"|\n\s*\d+(?:\.\d+)+[a-z]?\s+[A-Z]"  # next section header
-    r"|\n\s*\n",                            # paragraph break
-    re.IGNORECASE,
+_MPR_NEXT_SECTION_PATTERN = re.compile(
+    r"(?:^|\n)\s*"
+    r"(\d+(?:\.\d+)*[a-z]?(?:\(\d+\))*)"
+    r"[\s.:\-]+"
+    r"([A-Z][^\n]{0,120})",
+    re.MULTILINE,
 )
+
+
+def _find_mpr_block_end(text: str, start: int) -> int:
+    """Find the end of a tagged MPR/FCR block.
+
+    Tagged requirements in NASA standards often continue across blank lines
+    and sub-items like ``a.``, ``b.``, ``(1)``, etc.  We therefore do not
+    terminate on paragraph breaks alone.  A block ends only at the next tag
+    or the next real section header.
+    """
+    candidates: list[int] = []
+
+    next_tag = MPR_TAG_PATTERN.search(text, start)
+    if next_tag:
+        candidates.append(next_tag.start())
+
+    next_section = _MPR_NEXT_SECTION_PATTERN.search(text, start)
+    if next_section:
+        candidates.append(next_section.start())
+
+    return min(candidates) if candidates else len(text)
 
 
 def _extract_mpr_blocks(text: str, page: int) -> list[dict]:
@@ -234,8 +255,7 @@ def _extract_mpr_blocks(text: str, page: int) -> list[dict]:
 
         # Capture from end of tag to next boundary
         start = match.end()
-        end_match = _MPR_BLOCK_END.search(text, start)
-        end = end_match.start() if end_match else len(text)
+        end = _find_mpr_block_end(text, start)
 
         block = re.sub(r"\s+", " ", text[start:end]).strip().rstrip(".")
 
