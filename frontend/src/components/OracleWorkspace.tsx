@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import {
   Eye,
   Library,
+  RefreshCw,
   ShieldCheck,
   Trash2,
   Upload,
@@ -680,11 +681,25 @@ export function OracleWorkspace() {
 
                       <Card className="border-border">
                         <CardHeader>
-                          <CardTitle className="text-lg font-semibold tracking-tight">
-                            Compliance Packs
-                          </CardTitle>
+                          <div className="flex items-center justify-between gap-3">
+                            <CardTitle className="text-lg font-semibold tracking-tight">
+                              Compliance Packs
+                            </CardTitle>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={() => void loadPacks()}
+                            >
+                              <RefreshCw className="h-3.5 w-3.5" data-icon="inline-start" />
+                              Refresh
+                            </Button>
+                          </div>
                         </CardHeader>
                         <CardContent className="space-y-4">
+                          <div className="rounded-lg border border-border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                            Oracle reviews only against the packs you select here. It does not silently blend the entire library.
+                          </div>
                           {packsLoading ? (
                             <p className="text-sm text-muted-foreground">Loading pack library...</p>
                           ) : availablePacks.length === 0 ? (
@@ -931,9 +946,20 @@ export function OracleWorkspace() {
                   <div className="space-y-6">
                     <Card className="border-border">
                       <CardHeader>
-                        <CardTitle className="text-lg font-semibold tracking-tight">
-                          Available Packs
-                        </CardTitle>
+                        <div className="flex items-center justify-between gap-3">
+                          <CardTitle className="text-lg font-semibold tracking-tight">
+                            Available Packs
+                          </CardTitle>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => void loadPacks()}
+                          >
+                            <RefreshCw className="h-3.5 w-3.5" data-icon="inline-start" />
+                            Refresh
+                          </Button>
+                        </div>
                       </CardHeader>
                       <CardContent className="space-y-3">
                         {packsLoading ? (
