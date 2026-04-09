@@ -4,6 +4,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 import server
+import oracle.chat_engine as chat_engine
 from oracle.cli import register_pack
 
 
@@ -133,6 +134,54 @@ def test_chat_review_only_mode_allows_packless_critique(workspace_tmp_path, monk
     assert any(citation.startswith("review-only/") for citation in body["citations"])
 
 
+def test_chat_explicit_empty_pack_selection_clears_session_scope(workspace_tmp_path, monkeypatch):
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    server._chat_sessions.clear()
+
+    slug = _register_pack(
+        workspace_tmp_path,
+        pack_dir,
+        _chat_pack_payload(
+            standard_id="NASA-STD-5009C",
+            standard_title="NASA Fracture Control Standard",
+            statement_text="Pure tin finishes shall not be used on mission hardware connectors.",
+            section="Table V Note 6",
+            page=42,
+            keywords=["pure tin", "connector plating"],
+        ),
+        "5009c.json",
+    )
+
+    client = TestClient(server.app)
+    first = client.post(
+        "/oracle/chat",
+        json={
+            "session_id": "chat-clear-scope",
+            "message": "What does the selected standard say about pure tin finishes?",
+            "selected_packs": [slug],
+        },
+    )
+    assert first.status_code == 200
+    assert first.json()["status"] == "PASS"
+
+    second = client.post(
+        "/oracle/chat",
+        json={
+            "session_id": "chat-clear-scope",
+            "message": "What does the standard say now?",
+            "selected_packs": [],
+        },
+    )
+
+    assert second.status_code == 200
+    body = second.json()
+    assert body["status"] == "INSUFFICIENT_DATA"
+    assert body["selected_packs"] == []
+    assert "Select at least one authority pack" in body["response"]
+
+
 def test_chat_returns_grounded_clause_for_selected_pack(workspace_tmp_path, monkeypatch):
     pack_dir = workspace_tmp_path / "packs"
     pack_dir.mkdir(parents=True, exist_ok=True)
@@ -259,6 +308,7 @@ def test_chat_stream_returns_done_payload(workspace_tmp_path, monkeypatch):
     assert "event: done" in payload
     assert '"advisory_only": true' in payload
     assert '"review_only": false' in payload
+    assert '"envelope_version": "1.0"' in payload
 
 
 def test_chat_stream_review_only_returns_done_payload(workspace_tmp_path, monkeypatch):
@@ -368,3 +418,159 @@ def test_chat_synthesizes_scope_and_funding_answer(workspace_tmp_path, monkeypat
     assert "funding" in body["response"].lower()
     assert "place of performance" not in body["response"].lower()
     assert len(body["citations"]) == 3
+
+
+def test_chat_uses_llm_summary_when_available(workspace_tmp_path, monkeypatch):
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    server._chat_sessions.clear()
+
+    slug = _register_pack(
+        workspace_tmp_path,
+        pack_dir,
+        _chat_pack_payload(
+            standard_id="NASA-STD-5009C",
+            standard_title="NASA Fracture Control Standard",
+            statement_text="Pure tin finishes shall not be used on mission hardware connectors.",
+            section="Table V Note 6",
+            page=42,
+            keywords=["pure tin", "connector plating"],
+        ),
+        "5009c.json",
+    )
+
+    monkeypatch.setattr(
+        chat_engine,
+        "_maybe_run_llm_reasoning",
+        lambda **kwargs: {
+            "provider": "test",
+            "model": "reasoner",
+            "direct_answer": "No.",
+            "bottom_line": "The retrieved rule prohibits pure tin on mission hardware connectors.",
+            "why": ["The retrieved clause is a direct prohibition."],
+            "gaps": [],
+            "governing_citations": ["NASA-STD-5009C section Table V Note 6 (p. 42)"],
+            "follow_ups": ["Show me the exact clause text."],
+            "per_pack_findings": [],
+        },
+    )
+    monkeypatch.setattr(
+        chat_engine,
+        "_maybe_run_llm_summary",
+        lambda **kwargs: {
+            "provider": "test",
+            "model": "summarizer",
+            "answer_text": "No. NASA-STD-5009C directly prohibits pure tin finishes on mission hardware connectors.",
+            "citations": ["NASA-STD-5009C section Table V Note 6 (p. 42)"],
+            "follow_ups": ["Show me the exact clause text."],
+        },
+    )
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/oracle/chat",
+        json={
+            "message": "Is pure tin allowed on mission hardware connectors?",
+            "selected_packs": [slug],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "PASS"
+    assert body["response"].startswith("No.")
+    assert body["citations"] == ["NASA-STD-5009C section Table V Note 6 (p. 42)"]
+    assert body["stage_artifacts"]["summary"]["llm_model"] == "summarizer"
+
+
+def test_chat_falls_back_when_summary_validation_fails(workspace_tmp_path, monkeypatch):
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    server._chat_sessions.clear()
+
+    slug = _register_pack(
+        workspace_tmp_path,
+        pack_dir,
+        _chat_multi_rule_pack_payload(
+            standard_id="ESSCA-II-J-21",
+            standard_title="ESSCA II Attachment J-21",
+            rules=[
+                {
+                    "rule_id": "RULE-001",
+                    "section": "Fig J-21-1",
+                    "page": 10,
+                    "obligation_type": "mandatory",
+                    "obligation_keyword": "must",
+                    "statement_text": "Scope or POP change with cost impact triggers the standard TOCR flow.",
+                    "subject": "Scope change routing",
+                    "requirement": "Any change involving scope with cost impact must follow the TOCR flow, not an informal path.",
+                    "keywords": ["scope change", "cost impact", "TOCR flow"],
+                    "applies_to": ["scope_changes"],
+                },
+                {
+                    "rule_id": "RULE-002",
+                    "section": "1.1-SubTask(c)",
+                    "page": 5,
+                    "obligation_type": "mandatory",
+                    "obligation_keyword": "required",
+                    "statement_text": "CWBS, to include PSID, funding source, funding sub-source, and activity.",
+                    "subject": "Sub-task CWBS and funding",
+                    "requirement": "Each sub-task must have CWBS data with PSID and funding source information before the work can be authorized.",
+                    "keywords": ["CWBS", "PSID", "funding source", "charge code"],
+                    "applies_to": ["all_sub_tasks"],
+                },
+            ],
+        ),
+        "j21.json",
+    )
+
+    monkeypatch.setattr(
+        chat_engine,
+        "_maybe_run_llm_reasoning",
+        lambda **kwargs: {
+            "provider": "test",
+            "model": "reasoner",
+            "direct_answer": "Likely yes.",
+            "bottom_line": "The retrieved rules point the change into TOCR handling.",
+            "why": ["The retrieved clauses require TOCR routing and funding data."],
+            "gaps": [],
+            "governing_citations": [
+                "ESSCA-II-J-21 section Fig J-21-1 (p. 10)",
+                "ESSCA-II-J-21 section 1.1-SubTask(c) (p. 5)",
+            ],
+            "follow_ups": ["Show me the exact clause text."],
+            "per_pack_findings": [],
+        },
+    )
+    monkeypatch.setattr(
+        chat_engine,
+        "_maybe_run_llm_summary",
+        lambda **kwargs: {
+            "provider": "test",
+            "model": "summarizer",
+            "answer_text": "Approved. This change is fine.",
+            "citations": ["ESSCA-II-J-21 section Fig J-21-1 (p. 10)"],
+            "follow_ups": ["Close this item."],
+        },
+    )
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/oracle/chat",
+        json={
+            "message": "if you insert scope and do not fund it, is that against the j21 rules?",
+            "selected_packs": [slug],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "PASS"
+    assert body["response"].startswith("Likely yes.")
+    assert body["diagnostics"]["fallback_used"] is True
+    assert body["diagnostics"]["fallback_reason"] == "stage_4_validation_failure"
+    assert "stage_4_prohibited_decision_language" in body["diagnostics"]["validation_failures"]
+    assert body["stage_artifacts"]["reasoning"]["llm_model"] == "reasoner"
+    assert "summary" not in body["stage_artifacts"]

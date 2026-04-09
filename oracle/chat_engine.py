@@ -5,12 +5,17 @@ Purpose: Deterministic Oracle-native pack chat over registered rule packs.
 
 from __future__ import annotations
 
+import json
+import logging
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from oracle.cli import load_pack as cli_load_pack
+
+LOGGER = logging.getLogger("oracle.chat")
 
 _STOP_WORDS = {
     "a",
@@ -107,6 +112,10 @@ _IMPACT_PATTERN = re.compile(
 )
 _REVIEW_GOVERNANCE_PATTERN = re.compile(
     r"\b(?:approval|approve|accept|sign-?off|concurrence|waiver|authorize|authorized)\b",
+    re.IGNORECASE,
+)
+_PROHIBITED_DECISION_LANGUAGE_PATTERN = re.compile(
+    r"\b(?:approved?|approval|certif(?:y|ied|ication)|waiv(?:e|er|ed)|sign-?off|accepted?|greenlight(?:ed)?)\b",
     re.IGNORECASE,
 )
 
@@ -467,28 +476,27 @@ def _review_only_findings(query: str) -> list[tuple[str, str]]:
 
 def _answer_review_only(query: str, compare_only: bool) -> dict[str, Any]:
     if compare_only:
-        return {
-            "status": "INSUFFICIENT_DATA",
-            "response": (
+        return _chat_result(
+            status="INSUFFICIENT_DATA",
+            response=(
                 "Review-only mode does not compare authority packs. Switch back to authority-grounded mode to compare standards, "
                 "or paste two draft clauses and ask for a wording comparison."
             ),
-            "citations": [],
-            "follow_ups": [
+            citations=[],
+            follow_ups=[
                 "Turn off review-only and compare the selected packs.",
                 "Paste two draft clauses and ask which one is tighter.",
             ],
-            "selected_packs": [],
-            "compare_only": False,
-            "review_only": True,
-            "advisory_only": True,
-        }
+            selected_packs=[],
+            compare_only=False,
+            review_only=True,
+        )
 
     findings = _review_only_findings(query)
     if not findings:
-        return {
-            "status": "PASS",
-            "response": (
+        return _chat_result(
+            status="PASS",
+            response=(
                 "Review-only assessment. No authority packs were applied.\n\n"
                 "I do not see a strong defect signal from the text you sent, but review-only mode is much stronger when you paste the actual requirement, paragraph, or approval language to inspect.\n\n"
                 "What I would test next:\n"
@@ -496,16 +504,15 @@ def _answer_review_only(query: str, compare_only: bool) -> dict[str, Any]:
                 "- Add measurable acceptance criteria or required artifacts.\n"
                 "- State any approval path, timing, and downstream update obligations."
             ),
-            "citations": [],
-            "follow_ups": [
+            citations=[],
+            follow_ups=[
                 "Review this requirement for ambiguity and missing acceptance criteria: <paste text>",
                 "Rewrite this clause so it is testable and names the responsible actor.",
             ],
-            "selected_packs": [],
-            "compare_only": False,
-            "review_only": True,
-            "advisory_only": True,
-        }
+            selected_packs=[],
+            compare_only=False,
+            review_only=True,
+        )
 
     top_findings = findings[:3]
     lines = [
@@ -523,18 +530,613 @@ def _answer_review_only(query: str, compare_only: bool) -> dict[str, Any]:
         ]
     )
 
-    return {
-        "status": "PASS",
-        "response": "\n".join(lines).strip(),
-        "citations": [f"review-only/{category}" for category, _detail in top_findings],
-        "follow_ups": [
+    return _chat_result(
+        status="PASS",
+        response="\n".join(lines).strip(),
+        citations=[f"review-only/{category}" for category, _detail in top_findings],
+        follow_ups=[
             "Rewrite this requirement in a tighter, testable form.",
             "Show me the missing approvals, artifacts, and acceptance criteria in this draft.",
         ],
-        "selected_packs": [],
-        "compare_only": False,
-        "review_only": True,
+        selected_packs=[],
+        compare_only=False,
+        review_only=True,
+    )
+
+
+def _chat_result(
+    *,
+    status: str,
+    response: str,
+    citations: list[str],
+    follow_ups: list[str],
+    selected_packs: list[str],
+    compare_only: bool,
+    review_only: bool,
+    evidence_assessment: str | None = None,
+    diagnostics: dict[str, Any] | None = None,
+    stage_artifacts: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    ordered_stage_keys = ["gatekeeper", "retrieval", "reasoning", "summary"]
+    stages_completed = []
+    if stage_artifacts:
+        stages_completed = [key for key in ordered_stage_keys if key in stage_artifacts]
+    merged_diagnostics = {
+        "fallback_used": False,
+        "fallback_reason": None,
+        "validation_failures": [],
+        "stages_completed": stages_completed,
+    }
+    if diagnostics:
+        merged_diagnostics.update(diagnostics)
+        if "stages_completed" not in diagnostics:
+            merged_diagnostics["stages_completed"] = stages_completed
+
+    result = {
+        "envelope_version": "1.0",
+        "status": status,
+        "answer_text": response,
+        "response": response,
+        "evidence_assessment": evidence_assessment,
+        "citations": citations,
+        "follow_ups": follow_ups,
+        "selected_packs": selected_packs,
+        "compare_only": compare_only,
+        "review_only": review_only,
         "advisory_only": True,
+        "diagnostics": merged_diagnostics,
+    }
+    if stage_artifacts:
+        result["stage_artifacts"] = stage_artifacts
+    return result
+
+
+def _chat_model_provider() -> str | None:
+    explicit = _normalize_space(os.environ.get("ORACLE_CHAT_PROVIDER"))
+    if explicit:
+        return explicit.lower()
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return "anthropic"
+    if os.environ.get("OPENAI_API_KEY"):
+        return "openai"
+    return None
+
+
+def _reasoning_model_name(provider: str) -> str:
+    if provider == "openai":
+        return os.environ.get("ORACLE_REASONING_MODEL", "gpt-5.4")
+    return os.environ.get("ORACLE_REASONING_MODEL", "claude-sonnet-4-6")
+
+
+def _summary_model_name(provider: str) -> str:
+    if provider == "openai":
+        return os.environ.get("ORACLE_SUMMARY_MODEL", "gpt-5.4-mini")
+    return os.environ.get("ORACLE_SUMMARY_MODEL", "claude-haiku-4-5-20251001")
+
+
+def _extract_text_blocks(blocks: Any) -> str:
+    text_parts: list[str] = []
+    if isinstance(blocks, str):
+        return blocks.strip()
+    for block in blocks or []:
+        if getattr(block, "type", None) == "text" and getattr(block, "text", None):
+            text_parts.append(str(block.text))
+    return "\n".join(part.strip() for part in text_parts if part.strip()).strip()
+
+
+def _call_model_json(
+    *,
+    provider: str,
+    model: str,
+    system_prompt: str,
+    user_message: str,
+    max_tokens: int,
+) -> dict[str, Any]:
+    if provider == "anthropic":
+        import httpx
+        from anthropic import Anthropic
+
+        client = Anthropic(
+            api_key=os.environ.get("ANTHROPIC_API_KEY"),
+            timeout=httpx.Timeout(120.0, connect=10.0),
+        )
+        response = client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            temperature=0.0,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_message}],
+        )
+        text = _extract_text_blocks(response.content)
+    elif provider == "openai":
+        import httpx
+        from openai import OpenAI
+
+        client = OpenAI(
+            api_key=os.environ.get("OPENAI_API_KEY"),
+            timeout=httpx.Timeout(120.0, connect=10.0),
+        )
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ],
+        }
+        if model.startswith(("gpt-5", "o3", "o4")):
+            kwargs["max_completion_tokens"] = max_tokens
+            kwargs["reasoning_effort"] = os.environ.get("ORACLE_CHAT_REASONING_EFFORT", "medium")
+            kwargs["verbosity"] = os.environ.get("ORACLE_CHAT_VERBOSITY", "medium")
+        else:
+            kwargs["temperature"] = 0.0
+            kwargs["max_tokens"] = max_tokens
+        response = client.chat.completions.create(**kwargs)
+        text = (response.choices[0].message.content or "").strip()
+    else:
+        raise RuntimeError(f"Unsupported chat provider: {provider}")
+
+    if not text:
+        raise RuntimeError("Chat model returned empty response.")
+    return json.loads(text)
+
+
+def _serialize_rule(rule: ChatRule, score: int | None = None) -> dict[str, Any]:
+    payload = {
+        "pack_slug": rule.pack_slug,
+        "standard_id": rule.standard_id,
+        "standard_title": rule.standard_title,
+        "rule_id": rule.rule_id,
+        "section": rule.section,
+        "page": rule.page,
+        "obligation_type": rule.obligation_type,
+        "statement_text": rule.statement_text,
+        "requirement": rule.requirement,
+        "subject": rule.subject,
+        "keywords": list(rule.keywords),
+        "applies_to": list(rule.applies_to),
+        "display_citation": _citation(rule),
+    }
+    if score is not None:
+        payload["score"] = score
+    return payload
+
+
+def _llm_reasoning_system_prompt() -> str:
+    return (
+        "You are the Oracle reasoning stage. "
+        "You reason only over the retrieved rules provided by the caller. "
+        "Do not invent requirements. Do not issue approval, waiver, certification, or sign-off decisions. "
+        "Return strict JSON with keys: direct_answer, bottom_line, why, governing_citations, gaps, follow_ups, per_pack_findings. "
+        "governing_citations must only contain exact display_citation strings from the input payload. "
+        "why and gaps must be arrays of concise strings. "
+        "per_pack_findings must be an array of objects with keys standard_id, finding, citations."
+    )
+
+
+def _llm_summary_system_prompt() -> str:
+    return (
+        "You are the Oracle summary stage. "
+        "Convert the reasoning payload into concise operator guidance. "
+        "Lead with the direct answer or bottom line. "
+        "Do not invent claims or citations. "
+        "Return strict JSON with keys: answer_text, citations, follow_ups. "
+        "citations must be a subset of the provided governing citations. "
+        "follow_ups must be short operator prompts."
+    )
+
+
+def _allowed_citations_from_retrieval(retrieval: dict[str, Any]) -> set[str]:
+    citations: set[str] = set()
+    if retrieval.get("compare_mode"):
+        for finding in retrieval.get("pack_findings", []):
+            for rule, _score in finding.get("matches", []):
+                citations.add(_citation(rule))
+    else:
+        for rule, _score in retrieval.get("matches", []):
+            citations.add(_citation(rule))
+    return citations
+
+
+def _maybe_run_llm_reasoning(
+    *,
+    query: str,
+    gatekeeper: dict[str, Any],
+    retrieval: dict[str, Any],
+) -> dict[str, Any] | None:
+    provider = _chat_model_provider()
+    if not provider:
+        return None
+
+    payload: dict[str, Any] = {
+        "query": query,
+        "intent": gatekeeper["intent"],
+        "compare_mode": gatekeeper["compare_mode"],
+        "filters": gatekeeper["filters"],
+        "packs_queried": retrieval["packs_queried"],
+    }
+    if retrieval.get("compare_mode"):
+        payload["matches_by_pack"] = [
+            {
+                "pack_slug": finding["pack"].pack_slug,
+                "standard_id": finding["pack"].standard_id,
+                "matches": [_serialize_rule(rule, score) for rule, score in finding["matches"]],
+            }
+            for finding in retrieval.get("pack_findings", [])
+        ]
+    else:
+        payload["matches"] = [
+            _serialize_rule(rule, score) for rule, score in retrieval.get("matches", [])
+        ]
+
+    try:
+        result = _call_model_json(
+            provider=provider,
+            model=_reasoning_model_name(provider),
+            system_prompt=_llm_reasoning_system_prompt(),
+            user_message=json.dumps(payload, indent=2),
+            max_tokens=int(os.environ.get("ORACLE_CHAT_REASONING_MAX_TOKENS", "2400")),
+        )
+    except Exception as exc:
+        LOGGER.warning("Oracle reasoning model failed; using deterministic reasoning: %s", exc)
+        return None
+
+    allowed_citations = _allowed_citations_from_retrieval(retrieval)
+    governing = [
+        item for item in result.get("governing_citations", []) if isinstance(item, str) and item in allowed_citations
+    ]
+    if not governing:
+        return None
+
+    return {
+        "provider": provider,
+        "model": _reasoning_model_name(provider),
+        "direct_answer": _normalize_space(result.get("direct_answer")),
+        "bottom_line": _normalize_space(result.get("bottom_line")),
+        "why": [item for item in result.get("why", []) if _normalize_space(item)],
+        "gaps": [item for item in result.get("gaps", []) if _normalize_space(item)],
+        "governing_citations": governing,
+        "follow_ups": [item for item in result.get("follow_ups", []) if _normalize_space(item)][:3],
+        "per_pack_findings": [
+            {
+                "standard_id": _normalize_space(item.get("standard_id")),
+                "finding": _normalize_space(item.get("finding")),
+                "citations": [
+                    citation
+                    for citation in item.get("citations", [])
+                    if isinstance(citation, str) and citation in allowed_citations
+                ],
+            }
+            for item in result.get("per_pack_findings", [])
+            if isinstance(item, dict)
+        ],
+    }
+
+
+def _maybe_run_llm_summary(
+    *,
+    query: str,
+    gatekeeper: dict[str, Any],
+    llm_reasoning: dict[str, Any],
+) -> dict[str, Any] | None:
+    provider = _chat_model_provider()
+    if not provider:
+        return None
+
+    payload = {
+        "query": query,
+        "intent": gatekeeper["intent"],
+        "compare_mode": gatekeeper["compare_mode"],
+        "reasoning": llm_reasoning,
+    }
+    try:
+        result = _call_model_json(
+            provider=provider,
+            model=_summary_model_name(provider),
+            system_prompt=_llm_summary_system_prompt(),
+            user_message=json.dumps(payload, indent=2),
+            max_tokens=int(os.environ.get("ORACLE_CHAT_SUMMARY_MAX_TOKENS", "1200")),
+        )
+    except Exception as exc:
+        LOGGER.warning("Oracle summary model failed; using deterministic summary: %s", exc)
+        return None
+
+    allowed = set(llm_reasoning["governing_citations"])
+    citations = [
+        item for item in result.get("citations", []) if isinstance(item, str) and item in allowed
+    ]
+    answer_text = _normalize_space(result.get("answer_text"))
+    if not answer_text or not citations:
+        return None
+    return {
+        "provider": provider,
+        "model": _summary_model_name(provider),
+        "answer_text": answer_text,
+        "citations": citations,
+        "follow_ups": [
+            item for item in result.get("follow_ups", []) if _normalize_space(item)
+        ][:3],
+    }
+
+
+def _validate_llm_reasoning_output(
+    llm_reasoning: dict[str, Any],
+    retrieval: dict[str, Any],
+) -> list[str]:
+    failures: list[str] = []
+    if not _normalize_space(llm_reasoning.get("direct_answer")) and not _normalize_space(
+        llm_reasoning.get("bottom_line")
+    ):
+        failures.append("stage_3_missing_answer")
+
+    allowed_citations = _allowed_citations_from_retrieval(retrieval)
+    governing = llm_reasoning.get("governing_citations", [])
+    if not governing:
+        failures.append("stage_3_missing_citations")
+    elif any(citation not in allowed_citations for citation in governing):
+        failures.append("stage_3_unknown_citation")
+
+    for field in ("why", "gaps", "follow_ups"):
+        value = llm_reasoning.get(field, [])
+        if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+            failures.append(f"stage_3_invalid_{field}")
+
+    per_pack = llm_reasoning.get("per_pack_findings", [])
+    if per_pack and not isinstance(per_pack, list):
+        failures.append("stage_3_invalid_per_pack_findings")
+    elif isinstance(per_pack, list):
+        for item in per_pack:
+            if not isinstance(item, dict):
+                failures.append("stage_3_invalid_per_pack_findings")
+                break
+            citations = item.get("citations", [])
+            if not isinstance(citations, list) or any(citation not in allowed_citations for citation in citations):
+                failures.append("stage_3_invalid_per_pack_citations")
+                break
+
+    return failures
+
+
+def _validate_llm_summary_output(
+    llm_summary: dict[str, Any],
+    llm_reasoning: dict[str, Any],
+) -> list[str]:
+    failures: list[str] = []
+    answer_text = _normalize_space(llm_summary.get("answer_text"))
+    if not answer_text:
+        failures.append("stage_4_missing_answer")
+    elif _PROHIBITED_DECISION_LANGUAGE_PATTERN.search(answer_text):
+        failures.append("stage_4_prohibited_decision_language")
+
+    allowed_citations = set(llm_reasoning.get("governing_citations", []))
+    citations = llm_summary.get("citations", [])
+    if not citations:
+        failures.append("stage_4_missing_citations")
+    elif any(citation not in allowed_citations for citation in citations):
+        failures.append("stage_4_unknown_citation")
+
+    follow_ups = llm_summary.get("follow_ups", [])
+    if follow_ups and (
+        not isinstance(follow_ups, list) or any(not isinstance(item, str) for item in follow_ups)
+    ):
+        failures.append("stage_4_invalid_follow_ups")
+
+    return failures
+
+
+def _gatekeep_query(query: str, pack_names: list[str], compare_only: bool) -> dict[str, Any]:
+    if _APPROVAL_PATTERN.search(query):
+        return {
+            "status": "REFUSE",
+            "intent": None,
+            "normalized_query": query,
+            "selected_packs": list(pack_names),
+            "compare_mode": compare_only,
+            "filters": {
+                "section": _SECTION_PATTERN.search(query).group(1)
+                if _SECTION_PATTERN.search(query)
+                else None,
+                "table_note": (
+                    f"table {_TABLE_NOTE_PATTERN.search(query).group(1)} note {_TABLE_NOTE_PATTERN.search(query).group(2)}"
+                    if _TABLE_NOTE_PATTERN.search(query)
+                    else None
+                ),
+            },
+            "refusal_category": "approval",
+            "refusal_reason": (
+                "Oracle can surface governing clauses and evidence paths, but it does not issue final approval, "
+                "certification, waiver, or sign-off decisions."
+            ),
+        }
+
+    if not pack_names:
+        return {
+            "status": "INSUFFICIENT_DATA",
+            "intent": None,
+            "normalized_query": query,
+            "selected_packs": [],
+            "compare_mode": compare_only,
+            "filters": {"section": None, "table_note": None},
+            "refusal_category": None,
+            "refusal_reason": None,
+            "error": "Select at least one authority pack before chatting. Oracle stays grounded in the packs you pick.",
+        }
+
+    intent = "general"
+    if compare_only or _COMPARE_PATTERN.search(query):
+        intent = "comparison"
+    elif _is_clause_lookup_query(query):
+        intent = "clause_lookup"
+    elif _is_yes_no_query(query):
+        intent = "yes_no"
+
+    section_match = _SECTION_PATTERN.search(query)
+    table_note_match = _TABLE_NOTE_PATTERN.search(query)
+
+    return {
+        "status": "PASS",
+        "intent": intent,
+        "normalized_query": query,
+        "selected_packs": list(pack_names),
+        "compare_mode": bool(compare_only or intent == "comparison"),
+        "filters": {
+            "section": _normalize_space(section_match.group(1)) if section_match else None,
+            "table_note": (
+                f"table {table_note_match.group(1)} note {table_note_match.group(2)}"
+                if table_note_match
+                else None
+            ),
+        },
+        "refusal_category": None,
+        "refusal_reason": None,
+    }
+
+
+def _retrieve_chat_context(gatekeeper: dict[str, Any], pack_dir: Path) -> dict[str, Any]:
+    selected_packs = gatekeeper["selected_packs"]
+    query = gatekeeper["normalized_query"]
+    compare_mode = bool(gatekeeper["compare_mode"])
+    packs_queried: list[dict[str, Any]] = []
+    loaded_packs: list[ChatPack] = []
+
+    for pack_name in selected_packs:
+        try:
+            pack = load_chat_pack(pack_name, pack_dir)
+        except Exception as exc:
+            packs_queried.append(
+                {
+                    "pack_slug": pack_name,
+                    "load_status": "error",
+                    "load_error": str(exc),
+                }
+            )
+            continue
+
+        loaded_packs.append(pack)
+        packs_queried.append(
+            {
+                "pack_slug": pack.pack_slug,
+                "standard_id": pack.standard_id,
+                "standard_title": pack.standard_title,
+                "load_status": "ok",
+            }
+        )
+
+    if not loaded_packs:
+        return {
+            "status": "INSUFFICIENT_DATA",
+            "error": "None of the selected packs could be loaded for Oracle chat.",
+            "packs_queried": packs_queried,
+            "compare_mode": compare_mode,
+        }
+
+    if len(loaded_packs) > 1 and not compare_mode:
+        return {
+            "status": "INSUFFICIENT_DATA",
+            "error": (
+                "Multiple packs are selected. Narrow to one pack for clause lookup or turn on compare mode to chat across selected standards."
+            ),
+            "packs_queried": packs_queried,
+            "compare_mode": compare_mode,
+            "loaded_packs": loaded_packs,
+        }
+
+    if compare_mode:
+        pack_findings: list[dict[str, Any]] = []
+        for pack in loaded_packs[:2]:
+            matches = _dedupe_rules(_rank_rules(query, pack.rules), 3)
+            pack_findings.append({"pack": pack, "matches": matches})
+
+        if not any(item["matches"] for item in pack_findings):
+            return {
+                "status": "INSUFFICIENT_DATA",
+                "error": "I did not find grounded requirement matches for that topic in the selected standards.",
+                "packs_queried": packs_queried,
+                "compare_mode": True,
+                "pack_findings": pack_findings,
+            }
+
+        return {
+            "status": "PASS",
+            "packs_queried": packs_queried,
+            "compare_mode": True,
+            "pack_findings": pack_findings,
+        }
+
+    pack = loaded_packs[0]
+    matches = _rank_rules(query, pack.rules)
+    if not matches:
+        return {
+            "status": "INSUFFICIENT_DATA",
+            "error": (
+                f"I found {pack.standard_id}, but I did not find a grounded requirement match for that topic. "
+                "Narrow this by section, table note, appendix, or part family."
+            ),
+            "packs_queried": packs_queried,
+            "compare_mode": False,
+            "pack": pack,
+            "matches": [],
+        }
+
+    return {
+        "status": "PASS",
+        "packs_queried": packs_queried,
+        "compare_mode": False,
+        "pack": pack,
+        "matches": matches,
+    }
+
+
+def _reason_about_chat_context(query: str, gatekeeper: dict[str, Any], retrieval: dict[str, Any]) -> dict[str, Any]:
+    if retrieval["compare_mode"]:
+        pack_reasoning: list[dict[str, Any]] = []
+        for finding in retrieval["pack_findings"]:
+            pack = finding["pack"]
+            top_matches = finding["matches"]
+            pack_reasoning.append(
+                {
+                    "pack": pack,
+                    "top_matches": top_matches,
+                    "evidence_assessment": "supported" if top_matches else "insufficient_data",
+                    "bottom_line": (
+                        f"{pack.standard_id} contains grounded rules for this topic."
+                        if top_matches
+                        else f"{pack.standard_id} did not surface grounded rules for this topic."
+                    ),
+                }
+            )
+        return {
+            "status": "PASS",
+            "answer_type": "comparison",
+            "pack_reasoning": pack_reasoning,
+            "retrieval_coverage": "partial"
+            if any(item.get("load_status") == "error" for item in retrieval["packs_queried"])
+            else "complete",
+        }
+
+    pack = retrieval["pack"]
+    matches = retrieval["matches"]
+    top_matches = _dedupe_rules(matches, 5 if gatekeeper["intent"] == "clause_lookup" else 3)
+    return {
+        "status": "PASS",
+        "answer_type": "lookup" if gatekeeper["intent"] == "clause_lookup" else gatekeeper["intent"],
+        "pack": pack,
+        "top_matches": top_matches,
+        "evidence_assessment": "supported",
+        "retrieval_coverage": "complete",
+        "bottom_line": (
+            "If the scope insertion changes the work and carries cost or funding consequences, the retrieved rules point you into formal TOCR handling."
+            if _is_scope_funding_query(query)
+            else (
+                f"{pack.standard_id} contains grounded rules that answer this question."
+                if gatekeeper["intent"] != "clause_lookup"
+                else f"{pack.standard_id} contains grounded governing clauses for this topic."
+            )
+        ),
+        "gaps": (
+            ["The question does not say whether the cost impact was formally documented."]
+            if _is_scope_funding_query(query)
+            else []
+        ),
     }
 
 
@@ -542,6 +1144,10 @@ def _build_single_pack_synthesis(
     query: str,
     pack: ChatPack,
     matches: list[tuple[ChatRule, int]],
+    *,
+    evidence_assessment: str | None = None,
+    diagnostics: dict[str, Any] | None = None,
+    stage_artifacts: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     top_matches = _dedupe_rules(matches, 3)
     citations = [_citation(rule) for rule, _score in top_matches]
@@ -588,23 +1194,35 @@ def _build_single_pack_synthesis(
         f"Show me the exact clause text for {citations[0]}.",
         f"What would make this compliant under {pack.standard_id}?",
     ]
-    return {
-        "status": "PASS",
-        "response": "\n".join(lines).strip(),
-        "citations": citations,
-        "follow_ups": follow_ups,
-        "selected_packs": [pack.pack_slug],
-        "compare_only": False,
-        "review_only": False,
-        "advisory_only": True,
-    }
+    return _chat_result(
+        status="PASS",
+        response="\n".join(lines).strip(),
+        citations=citations,
+        follow_ups=follow_ups,
+        selected_packs=[pack.pack_slug],
+        compare_only=False,
+        review_only=False,
+        evidence_assessment=evidence_assessment,
+        diagnostics=diagnostics,
+        stage_artifacts=stage_artifacts,
+    )
 
 
-def _compare_packs(message: str, packs: list[ChatPack]) -> dict[str, Any]:
+def _compare_packs(
+    message: str,
+    packs: list[ChatPack],
+    *,
+    pack_findings: list[dict[str, Any]] | None = None,
+    evidence_assessment: str | None = None,
+    diagnostics: dict[str, Any] | None = None,
+    stage_artifacts: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     lines = ["Oracle comparison across selected standards:", ""]
     citations: list[str] = []
-    for pack in packs:
-        matches = _dedupe_rules(_rank_rules(message, pack.rules), 3)
+    findings = pack_findings or [{"pack": pack, "matches": _dedupe_rules(_rank_rules(message, pack.rules), 3)} for pack in packs]
+    for finding in findings:
+        pack = finding["pack"]
+        matches = finding["matches"]
         lines.append(f"{pack.standard_id}:")
         if not matches:
             lines.append("  No grounded requirement match found for this topic.")
@@ -625,120 +1243,28 @@ def _compare_packs(message: str, packs: list[ChatPack]) -> dict[str, Any]:
         f"Which clause is stricter between {packs[0].standard_id} and {packs[1].standard_id}?",
         f"Show the exact governing text from {first.standard_id}.",
     ]
-    return {
-        "status": "PASS" if citations else "INSUFFICIENT_DATA",
-        "response": "\n".join(lines).strip(),
-        "citations": citations,
-        "follow_ups": follow_ups,
-        "selected_packs": [pack.pack_slug for pack in packs],
-        "compare_only": True,
-        "review_only": False,
-        "advisory_only": True,
-    }
+    return _chat_result(
+        status="PASS" if citations else "INSUFFICIENT_DATA",
+        response="\n".join(lines).strip(),
+        citations=citations,
+        follow_ups=follow_ups,
+        selected_packs=[pack.pack_slug for pack in packs],
+        compare_only=True,
+        review_only=False,
+        evidence_assessment=evidence_assessment,
+        diagnostics=diagnostics,
+        stage_artifacts=stage_artifacts,
+    )
 
 
-def answer_query(
+def _build_clause_lookup_answer(
+    pack: ChatPack,
+    top_matches: list[tuple[ChatRule, int]],
     *,
-    message: str,
-    pack_names: list[str],
-    pack_dir: Path,
-    compare_only: bool = False,
-    review_only: bool = False,
+    evidence_assessment: str | None = None,
+    diagnostics: dict[str, Any] | None = None,
+    stage_artifacts: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    query = _normalize_space(message)
-    if not query:
-        return {
-            "status": "INSUFFICIENT_DATA",
-            "response": (
-                "Oracle needs a question, requirement, or draft clause to inspect."
-                if review_only
-                else "Oracle needs a standards question to answer."
-            ),
-            "citations": [],
-            "follow_ups": [],
-            "selected_packs": pack_names,
-            "compare_only": compare_only,
-            "review_only": review_only,
-            "advisory_only": True,
-        }
-
-    if _APPROVAL_PATTERN.search(query):
-        return {
-            "status": "REFUSE",
-            "response": (
-                "Oracle can surface governing clauses and evidence paths, but it does not issue final approval, "
-                "certification, waiver, or sign-off decisions."
-            ),
-            "citations": [],
-            "follow_ups": [],
-            "selected_packs": pack_names,
-            "compare_only": compare_only,
-            "review_only": review_only,
-            "advisory_only": True,
-        }
-
-    if review_only:
-        return _answer_review_only(query, compare_only)
-
-    if not pack_names:
-        return {
-            "status": "INSUFFICIENT_DATA",
-            "response": (
-                "Select at least one authority pack before chatting. Oracle stays grounded in the packs you pick."
-            ),
-            "citations": [],
-            "follow_ups": [],
-            "selected_packs": [],
-            "compare_only": compare_only,
-            "review_only": False,
-            "advisory_only": True,
-        }
-
-    packs = [load_chat_pack(pack_name, pack_dir) for pack_name in pack_names]
-    if len(packs) > 1 and not compare_only and not _COMPARE_PATTERN.search(query):
-        return {
-            "status": "INSUFFICIENT_DATA",
-            "response": (
-                "Multiple packs are selected. Narrow to one pack for clause lookup or turn on compare mode to chat across selected standards."
-            ),
-            "citations": [],
-            "follow_ups": [
-                f"Compare {packs[0].standard_id} and {packs[1].standard_id}.",
-                f"Limit this question to {packs[0].standard_id}.",
-            ],
-            "selected_packs": [pack.pack_slug for pack in packs],
-            "compare_only": compare_only,
-            "review_only": False,
-            "advisory_only": True,
-        }
-
-    if len(packs) > 1 and (compare_only or _COMPARE_PATTERN.search(query)):
-        return _compare_packs(query, packs[:2])
-
-    pack = packs[0]
-    matches = _rank_rules(query, pack.rules)
-    if not matches:
-        return {
-            "status": "INSUFFICIENT_DATA",
-            "response": (
-                f"I found {pack.standard_id}, but I did not find a grounded requirement match for that topic. "
-                "Narrow this by section, table note, appendix, or part family."
-            ),
-            "citations": [pack.standard_id],
-            "follow_ups": [
-                f"Show me the exact section in {pack.standard_id}.",
-                f"List the top requirements in {pack.standard_id} for this topic.",
-            ],
-            "selected_packs": [pack.pack_slug],
-            "compare_only": False,
-            "review_only": False,
-            "advisory_only": True,
-        }
-
-    if not _is_clause_lookup_query(query):
-        return _build_single_pack_synthesis(query, pack, matches)
-
-    top_matches = _dedupe_rules(matches, 5)
     lines = [
         f"Oracle matched {len(top_matches)} governing requirement(s) in {pack.standard_id}.",
         "",
@@ -758,16 +1284,271 @@ def answer_query(
         "If you want a tighter answer, ask for a specific section, table note, appendix, or compare it against another selected standard."
     )
 
-    return {
-        "status": "PASS",
-        "response": "\n".join(lines).strip(),
-        "citations": citations,
-        "follow_ups": [
+    return _chat_result(
+        status="PASS",
+        response="\n".join(lines).strip(),
+        citations=citations,
+        follow_ups=[
             f"Show the exact requirement text from {citations[0]}.",
             f"List the top requirements in {pack.standard_id} for this topic.",
         ],
-        "selected_packs": [pack.pack_slug],
-        "compare_only": False,
-        "review_only": False,
-        "advisory_only": True,
+        selected_packs=[pack.pack_slug],
+        compare_only=False,
+        review_only=False,
+        evidence_assessment=evidence_assessment,
+        diagnostics=diagnostics,
+        stage_artifacts=stage_artifacts,
+    )
+
+
+def _build_llm_guided_answer(
+    *,
+    llm_reasoning: dict[str, Any],
+    llm_summary: dict[str, Any] | None,
+    selected_packs: list[str],
+    compare_only: bool,
+    evidence_assessment: str | None = None,
+    diagnostics: dict[str, Any] | None = None,
+    stage_artifacts: dict[str, Any],
+) -> dict[str, Any]:
+    response_lines: list[str] = []
+    if llm_summary:
+        response_lines.append(llm_summary["answer_text"])
+    else:
+        if llm_reasoning.get("direct_answer"):
+            response_lines.append(llm_reasoning["direct_answer"])
+        if llm_reasoning.get("bottom_line"):
+            response_lines.append(llm_reasoning["bottom_line"])
+        if llm_reasoning.get("why"):
+            response_lines.append("")
+            response_lines.append("Why:")
+            for item in llm_reasoning["why"][:3]:
+                response_lines.append(f"- {item}")
+        if llm_reasoning.get("gaps"):
+            response_lines.append("")
+            response_lines.append("Gaps:")
+            for item in llm_reasoning["gaps"][:2]:
+                response_lines.append(f"- {item}")
+        if compare_only and llm_reasoning.get("per_pack_findings"):
+            response_lines.append("")
+            response_lines.append("Per pack:")
+            for item in llm_reasoning["per_pack_findings"]:
+                if item.get("standard_id") and item.get("finding"):
+                    response_lines.append(f"- {item['standard_id']}: {item['finding']}")
+
+    citations = llm_summary["citations"] if llm_summary else llm_reasoning["governing_citations"]
+    follow_ups = (
+        llm_summary["follow_ups"]
+        if llm_summary and llm_summary.get("follow_ups")
+        else llm_reasoning.get("follow_ups", [])
+    )
+    return _chat_result(
+        status="PASS",
+        response="\n".join(line for line in response_lines if line is not None).strip(),
+        citations=citations,
+        follow_ups=follow_ups,
+        selected_packs=selected_packs,
+        compare_only=compare_only,
+        review_only=False,
+        evidence_assessment=evidence_assessment,
+        diagnostics=diagnostics,
+        stage_artifacts=stage_artifacts,
+    )
+
+
+def answer_query(
+    *,
+    message: str,
+    pack_names: list[str],
+    pack_dir: Path,
+    compare_only: bool = False,
+    review_only: bool = False,
+) -> dict[str, Any]:
+    query = _normalize_space(message)
+    if not query:
+        return _chat_result(
+            status="INSUFFICIENT_DATA",
+            response=(
+                "Oracle needs a question, requirement, or draft clause to inspect."
+                if review_only
+                else "Oracle needs a standards question to answer."
+            ),
+            citations=[],
+            follow_ups=[],
+            selected_packs=pack_names,
+            compare_only=compare_only,
+            review_only=review_only,
+        )
+
+    if review_only:
+        return _answer_review_only(query, compare_only)
+
+    gatekeeper = _gatekeep_query(query, pack_names, compare_only)
+    if gatekeeper["status"] == "REFUSE":
+        return _chat_result(
+            status="REFUSE",
+            response=gatekeeper["refusal_reason"],
+            citations=[],
+            follow_ups=[],
+            selected_packs=gatekeeper["selected_packs"],
+            compare_only=bool(gatekeeper["compare_mode"]),
+            review_only=False,
+            stage_artifacts={"gatekeeper": gatekeeper},
+        )
+    if gatekeeper["status"] == "INSUFFICIENT_DATA":
+        return _chat_result(
+            status="INSUFFICIENT_DATA",
+            response=gatekeeper["error"],
+            citations=[],
+            follow_ups=[],
+            selected_packs=gatekeeper["selected_packs"],
+            compare_only=bool(gatekeeper["compare_mode"]),
+            review_only=False,
+            stage_artifacts={"gatekeeper": gatekeeper},
+        )
+
+    retrieval = _retrieve_chat_context(gatekeeper, pack_dir)
+    if retrieval["status"] == "INSUFFICIENT_DATA":
+        loaded_packs = retrieval.get("loaded_packs", [])
+        follow_ups: list[str] = []
+        citations: list[str] = []
+        if loaded_packs:
+            follow_ups = [
+                f"Compare {loaded_packs[0].standard_id} and {loaded_packs[1].standard_id}.",
+                f"Limit this question to {loaded_packs[0].standard_id}.",
+            ]
+            citations = [pack.standard_id for pack in loaded_packs[:2]]
+        elif retrieval.get("pack"):
+            pack = retrieval["pack"]
+            follow_ups = [
+                f"Show me the exact section in {pack.standard_id}.",
+                f"List the top requirements in {pack.standard_id} for this topic.",
+            ]
+            citations = [pack.standard_id]
+
+        return _chat_result(
+            status="INSUFFICIENT_DATA",
+            response=retrieval["error"],
+            citations=citations,
+            follow_ups=follow_ups,
+            selected_packs=gatekeeper["selected_packs"],
+            compare_only=bool(gatekeeper["compare_mode"]),
+            review_only=False,
+            stage_artifacts={"gatekeeper": gatekeeper, "retrieval": retrieval},
+        )
+
+    reasoning = _reason_about_chat_context(query, gatekeeper, retrieval)
+    stage_artifacts = {
+        "gatekeeper": gatekeeper,
+        "retrieval": {
+            "compare_mode": retrieval["compare_mode"],
+            "packs_queried": retrieval["packs_queried"],
+        },
+        "reasoning": {
+            "answer_type": reasoning["answer_type"],
+            "retrieval_coverage": reasoning["retrieval_coverage"],
+            "evidence_assessment": reasoning.get("evidence_assessment"),
+        },
     }
+    diagnostics: dict[str, Any] = {
+        "fallback_used": False,
+        "fallback_reason": None,
+        "validation_failures": [],
+    }
+    chat_provider = _chat_model_provider()
+
+    llm_reasoning = None
+    llm_summary = None
+    if gatekeeper["intent"] != "clause_lookup":
+        llm_reasoning = _maybe_run_llm_reasoning(
+            query=query,
+            gatekeeper=gatekeeper,
+            retrieval=retrieval,
+        )
+        if llm_reasoning:
+            reasoning_failures = _validate_llm_reasoning_output(llm_reasoning, retrieval)
+            if reasoning_failures:
+                diagnostics["fallback_used"] = True
+                diagnostics["fallback_reason"] = "stage_3_validation_failure"
+                diagnostics["validation_failures"].extend(reasoning_failures)
+                llm_reasoning = None
+            else:
+                stage_artifacts["reasoning"]["llm_provider"] = llm_reasoning["provider"]
+                stage_artifacts["reasoning"]["llm_model"] = llm_reasoning["model"]
+                llm_summary = _maybe_run_llm_summary(
+                    query=query,
+                    gatekeeper=gatekeeper,
+                    llm_reasoning=llm_reasoning,
+                )
+                if llm_summary:
+                    summary_failures = _validate_llm_summary_output(llm_summary, llm_reasoning)
+                    if summary_failures:
+                        diagnostics["fallback_used"] = True
+                        diagnostics["fallback_reason"] = "stage_4_validation_failure"
+                        diagnostics["validation_failures"].extend(summary_failures)
+                        llm_summary = None
+                    else:
+                        stage_artifacts["summary"] = {
+                            "llm_provider": llm_summary["provider"],
+                            "llm_model": llm_summary["model"],
+                        }
+                else:
+                    diagnostics["fallback_used"] = True
+                    diagnostics["fallback_reason"] = "stage_4_failure"
+        elif chat_provider:
+            diagnostics["fallback_used"] = True
+            diagnostics["fallback_reason"] = "stage_3_failure"
+
+    if reasoning["answer_type"] == "comparison":
+        if llm_reasoning:
+            return _build_llm_guided_answer(
+                llm_reasoning=llm_reasoning,
+                llm_summary=llm_summary,
+                selected_packs=gatekeeper["selected_packs"][:2],
+                compare_only=True,
+                evidence_assessment=reasoning.get("evidence_assessment"),
+                diagnostics=diagnostics,
+                stage_artifacts=stage_artifacts,
+            )
+        return _compare_packs(
+            query,
+            [item["pack"] for item in reasoning["pack_reasoning"]],
+            pack_findings=[
+                {"pack": item["pack"], "matches": item["top_matches"]}
+                for item in reasoning["pack_reasoning"]
+            ],
+            evidence_assessment=reasoning.get("evidence_assessment"),
+            diagnostics=diagnostics,
+            stage_artifacts=stage_artifacts,
+        )
+
+    pack = reasoning["pack"]
+    top_matches = reasoning["top_matches"]
+    if gatekeeper["intent"] == "clause_lookup":
+        return _build_clause_lookup_answer(
+            pack,
+            top_matches,
+            evidence_assessment=reasoning.get("evidence_assessment"),
+            diagnostics=diagnostics,
+            stage_artifacts=stage_artifacts,
+        )
+
+    if llm_reasoning:
+        return _build_llm_guided_answer(
+            llm_reasoning=llm_reasoning,
+            llm_summary=llm_summary,
+            selected_packs=[pack.pack_slug],
+            compare_only=False,
+            evidence_assessment=reasoning.get("evidence_assessment"),
+            diagnostics=diagnostics,
+            stage_artifacts=stage_artifacts,
+        )
+
+    return _build_single_pack_synthesis(
+        query,
+        pack,
+        top_matches,
+        evidence_assessment=reasoning.get("evidence_assessment"),
+        diagnostics=diagnostics,
+        stage_artifacts=stage_artifacts,
+    )

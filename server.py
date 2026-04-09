@@ -822,9 +822,19 @@ def _resolve_chat_scope(request: OracleChatRequest) -> tuple[str, list[str], boo
     session_id = request.session_id or f"chat-{uuid.uuid4().hex[:8]}"
     session = _chat_sessions.setdefault(session_id, {})
 
-    selected_packs = request.selected_packs or session.get("selected_packs", [])
-    review_only = bool(request.review_only)
-    compare_only = bool(request.compare_only and not review_only)
+    fields_set = getattr(request, "model_fields_set", set())
+    if "selected_packs" in fields_set:
+        selected_packs = list(request.selected_packs)
+    else:
+        selected_packs = list(session.get("selected_packs", []))
+
+    review_only = bool(
+        request.review_only if "review_only" in fields_set else session.get("review_only", False)
+    )
+    compare_requested = (
+        request.compare_only if "compare_only" in fields_set else session.get("compare_only", False)
+    )
+    compare_only = bool(compare_requested and not review_only)
 
     session["selected_packs"] = list(selected_packs)
     session["compare_only"] = compare_only
@@ -876,14 +886,19 @@ async def oracle_chat_stream(request: Request, body: OracleChatRequest):
                 await asyncio.sleep(0)
             yield "event: text_end\ndata: {}\n\n"
             done_payload = {
+                "envelope_version": result.get("envelope_version"),
                 "session_id": session_id,
                 "status": result["status"],
+                "answer_text": result.get("answer_text"),
+                "evidence_assessment": result.get("evidence_assessment"),
                 "citations": result["citations"],
                 "follow_ups": result["follow_ups"],
                 "selected_packs": result["selected_packs"],
                 "compare_only": result["compare_only"],
                 "review_only": result["review_only"],
                 "advisory_only": result["advisory_only"],
+                "diagnostics": result.get("diagnostics"),
+                "stage_artifacts": result.get("stage_artifacts"),
             }
             yield f"event: done\ndata: {json.dumps(done_payload)}\n\n"
         except Exception as exc:
