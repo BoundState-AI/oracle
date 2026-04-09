@@ -31,7 +31,7 @@ from typing import Any, Callable
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from oracle.cli import (
     _load_manifest,
@@ -45,6 +45,7 @@ from oracle.cli import (
     remove_pack as cli_remove_pack,
     run_review as cli_run_review,
 )
+from oracle.chat_engine import answer_query as oracle_answer_query
 from oracle.oracle2 import compute_metrics
 from oracle.oracle2_adapter import build_review_result
 
@@ -87,6 +88,7 @@ async def verify_api_key(request: Request) -> None:
 # ---------------------------------------------------------------------------
 
 _sessions: dict[str, dict[str, Any]] = {}
+_chat_sessions: dict[str, dict[str, Any]] = {}
 
 # ---------------------------------------------------------------------------
 # Log Capture — intercepts oracle2 logger output per-session
@@ -786,6 +788,110 @@ def _clean_log_message(msg: str) -> str | None:
         return None
 
     return clean if clean else None
+
+
+# ---------------------------------------------------------------------------
+# Oracle Chat
+# ---------------------------------------------------------------------------
+
+
+class OracleChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class OracleChatRequest(BaseModel):
+    message: str
+    session_id: str | None = None
+    history: list[OracleChatMessage] = Field(default_factory=list)
+    selected_packs: list[str] = Field(default_factory=list)
+    compare_only: bool = False
+
+
+def _split_chat_chunks(text: str) -> list[str]:
+    chunks = [
+        chunk.strip()
+        for chunk in text.replace("\r\n", "\n").split("\n\n")
+        if chunk.strip()
+    ]
+    return chunks or [text]
+
+
+def _resolve_chat_scope(request: OracleChatRequest) -> tuple[str, list[str], bool]:
+    session_id = request.session_id or f"chat-{uuid.uuid4().hex[:8]}"
+    session = _chat_sessions.setdefault(session_id, {})
+
+    selected_packs = request.selected_packs or session.get("selected_packs", [])
+    compare_only = bool(request.compare_only)
+
+    session["selected_packs"] = list(selected_packs)
+    session["compare_only"] = compare_only
+    return session_id, list(selected_packs), compare_only
+
+
+@app.get("/oracle/chat/ping")
+async def chat_ping(request: Request):
+    await verify_api_key(request)
+    return {"status": "ok", "domain": "oracle-chat", "advisory_only": True}
+
+
+@app.post("/oracle/chat")
+async def oracle_chat(request: Request, body: OracleChatRequest):
+    await verify_api_key(request)
+    session_id, selected_packs, compare_only = _resolve_chat_scope(body)
+    result = oracle_answer_query(
+        message=body.message,
+        pack_names=selected_packs,
+        pack_dir=_pack_dir(),
+        compare_only=compare_only,
+    )
+    return {
+        "session_id": session_id,
+        **result,
+    }
+
+
+@app.post("/oracle/chat/stream")
+async def oracle_chat_stream(request: Request, body: OracleChatRequest):
+    await verify_api_key(request)
+    session_id, selected_packs, compare_only = _resolve_chat_scope(body)
+
+    async def _event_generator():
+        try:
+            result = oracle_answer_query(
+                message=body.message,
+                pack_names=selected_packs,
+                pack_dir=_pack_dir(),
+                compare_only=compare_only,
+            )
+            yield f"event: meta\ndata: {json.dumps({'status': result['status'], 'selected_packs': result['selected_packs'], 'compare_only': result['compare_only']})}\n\n"
+            yield "event: text_start\ndata: {}\n\n"
+            for chunk in _split_chat_chunks(str(result["response"])):
+                yield f"event: text\ndata: {json.dumps({'text': chunk})}\n\n"
+                await asyncio.sleep(0)
+            yield "event: text_end\ndata: {}\n\n"
+            done_payload = {
+                "session_id": session_id,
+                "status": result["status"],
+                "citations": result["citations"],
+                "follow_ups": result["follow_ups"],
+                "selected_packs": result["selected_packs"],
+                "compare_only": result["compare_only"],
+                "advisory_only": result["advisory_only"],
+            }
+            yield f"event: done\ndata: {json.dumps(done_payload)}\n\n"
+        except Exception as exc:
+            yield f"event: error\ndata: {json.dumps({'detail': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        _event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------

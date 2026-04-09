@@ -18,6 +18,7 @@ import { ModeSelector, type ProcessingMode } from "@/components/ModeSelector";
 import { StatusSpinner } from "@/components/StatusSpinner";
 import { CritiquePanel } from "@/components/CritiquePanel";
 import { DownloadPanel } from "@/components/DownloadPanel";
+import { OracleChatPanel } from "@/components/OracleChatPanel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -198,7 +199,7 @@ function readLogMessages(data: Record<string, unknown>): string[] {
 }
 
 export function OracleWorkspace() {
-  const [activeTab, setActiveTab] = useState<"review" | "packs">("review");
+  const [activeTab, setActiveTab] = useState<"review" | "packs" | "chat">("review");
   const [file, setFile] = useState<File | null>(null);
   const [mode, setMode] = useState<ProcessingMode>("review");
   const [phase, setPhase] = useState<Phase>({ step: "upload" });
@@ -639,6 +640,17 @@ export function OracleWorkspace() {
               }`}
             >
               Pack Library
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab("chat")}
+              className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
+                activeTab === "chat"
+                  ? "bg-primary text-primary-foreground"
+                  : "text-muted-foreground hover:bg-accent hover:text-foreground"
+              }`}
+            >
+              Chat
             </button>
           </div>
         </div>
@@ -1093,6 +1105,16 @@ export function OracleWorkspace() {
                   </div>
                 </div>
               </div>
+            )}
+
+            {activeTab === "chat" && (
+              <OracleChatPanel
+                availablePacks={availablePacks}
+                selectedPacks={selectedPacks}
+                onSelectPacks={setSelectedPacks}
+                onRefreshPacks={loadPacks}
+                packsLoading={packsLoading}
+              />
             )}
           </div>
         </div>

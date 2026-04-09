@@ -72,12 +72,12 @@ def _write_pack_json(path: Path) -> None:
     path.write_text(json.dumps(_generic_pack_payload()), encoding="utf-8")
 
 
-def test_list_and_show_packs(tmp_path, monkeypatch):
-    pack_dir = tmp_path / "packs"
+def test_list_and_show_packs(workspace_tmp_path, monkeypatch):
+    pack_dir = workspace_tmp_path / "packs"
     pack_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
 
-    source = tmp_path / "incoming.json"
+    source = workspace_tmp_path / "incoming.json"
     _write_pack_json(source)
     slug = register_pack(source, pack_dir)
 
@@ -97,8 +97,8 @@ def test_list_and_show_packs(tmp_path, monkeypatch):
     assert "Pack ID:" in body["rendered"]
 
 
-def test_import_pack_endpoint(tmp_path, monkeypatch):
-    pack_dir = tmp_path / "packs"
+def test_import_pack_endpoint(workspace_tmp_path, monkeypatch):
+    pack_dir = workspace_tmp_path / "packs"
     pack_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
 
@@ -115,11 +115,11 @@ def test_import_pack_endpoint(tmp_path, monkeypatch):
     assert body["pack"]["slug"] == "test_std_1"
 
 
-def test_register_pack_persists_normalized_gpcm_ids(tmp_path):
-    pack_dir = tmp_path / "packs"
+def test_register_pack_persists_normalized_gpcm_ids(workspace_tmp_path):
+    pack_dir = workspace_tmp_path / "packs"
     pack_dir.mkdir(parents=True, exist_ok=True)
 
-    source = tmp_path / "gpcm.json"
+    source = workspace_tmp_path / "gpcm.json"
     source.write_text(json.dumps(_gpcm_pack_payload()), encoding="utf-8")
 
     slug = register_pack(source, pack_dir)
