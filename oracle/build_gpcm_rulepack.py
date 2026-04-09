@@ -13,7 +13,7 @@ import logging
 from pathlib import Path
 
 from oracle.gpcm_rulepack_adapter import default_output_json, infer_standard_id, run_adapter
-from oracle.shall_extractor import enrich_with_sonnet, extract_pass1, save_results
+from oracle.shall_extractor import detect_implicit_obligations, enrich_with_sonnet, extract_pass1, save_results
 
 
 logger = logging.getLogger(__name__)
@@ -24,7 +24,7 @@ def filter_mandatory_only(result) -> None:
     result.statements = [
         statement
         for statement in result.statements
-        if statement.obligation_type in ("mandatory", "prohibition")
+        if statement.obligation_type in ("mandatory", "prohibition", "implicit")
     ]
     result.total_statements = len(result.statements)
     result.by_type = {}
@@ -51,6 +51,7 @@ def run_pipeline(
     extractor_max_pages: int,
     adapter_model: str,
     adapter_dpi: int,
+    detect_implicit: bool = False,
 ) -> dict[str, Path]:
     logger.info("Pipeline start: %s", pdf_path)
     result = extract_pass1(pdf_path)
@@ -71,6 +72,16 @@ def run_pipeline(
         )
         extractor_paths = save_results(result, output_dir)
         logger.info("Extractor Sonnet JSON: %s", extractor_paths["json"])
+
+    if detect_implicit:
+        logger.info("Pass 1c: Detecting implicit obligations...")
+        result = detect_implicit_obligations(
+            result,
+            pdf_path,
+            api_key=api_key,
+        )
+        extractor_paths = save_results(result, output_dir)
+        logger.info("Implicit detection complete: %s", extractor_paths["json"])
 
     standard_id = infer_standard_id(pdf_path, extractor_paths["json"])
     if standard_id is None:

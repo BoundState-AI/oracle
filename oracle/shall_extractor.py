@@ -869,6 +869,328 @@ def enrich_with_sonnet(
 
 
 # ============================================================================
+# Pass 1c: Implicit obligation detection
+# ============================================================================
+
+IMPLICIT_DETECTION_PROMPT = """You are analyzing a page from a regulatory or contractual document.
+
+Below is the page text. Some explicit obligation statements (using "shall", "must", "required", etc.) have ALREADY been extracted and are listed under ALREADY EXTRACTED.
+
+Your job: find **implicit obligations** — statements that impose a binding requirement on the contractor or system WITHOUT using standard obligation keywords. These are statements that a proposal manager would need to respond to, but that an automated keyword search would miss.
+
+Examples of implicit obligations:
+- "Reports are due quarterly" (= contractor shall submit reports quarterly)
+- "The system operates at 5V" (= system shall be designed to operate at 5V)
+- "All personnel hold a SECRET clearance" (= contractor shall staff only cleared personnel)
+- "Testing follows MIL-STD-810" (= contractor shall test per MIL-STD-810)
+- "Documentation is maintained in CMMI Level 3 format" (= contractor shall maintain CMMI L3 docs)
+- "The program office reviews deliverables within 10 business days" (= deliverables have a 10-day review cycle the contractor must plan around)
+
+Do NOT extract:
+- Statements that use shall/must/required/prohibited (already captured)
+- Background information, definitions, or scope descriptions
+- Statements describing what the government will do (unless they create a contractor obligation)
+- Recommendations (should/may)
+- Obvious boilerplate or headers
+
+For each implicit obligation found, assess your confidence (0.0-1.0) that this is genuinely a binding requirement rather than informational text.
+
+Return STRICT JSON only:
+{{"obligations": [
+  {{
+    "statement_text": "the exact text from the document",
+    "requirement": "what the contractor/system must do (rewritten as an explicit obligation)",
+    "subject": "who/what must comply",
+    "section": "section number if visible",
+    "confidence": 0.0-1.0,
+    "keywords": ["keyword1", "keyword2"],
+    "context": "brief explanation of why this is binding"
+  }}
+]}}
+
+Rules:
+- Only extract genuinely binding implicit obligations, not informational text.
+- Each obligation must be atomic: one requirement per entry.
+- Preserve exact source language in statement_text.
+- Be conservative — when in doubt, do not extract. False negatives are preferable to false positives.
+- Confidence below 0.5 means you're unsure — include it and let the human reviewer decide.
+- If no implicit obligations are found, return {{"obligations": []}}.
+- Return valid JSON only. No markdown fences, no commentary.\
+"""
+
+
+def _normalize_for_dedup(text: str) -> str:
+    """Lowercase, collapse whitespace, strip punctuation for dedup comparison."""
+    text = re.sub(r"\s+", " ", text.lower().strip())
+    text = re.sub(r"[^\w\s]", "", text)
+    return text
+
+
+def _overlaps_existing(
+    new_text: str,
+    existing_texts: set[str],
+    threshold: float = 0.6,
+) -> bool:
+    """Check if new_text substantially overlaps any existing statement."""
+    new_norm = _normalize_for_dedup(new_text)
+    new_words = set(new_norm.split())
+    if not new_words:
+        return True
+    for existing_norm in existing_texts:
+        existing_words = set(existing_norm.split())
+        if not existing_words:
+            continue
+        overlap = len(new_words & existing_words)
+        smaller = min(len(new_words), len(existing_words))
+        if smaller > 0 and overlap / smaller >= threshold:
+            return True
+    return False
+
+
+def detect_implicit_obligations(
+    result: ExtractionResult,
+    pdf_path: Path,
+    *,
+    api_key: str | None = None,
+    max_pages: int = 0,
+    min_confidence: float = 0.0,
+) -> ExtractionResult:
+    """Pass 1c: Detect implicit obligations that lack standard obligation keywords.
+
+    Sends each page to Claude with the already-extracted explicit statements
+    for that page, asking it to find binding requirements expressed without
+    shall/must/required/prohibited language.
+
+    New statements are added with obligation_type='implicit' and the
+    confidence score from the LLM.
+    """
+    import os
+
+    try:
+        from anthropic import Anthropic
+    except ImportError:
+        raise ImportError(
+            "anthropic package required for implicit detection. "
+            "Run: pip install anthropic"
+        )
+
+    import httpx
+
+    key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+    if not key:
+        raise ValueError(
+            "No API key found. Set ANTHROPIC_API_KEY or pass --api-key"
+        )
+    client = Anthropic(
+        api_key=key,
+        timeout=httpx.Timeout(
+            float(os.environ.get("ORACLE_TIMEOUT_SECONDS", "300")),
+            connect=10.0,
+        ),
+    )
+
+    doc = fitz.open(pdf_path)
+    total_pages = len(doc)
+
+    # Build per-page index of already-extracted statements
+    existing_by_page: dict[int, list[ShallStatement]] = {}
+    for s in result.statements:
+        existing_by_page.setdefault(s.page, []).append(s)
+
+    # Build normalized text set for dedup
+    existing_norm_texts: set[str] = {
+        _normalize_for_dedup(s.statement_text) for s in result.statements
+    }
+
+    pages_to_process = list(range(total_pages))
+    if max_pages and max_pages > 0:
+        pages_to_process = pages_to_process[:max_pages]
+
+    logger.info(
+        "Pass 1c: detecting implicit obligations across %d pages",
+        len(pages_to_process),
+    )
+
+    new_statements: list[ShallStatement] = []
+    next_id = max((s.id for s in result.statements), default=0) + 1
+    failed_pages = 0
+    started = time.time()
+
+    # Process in chunks of 5 pages (same chunking as generic extraction)
+    CHUNK_SIZE = 5
+    chunk_start = 0
+
+    while chunk_start < len(pages_to_process):
+        chunk_end = min(chunk_start + CHUNK_SIZE, len(pages_to_process))
+        chunk_page_indices = pages_to_process[chunk_start:chunk_end]
+        chunk_page_numbers = [idx + 1 for idx in chunk_page_indices]
+
+        # Build page text and existing obligations summary for the chunk
+        page_texts = []
+        already_extracted_lines = []
+
+        for page_idx in chunk_page_indices:
+            raw_text = doc[page_idx].get_text()
+            if not raw_text or len(raw_text.strip()) < 20:
+                continue
+            text = _preprocess_page_text(raw_text)
+            page_num = page_idx + 1
+            page_texts.append(f"--- PAGE {page_num} ---\n{text}")
+
+            page_stmts = existing_by_page.get(page_num, [])
+            for s in page_stmts:
+                already_extracted_lines.append(
+                    f"  - [{s.obligation_keyword.upper()}] {s.statement_text[:200]}"
+                )
+
+        if not page_texts:
+            chunk_start = chunk_end
+            continue
+
+        already_section = ""
+        if already_extracted_lines:
+            already_section = (
+                "\n\nALREADY EXTRACTED (do not re-extract these):\n"
+                + "\n".join(already_extracted_lines)
+            )
+
+        content = (
+            "\n\n".join(page_texts)
+            + already_section
+            + "\n\n"
+            + IMPLICIT_DETECTION_PROMPT
+        )
+
+        try:
+            response = client.messages.create(
+                model=os.environ.get("ORACLE_VISION_MODEL", "claude-sonnet-4-6"),
+                max_tokens=4096,
+                temperature=0,
+                messages=[{"role": "user", "content": content}],
+            )
+
+            if not response.content:
+                chunk_start = chunk_end
+                continue
+
+            raw_response = response.content[0].text
+
+            # Strip markdown fences if present
+            if "```" in raw_response:
+                start_idx = raw_response.find("```")
+                first_nl = raw_response.find("\n", start_idx)
+                end_idx = raw_response.rfind("```")
+                if first_nl != -1 and end_idx > first_nl:
+                    raw_response = raw_response[first_nl + 1 : end_idx].strip()
+
+            parsed = json.loads(raw_response)
+            obligations = parsed.get("obligations", [])
+
+            chunk_new = 0
+            for ob in obligations:
+                stmt_text = ob.get("statement_text", "").strip()
+                if not stmt_text or len(stmt_text) < 15:
+                    continue
+
+                confidence = float(ob.get("confidence", 0.5))
+                if confidence < min_confidence:
+                    continue
+
+                # Dedup against existing explicit statements
+                if _overlaps_existing(stmt_text, existing_norm_texts):
+                    continue
+
+                section = ob.get("section", "")
+                requirement = ob.get("requirement", stmt_text)
+                subject = ob.get("subject", "(implicit)")
+                keywords_list = ob.get("keywords", [])
+                if isinstance(keywords_list, str):
+                    keywords_list = [keywords_list]
+
+                page_num = chunk_page_numbers[0]  # default to first page in chunk
+                # Try to figure out which page this came from
+                for pn in chunk_page_numbers:
+                    page_stmts_text = "\n".join(
+                        p for p in page_texts
+                        if p.startswith(f"--- PAGE {pn} ---")
+                    )
+                    if stmt_text[:50].lower() in page_stmts_text.lower():
+                        page_num = pn
+                        break
+
+                applies_to = _classify_applicability(stmt_text, ob.get("context", ""))
+
+                stmt = ShallStatement(
+                    id=next_id,
+                    page=page_num,
+                    section=section,
+                    obligation_keyword="(implicit)",
+                    obligation_type="implicit",
+                    statement_text=stmt_text,
+                    subject=subject,
+                    requirement=requirement,
+                    context=ob.get("context", ""),
+                    keywords=keywords_list[:7],
+                    applies_to=applies_to,
+                    confidence=confidence,
+                )
+                new_statements.append(stmt)
+                existing_norm_texts.add(_normalize_for_dedup(stmt_text))
+                next_id += 1
+                chunk_new += 1
+
+            logger.info(
+                "  Pages %d–%d: found %d implicit obligations",
+                chunk_page_numbers[0],
+                chunk_page_numbers[-1],
+                chunk_new,
+            )
+
+        except json.JSONDecodeError as e:
+            failed_pages += len(chunk_page_indices)
+            logger.warning(
+                "  Pages %d–%d: JSON parse failed: %s",
+                chunk_page_numbers[0],
+                chunk_page_numbers[-1],
+                e,
+            )
+        except Exception as e:
+            failed_pages += len(chunk_page_indices)
+            logger.error(
+                "  Pages %d–%d: %s",
+                chunk_page_numbers[0],
+                chunk_page_numbers[-1],
+                e,
+            )
+
+        chunk_start = chunk_end
+
+    doc.close()
+
+    # Append to result
+    result.statements.extend(new_statements)
+    result.total_statements = len(result.statements)
+
+    # Update by_type counts
+    implicit_count = sum(1 for s in result.statements if s.obligation_type == "implicit")
+    if implicit_count > 0:
+        result.by_type["implicit"] = implicit_count
+
+    # Renumber IDs sequentially
+    for i, s in enumerate(result.statements, 1):
+        s.id = i
+
+    elapsed = time.time() - started
+    logger.info(
+        "Pass 1c complete: %d implicit obligations found, %d pages failed (%.1fs)",
+        len(new_statements),
+        failed_pages,
+        elapsed,
+    )
+    return result
+
+
+# ============================================================================
 # Pass 2 classification
 # ============================================================================
 
@@ -1335,6 +1657,17 @@ def main() -> None:
         default=150,
         help="DPI for page rendering in Sonnet enrichment (default: 150)",
     )
+    parser.add_argument(
+        "--implicit",
+        action="store_true",
+        help="Run Pass 1c: detect implicit obligations without keyword markers",
+    )
+    parser.add_argument(
+        "--implicit-min-confidence",
+        type=float,
+        default=0.0,
+        help="Minimum confidence for implicit obligations (default: 0.0, keep all)",
+    )
     args = parser.parse_args()
 
     pdf_path = Path(args.pdf)
@@ -1371,6 +1704,18 @@ def main() -> None:
         # Checkpoint after enrichment
         save_results(result, output_dir)
         logger.info("Sonnet enrichment checkpoint written")
+
+    # Implicit obligation detection (Pass 1c)
+    if args.implicit:
+        result = detect_implicit_obligations(
+            result,
+            pdf_path,
+            api_key=args.api_key,
+            max_pages=args.max_pages,
+            min_confidence=args.implicit_min_confidence,
+        )
+        save_results(result, output_dir)
+        logger.info("Implicit obligation detection checkpoint written")
 
     if args.classify:
         result = extract_pass2(

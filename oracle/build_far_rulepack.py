@@ -135,14 +135,14 @@ def build_rulepack(
     stmts = data["statements"]
     logger.info("Loaded %d statements", len(stmts))
 
-    # Filter to binding requirements only
+    # Filter to binding requirements only (including implicit obligations)
     if mandatory_only:
         before = len(stmts)
         stmts = [
             s for s in stmts
-            if s["obligation_type"] in ("mandatory", "prohibition")
+            if s["obligation_type"] in ("mandatory", "prohibition", "implicit")
         ]
-        logger.info("Filtered to mandatory/prohibition: %d -> %d", before, len(stmts))
+        logger.info("Filtered to mandatory/prohibition/implicit: %d -> %d", before, len(stmts))
 
     # Group by Part
     parts: dict[int, list[dict]] = defaultdict(list)

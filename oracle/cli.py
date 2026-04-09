@@ -812,6 +812,7 @@ def _generate_pack_tagged_standard(
     output_dir: Path,
     name: str | None,
     use_vision: bool,
+    detect_implicit: bool = False,
 ) -> Path:
     """Route A: Generate pack from a tagged standard (MPR/FCR) via GPCM pipeline.
 
@@ -831,6 +832,7 @@ def _generate_pack_tagged_standard(
         extractor_max_pages=0,
         adapter_model=os.environ.get("ORACLE_VISION_MODEL", "claude-sonnet-4-6"),
         adapter_dpi=200,
+        detect_implicit=detect_implicit,
     )
     return result["rule_pack"]
 
@@ -840,13 +842,14 @@ def _generate_pack_far_style(
     output_dir: Path,
     name: str | None,
     use_vision: bool,
+    detect_implicit: bool = False,
 ) -> Path:
     """Route B: Generate pack from FAR/DFARS-style regulation.
 
     Uses shall_extractor for extraction, then build_far_rulepack for
     structuring into the tiered Part/Section format.
     """
-    from oracle.shall_extractor import extract_pass1, enrich_with_sonnet, save_results
+    from oracle.shall_extractor import extract_pass1, enrich_with_sonnet, detect_implicit_obligations, save_results
     from oracle.build_far_rulepack import build_rulepack
 
     # Stage 1: Extract shall statements
@@ -856,6 +859,13 @@ def _generate_pack_far_style(
     if use_vision:
         LOGGER.info("Stage 1.5: Sonnet Vision enrichment...")
         result = enrich_with_sonnet(
+            result, pdf_path,
+            api_key=os.environ.get("ANTHROPIC_API_KEY"),
+        )
+
+    if detect_implicit:
+        LOGGER.info("Stage 1c: Detecting implicit obligations...")
+        result = detect_implicit_obligations(
             result, pdf_path,
             api_key=os.environ.get("ANTHROPIC_API_KEY"),
         )
@@ -974,12 +984,162 @@ def _parse_extraction_json(text: str) -> dict | None:
         return None
 
 
+IMPLICIT_GENERIC_PROMPT = """\
+You already extracted explicit obligations (shall/must/required/prohibited) from these pages.
+Now find **implicit obligations** — statements that impose a binding requirement WITHOUT using standard obligation keywords.
+
+Examples of implicit obligations:
+- "Reports are due quarterly" (= shall submit reports quarterly)
+- "The system operates at 5V" (= shall be designed to operate at 5V)
+- "All personnel hold a SECRET clearance" (= shall staff only cleared personnel)
+- "Testing follows MIL-STD-810" (= shall test per MIL-STD-810)
+
+Do NOT extract:
+- Statements already using shall/must/required/prohibited (already captured)
+- Background, definitions, scope descriptions, or recommendations (should/may)
+
+ALREADY EXTRACTED (do not re-extract):
+{already_extracted}
+
+Return STRICT JSON only:
+{{
+  "rules": [
+    {{
+      "obligation_type": "implicit",
+      "obligation_keyword": "(implicit)",
+      "section": "section number if visible",
+      "statement_text": "the exact text from the document",
+      "subject": "who/what must comply",
+      "requirement": "rewritten as an explicit obligation",
+      "context": "why this is binding",
+      "severity": "high|medium|low",
+      "confidence": 0.0-1.0,
+      "keywords": ["keyword1", "keyword2"],
+      "page": page_number
+    }}
+  ]
+}}
+
+Rules:
+- Be conservative. Only extract genuinely binding implicit obligations.
+- Each obligation must be atomic: one requirement per entry.
+- Preserve exact source language in statement_text.
+- If no implicit obligations are found, return {{"rules": []}}.
+- Return valid JSON only. No markdown fences, no commentary.\
+"""
+
+
+def _detect_implicit_generic(
+    pdf_path: Path,
+    existing_rules: list[dict],
+    use_vision: bool,
+    client,
+    rule_counter: int,
+) -> list[dict]:
+    """Run implicit obligation detection for the generic extraction pipeline.
+
+    Returns a list of new rule dicts with obligation_type='implicit'.
+    """
+    import fitz
+
+    doc = fitz.open(pdf_path)
+    total_pages = len(doc)
+
+    # Build summary of already-extracted rules for the prompt
+    already_lines = []
+    for r in existing_rules:
+        kw = r.get("obligation_keyword", "").upper()
+        text = r.get("statement_text", "")[:150]
+        already_lines.append(f"  - [{kw}] {text}")
+    already_text = "\n".join(already_lines[:200])  # cap to avoid prompt overflow
+
+    CHUNK_SIZE = 5
+    implicit_rules: list[dict] = []
+    chunk_start = 0
+
+    while chunk_start < total_pages:
+        chunk_end = min(chunk_start + CHUNK_SIZE, total_pages)
+
+        content: list[dict] = []
+        for page_idx in range(chunk_start, chunk_end):
+            page = doc[page_idx]
+            if use_vision:
+                import base64
+                matrix = fitz.Matrix(150 / 72, 150 / 72)
+                pix = page.get_pixmap(matrix=matrix, alpha=False)
+                img_b64 = base64.b64encode(pix.tobytes("png")).decode("utf-8")
+                content.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": img_b64,
+                    },
+                })
+                content.append({
+                    "type": "text",
+                    "text": f"[Page {page_idx + 1}]",
+                })
+            else:
+                page_text = page.get_text("text")
+                content.append({
+                    "type": "text",
+                    "text": f"--- PAGE {page_idx + 1} ---\n{page_text}",
+                })
+
+        content.append({
+            "type": "text",
+            "text": IMPLICIT_GENERIC_PROMPT.format(already_extracted=already_text),
+        })
+
+        try:
+            response = client.messages.create(
+                model=os.environ.get("ORACLE_VISION_MODEL", "claude-sonnet-4-6"),
+                max_tokens=4096,
+                temperature=0,
+                messages=[{"role": "user", "content": content}],
+            )
+
+            if response.content:
+                raw_text = response.content[0].text
+                parsed = _parse_extraction_json(raw_text)
+
+                if parsed and parsed.get("rules"):
+                    for rule in parsed["rules"]:
+                        stmt_text = rule.get("statement_text", "").strip()
+                        if not stmt_text or len(stmt_text) < 15:
+                            continue
+                        rule_counter += 1
+                        rule["rule_id"] = f"RULE-{rule_counter:04d}"
+                        rule["obligation_type"] = "implicit"
+                        rule["obligation_keyword"] = "(implicit)"
+                        rule.setdefault("page", chunk_start + 1)
+                        rule.setdefault("confidence", 0.5)
+                        implicit_rules.append(rule)
+
+                    LOGGER.info(
+                        f"    Pages {chunk_start+1}–{chunk_end}: "
+                        f"{len(parsed['rules'])} implicit obligations"
+                    )
+
+        except Exception as e:
+            LOGGER.warning(
+                f"    Pages {chunk_start+1}–{chunk_end} implicit detection failed: {e}"
+            )
+
+        chunk_start = chunk_end
+
+    doc.close()
+    return implicit_rules
+
+
 def _generate_pack_generic(
     pdf_path: Path,
     output_dir: Path,
     name: str | None,
     use_vision: bool,
     force_type: str | None = None,
+    detect_implicit: bool = False,
 ) -> Path:
     """Route C: Generate pack from ANY regulatory document using Claude extraction.
 
@@ -1146,6 +1306,19 @@ def _generate_pack_generic(
 
     doc.close()
 
+    # --- Pass 1c: Implicit obligation detection ---
+    if detect_implicit:
+        LOGGER.info("Pass 1c: Detecting implicit obligations...")
+        implicit_rules = _detect_implicit_generic(
+            pdf_path, all_rules, use_vision, client, rule_counter,
+        )
+        rule_counter += len(implicit_rules)
+        all_rules.extend(implicit_rules)
+        extracted_pages.extend(
+            r.get("page", 0) for r in implicit_rules if r.get("page")
+        )
+        LOGGER.info(f"  Found {len(implicit_rules)} implicit obligations")
+
     # --- Deduplication using composite key (section + normalized text) ---
     # Section 5.4: Rules with identical text but different sections are preserved
     seen_keys: set[tuple[str, str]] = set()
@@ -1234,6 +1407,7 @@ def generate_pack(
     allow_partial: bool = False,
     overwrite: bool = False,
     non_interactive: bool = False,
+    detect_implicit: bool = False,
 ) -> str:
     """Generate a rule pack from a regulatory/standards PDF.
 
@@ -1259,14 +1433,21 @@ def generate_pack(
 
     # Route to appropriate generator
     if doc_type == "tagged_standard":
-        pack_path = _generate_pack_tagged_standard(pdf_path, output_dir, name, use_vision)
+        pack_path = _generate_pack_tagged_standard(
+            pdf_path, output_dir, name, use_vision,
+            detect_implicit=detect_implicit,
+        )
     elif doc_type == "far_style":
-        pack_path = _generate_pack_far_style(pdf_path, output_dir, name, use_vision)
+        pack_path = _generate_pack_far_style(
+            pdf_path, output_dir, name, use_vision,
+            detect_implicit=detect_implicit,
+        )
     else:
         # cfr_style and generic both use the generic pipeline
         pack_path = _generate_pack_generic(
             pdf_path, output_dir, name, use_vision,
             force_type=force_type,
+            detect_implicit=detect_implicit,
         )
 
     # Register in library
@@ -2037,6 +2218,7 @@ def cmd_generate_pack(args: argparse.Namespace) -> None:
         allow_partial=getattr(args, 'allow_partial', False),
         overwrite=getattr(args, 'overwrite', False),
         non_interactive=getattr(args, 'non_interactive', False),
+        detect_implicit=getattr(args, 'implicit', False),
     )
 
     print(f"\nPack generated and registered: {pack_name}")
@@ -2226,6 +2408,8 @@ Examples:
                         help="Allow registration of packs with partial extraction")
     p_gen.add_argument("--overwrite", action="store_true",
                         help="Overwrite existing pack with same name")
+    p_gen.add_argument("--implicit", action="store_true",
+                        help="Run Pass 1c: detect implicit obligations without keyword markers")
     p_gen.set_defaults(func=cmd_generate_pack)
 
     # --- list-packs ---
