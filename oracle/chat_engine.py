@@ -48,6 +48,7 @@ _STOP_WORDS = {
     "section",
     "show",
     "standard",
+    "selected",
     "table",
     "tell",
     "the",
@@ -57,6 +58,8 @@ _STOP_WORDS = {
     "what",
     "which",
     "with",
+    "finish",
+    "finishes",
 }
 
 _SECTION_PATTERN = re.compile(
@@ -196,6 +199,27 @@ def _phrase_score(query_terms: set[str], phrase: str) -> int:
     if overlap == phrase_terms:
         score += 2
     return score
+
+
+def _has_strong_rule_anchor(
+    *,
+    query_terms: set[str],
+    rule: ChatRule,
+    raw_query: str,
+    section_match: re.Match[str] | None,
+    table_note_match: re.Match[str] | None,
+) -> bool:
+    if section_match or table_note_match:
+        return True
+    if _phrase_score(query_terms, rule.subject) >= 4:
+        return True
+    if _phrase_score(query_terms, rule.requirement) >= 4:
+        return True
+    if any(_phrase_score(query_terms, keyword) >= 4 for keyword in rule.keywords):
+        return True
+    if rule.subject and rule.subject.lower() in raw_query.lower():
+        return True
+    return False
 
 
 def _is_yes_no_query(query: str) -> bool:
@@ -395,6 +419,15 @@ def _rank_rules(raw_query: str, rules: tuple[ChatRule, ...]) -> list[tuple[ChatR
                 score += 4
 
         if score > 0:
+            strong_anchor = _has_strong_rule_anchor(
+                query_terms=query_tokens,
+                rule=rule,
+                raw_query=raw_query,
+                section_match=section_match,
+                table_note_match=table_note_match,
+            )
+            if len(haystack_tokens) < 2 and not strong_anchor:
+                continue
             ranked.append((rule, score))
 
     ranked.sort(

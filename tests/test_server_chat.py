@@ -484,6 +484,64 @@ def test_chat_uses_llm_summary_when_available(workspace_tmp_path, monkeypatch):
     assert body["stage_artifacts"]["summary"]["llm_model"] == "summarizer"
 
 
+def test_chat_returns_insufficient_data_for_weak_single_token_overlap(workspace_tmp_path, monkeypatch):
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    server._chat_sessions.clear()
+
+    slug = _register_pack(
+        workspace_tmp_path,
+        pack_dir,
+        _chat_multi_rule_pack_payload(
+            standard_id="NASA-STD-5009C",
+            standard_title="NASA Fracture Control Standard",
+            rules=[
+                {
+                    "rule_id": "RULE-001",
+                    "section": "4.1.4.2.2",
+                    "page": 19,
+                    "obligation_type": "mandatory",
+                    "obligation_keyword": "shall",
+                    "statement_text": "The final penetrant inspection can be performed prior to metal finishing operations such as buffing or sanding.",
+                    "subject": "Final penetrant inspection timing",
+                    "requirement": "The final penetrant inspection may occur before certain metal finishing operations.",
+                    "keywords": ["penetrant inspection", "metal finishing operations"],
+                    "applies_to": ["nde_process"],
+                },
+                {
+                    "rule_id": "RULE-002",
+                    "section": "4.1.5.5",
+                    "page": 24,
+                    "obligation_type": "mandatory",
+                    "obligation_keyword": "shall",
+                    "statement_text": "The process shall be subject to review and approval of the RFCB.",
+                    "subject": "Standard NDE review",
+                    "requirement": "The process requires RFCB review and approval.",
+                    "keywords": ["review", "approval", "NDE"],
+                    "applies_to": ["nde_process"],
+                },
+            ],
+        ),
+        "5009c_nde.json",
+    )
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/oracle/chat",
+        json={
+            "message": "What does the selected standard say about pure tin finishes?",
+            "selected_packs": [slug],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "INSUFFICIENT_DATA"
+    assert "did not find a grounded requirement match" in body["response"]
+    assert body["citations"] == ["NASA-STD-5009C"]
+
+
 def test_chat_falls_back_when_summary_validation_fails(workspace_tmp_path, monkeypatch):
     pack_dir = workspace_tmp_path / "packs"
     pack_dir.mkdir(parents=True, exist_ok=True)
