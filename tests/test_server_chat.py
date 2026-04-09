@@ -1,4 +1,5 @@
 import json
+from typing import Any
 
 from fastapi.testclient import TestClient
 
@@ -53,6 +54,38 @@ def _chat_pack_payload(
     }
 
 
+def _chat_multi_rule_pack_payload(
+    *,
+    standard_id: str,
+    standard_title: str,
+    rules: list[dict[str, Any]],
+) -> dict:
+    return {
+        "schema_version": "oracle_generic/v1",
+        "rule_pack_id": f"{standard_id.lower()}-pack",
+        "standard_id": standard_id,
+        "standard_title": standard_title,
+        "version": "1.0.0",
+        "generated_at": "2026-04-08T00:00:00Z",
+        "source_document": f"{standard_id}.pdf",
+        "extraction_method": "test",
+        "extraction_status": "complete",
+        "total_source_pages": 10,
+        "extracted_pages": [4, 5, 6, 10],
+        "failed_page_ranges": [],
+        "chunk_failures": [],
+        "total_rules": len(rules),
+        "oracle_metadata": {
+            "name": standard_title,
+            "slug": standard_id.lower().replace("-", "_"),
+            "description": f"{standard_title} pack",
+            "status": "draft",
+            "added_at": "2026-04-08T00:00:00Z",
+        },
+        "rules": rules,
+    }
+
+
 def _register_pack(workspace_tmp_path, pack_dir, payload: dict, filename: str) -> str:
     source = workspace_tmp_path / filename
     source.write_text(json.dumps(payload), encoding="utf-8")
@@ -73,6 +106,31 @@ def test_chat_requires_selected_pack(workspace_tmp_path, monkeypatch):
     assert body["status"] == "INSUFFICIENT_DATA"
     assert "Select at least one authority pack" in body["response"]
     assert body["advisory_only"] is True
+
+
+def test_chat_review_only_mode_allows_packless_critique(workspace_tmp_path, monkeypatch):
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    server._chat_sessions.clear()
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/oracle/chat",
+        json={
+            "message": "The contractor shall provide appropriate support as needed.",
+            "review_only": True,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "PASS"
+    assert body["review_only"] is True
+    assert body["selected_packs"] == []
+    assert "Review-only assessment" in body["response"]
+    assert "measurable" in body["response"].lower()
+    assert any(citation.startswith("review-only/") for citation in body["citations"])
 
 
 def test_chat_returns_grounded_clause_for_selected_pack(workspace_tmp_path, monkeypatch):
@@ -200,3 +258,113 @@ def test_chat_stream_returns_done_payload(workspace_tmp_path, monkeypatch):
     assert "event: text" in payload
     assert "event: done" in payload
     assert '"advisory_only": true' in payload
+    assert '"review_only": false' in payload
+
+
+def test_chat_stream_review_only_returns_done_payload(workspace_tmp_path, monkeypatch):
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    server._chat_sessions.clear()
+
+    client = TestClient(server.app)
+    with client.stream(
+        "POST",
+        "/oracle/chat/stream",
+        json={
+            "message": "The team will obtain approval before release.",
+            "review_only": True,
+        },
+    ) as response:
+        payload = b"".join(response.iter_bytes()).decode("utf-8")
+
+    assert response.status_code == 200
+    assert "event: meta" in payload
+    assert "event: done" in payload
+    assert '"review_only": true' in payload
+    assert "review-only/governance" in payload
+
+
+def test_chat_synthesizes_scope_and_funding_answer(workspace_tmp_path, monkeypatch):
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    server._chat_sessions.clear()
+
+    slug = _register_pack(
+        workspace_tmp_path,
+        pack_dir,
+        _chat_multi_rule_pack_payload(
+            standard_id="ESSCA-II-J-21",
+            standard_title="ESSCA II Attachment J-21",
+            rules=[
+                {
+                    "rule_id": "RULE-001",
+                    "section": "Fig J-21-1",
+                    "page": 10,
+                    "obligation_type": "mandatory",
+                    "obligation_keyword": "must",
+                    "statement_text": "Scope or POP change with cost impact triggers the standard TOCR flow.",
+                    "subject": "Scope change routing",
+                    "requirement": "Any change involving scope with cost impact must follow the TOCR flow, not an informal path.",
+                    "keywords": ["scope change", "cost impact", "TOCR flow"],
+                    "applies_to": ["scope_changes"],
+                },
+                {
+                    "rule_id": "RULE-002",
+                    "section": "1.1-SubTask(c)",
+                    "page": 5,
+                    "obligation_type": "mandatory",
+                    "obligation_keyword": "required",
+                    "statement_text": "CWBS, to include PSID, funding source, funding sub-source, and activity.",
+                    "subject": "Sub-task CWBS and funding",
+                    "requirement": "Each sub-task must have CWBS data with PSID and funding source information before the work can be authorized.",
+                    "keywords": ["CWBS", "PSID", "funding source", "charge code"],
+                    "applies_to": ["all_sub_tasks"],
+                },
+                {
+                    "rule_id": "RULE-003",
+                    "section": "1.1(k)",
+                    "page": 4,
+                    "obligation_type": "mandatory",
+                    "obligation_keyword": "must",
+                    "statement_text": "Summary of changes must include the description of change and cost impact.",
+                    "subject": "Summary of Changes",
+                    "requirement": "Every TOCR summary must include the change description and cost impact.",
+                    "keywords": ["summary of changes", "cost impact", "TOCR"],
+                    "applies_to": ["all_task_order_changes"],
+                },
+                {
+                    "rule_id": "RULE-004",
+                    "section": "1.1-SubTask(g)",
+                    "page": 5,
+                    "obligation_type": "mandatory",
+                    "obligation_keyword": "required",
+                    "statement_text": "Place of performance for the work if not onsite.",
+                    "subject": "Place of performance",
+                    "requirement": "Non-onsite work must specify place of performance.",
+                    "keywords": ["place of performance"],
+                    "applies_to": ["all_sub_tasks"],
+                },
+            ],
+        ),
+        "j21.json",
+    )
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/oracle/chat",
+        json={
+            "message": "if you insert scope and do not fund it, is that against the j21 rules?",
+            "selected_packs": [slug],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "PASS"
+    assert body["response"].startswith("Likely yes.")
+    assert "TOCR" in body["response"]
+    assert "funding" in body["response"].lower()
+    assert "place of performance" not in body["response"].lower()
+    assert len(body["citations"]) == 3

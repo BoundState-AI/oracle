@@ -806,6 +806,7 @@ class OracleChatRequest(BaseModel):
     history: list[OracleChatMessage] = Field(default_factory=list)
     selected_packs: list[str] = Field(default_factory=list)
     compare_only: bool = False
+    review_only: bool = False
 
 
 def _split_chat_chunks(text: str) -> list[str]:
@@ -817,16 +818,18 @@ def _split_chat_chunks(text: str) -> list[str]:
     return chunks or [text]
 
 
-def _resolve_chat_scope(request: OracleChatRequest) -> tuple[str, list[str], bool]:
+def _resolve_chat_scope(request: OracleChatRequest) -> tuple[str, list[str], bool, bool]:
     session_id = request.session_id or f"chat-{uuid.uuid4().hex[:8]}"
     session = _chat_sessions.setdefault(session_id, {})
 
     selected_packs = request.selected_packs or session.get("selected_packs", [])
-    compare_only = bool(request.compare_only)
+    review_only = bool(request.review_only)
+    compare_only = bool(request.compare_only and not review_only)
 
     session["selected_packs"] = list(selected_packs)
     session["compare_only"] = compare_only
-    return session_id, list(selected_packs), compare_only
+    session["review_only"] = review_only
+    return session_id, list(selected_packs), compare_only, review_only
 
 
 @app.get("/oracle/chat/ping")
@@ -838,12 +841,13 @@ async def chat_ping(request: Request):
 @app.post("/oracle/chat")
 async def oracle_chat(request: Request, body: OracleChatRequest):
     await verify_api_key(request)
-    session_id, selected_packs, compare_only = _resolve_chat_scope(body)
+    session_id, selected_packs, compare_only, review_only = _resolve_chat_scope(body)
     result = oracle_answer_query(
         message=body.message,
         pack_names=selected_packs,
         pack_dir=_pack_dir(),
         compare_only=compare_only,
+        review_only=review_only,
     )
     return {
         "session_id": session_id,
@@ -854,7 +858,7 @@ async def oracle_chat(request: Request, body: OracleChatRequest):
 @app.post("/oracle/chat/stream")
 async def oracle_chat_stream(request: Request, body: OracleChatRequest):
     await verify_api_key(request)
-    session_id, selected_packs, compare_only = _resolve_chat_scope(body)
+    session_id, selected_packs, compare_only, review_only = _resolve_chat_scope(body)
 
     async def _event_generator():
         try:
@@ -863,8 +867,9 @@ async def oracle_chat_stream(request: Request, body: OracleChatRequest):
                 pack_names=selected_packs,
                 pack_dir=_pack_dir(),
                 compare_only=compare_only,
+                review_only=review_only,
             )
-            yield f"event: meta\ndata: {json.dumps({'status': result['status'], 'selected_packs': result['selected_packs'], 'compare_only': result['compare_only']})}\n\n"
+            yield f"event: meta\ndata: {json.dumps({'status': result['status'], 'selected_packs': result['selected_packs'], 'compare_only': result['compare_only'], 'review_only': result['review_only']})}\n\n"
             yield "event: text_start\ndata: {}\n\n"
             for chunk in _split_chat_chunks(str(result["response"])):
                 yield f"event: text\ndata: {json.dumps({'text': chunk})}\n\n"
@@ -877,6 +882,7 @@ async def oracle_chat_stream(request: Request, body: OracleChatRequest):
                 "follow_ups": result["follow_ups"],
                 "selected_packs": result["selected_packs"],
                 "compare_only": result["compare_only"],
+                "review_only": result["review_only"],
                 "advisory_only": result["advisory_only"],
             }
             yield f"event: done\ndata: {json.dumps(done_payload)}\n\n"

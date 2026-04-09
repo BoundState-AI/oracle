@@ -35,6 +35,7 @@ type ChatMessage = {
   followUps?: string[];
   advisoryOnly?: boolean;
   selectedPacks?: string[];
+  reviewOnly?: boolean;
   isStreaming?: boolean;
 };
 
@@ -52,10 +53,12 @@ type StreamOptions = {
   history: Array<{ role: "user" | "assistant"; content: string }>;
   selectedPacks: string[];
   compareOnly: boolean;
+  reviewOnly: boolean;
   onMeta: (meta: {
     status?: string;
     selectedPacks?: string[];
     compareOnly?: boolean;
+    reviewOnly?: boolean;
   }) => void;
   onText: (chunk: string) => void;
   onDone: (payload: {
@@ -65,15 +68,23 @@ type StreamOptions = {
     followUps?: string[];
     selectedPacks?: string[];
     compareOnly?: boolean;
+    reviewOnly?: boolean;
     advisoryOnly?: boolean;
   }) => void;
 };
 
-const STARTER_PROMPTS = [
+const AUTHORITY_STARTER_PROMPTS = [
   "What does the selected standard say about pure tin finishes?",
   "Show the governing clause for connector plating limits.",
   "Compare the selected packs on PEM usage restrictions.",
   "What evidence would I need to close a capacitor derating question?",
+];
+
+const REVIEW_ONLY_STARTER_PROMPTS = [
+  "Review this requirement for ambiguity: The contractor shall provide appropriate support as needed.",
+  "What is missing from this approval clause: The team will obtain approval before release.",
+  "Rewrite this into a testable requirement: Update the interface documentation in a timely manner.",
+  "Tear apart this scope sentence: Add the new work and update the baseline.",
 ];
 
 function parseSsePayload(raw: string): Record<string, unknown> {
@@ -90,6 +101,7 @@ async function streamOracleChat({
   history,
   selectedPacks,
   compareOnly,
+  reviewOnly,
   onMeta,
   onText,
   onDone,
@@ -103,6 +115,7 @@ async function streamOracleChat({
       history,
       selected_packs: selectedPacks,
       compare_only: compareOnly,
+      review_only: reviewOnly,
     }),
   });
 
@@ -144,6 +157,8 @@ async function streamOracleChat({
           : undefined,
         compareOnly:
           typeof payload.compare_only === "boolean" ? payload.compare_only : undefined,
+        reviewOnly:
+          typeof payload.review_only === "boolean" ? payload.review_only : undefined,
       });
       return;
     }
@@ -171,6 +186,8 @@ async function streamOracleChat({
           : undefined,
         compareOnly:
           typeof payload.compare_only === "boolean" ? payload.compare_only : undefined,
+        reviewOnly:
+          typeof payload.review_only === "boolean" ? payload.review_only : undefined,
         advisoryOnly:
           typeof payload.advisory_only === "boolean" ? payload.advisory_only : undefined,
       });
@@ -224,15 +241,16 @@ export function OracleChatPanel({
       id: createId("assistant"),
       role: "assistant",
       content:
-        "Oracle stays grounded in the packs you select. Ask for a clause, a table note, an applicability check, or a side-by-side comparison.",
+        "Oracle can run in two modes: authority-grounded chat over selected packs, or review-only critique for draft requirements and specs.",
       advisoryOnly: true,
-      followUps: STARTER_PROMPTS.slice(0, 3),
+      followUps: AUTHORITY_STARTER_PROMPTS.slice(0, 3),
     },
   ]);
   const [draft, setDraft] = useState("");
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [streaming, setStreaming] = useState(false);
   const [compareOnly, setCompareOnly] = useState(false);
+  const [reviewOnly, setReviewOnly] = useState(false);
   const [liveStatus, setLiveStatus] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
@@ -246,10 +264,18 @@ export function OracleChatPanel({
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages]);
 
+  useEffect(() => {
+    if (reviewOnly && compareOnly) {
+      setCompareOnly(false);
+    }
+  }, [reviewOnly, compareOnly]);
+
+  const starterPrompts = reviewOnly ? REVIEW_ONLY_STARTER_PROMPTS : AUTHORITY_STARTER_PROMPTS;
+
   const canSend =
     !streaming &&
     draft.trim().length > 0 &&
-    selectedPacks.length > 0 &&
+    (reviewOnly || selectedPacks.length > 0) &&
     (!compareOnly || selectedPacks.length >= 2);
 
   const togglePack = (slug: string) => {
@@ -263,8 +289,12 @@ export function OracleChatPanel({
   const submitMessage = async (rawMessage: string) => {
     const message = rawMessage.trim();
     if (!message || streaming) return;
-    if (selectedPacks.length === 0) {
+    if (!reviewOnly && selectedPacks.length === 0) {
       toast.error("Select at least one authority pack before chatting.");
+      return;
+    }
+    if (reviewOnly && compareOnly) {
+      toast.error("Review-only mode does not support pack comparison.");
       return;
     }
     if (compareOnly && selectedPacks.length < 2) {
@@ -307,6 +337,7 @@ export function OracleChatPanel({
         history,
         selectedPacks,
         compareOnly,
+        reviewOnly,
         onMeta: (meta) => {
           if (meta.status) setLiveStatus(meta.status);
         },
@@ -338,6 +369,7 @@ export function OracleChatPanel({
                     followUps: payload.followUps ?? [],
                     advisoryOnly: payload.advisoryOnly ?? true,
                     selectedPacks: payload.selectedPacks ?? selectedPacks,
+                    reviewOnly: payload.reviewOnly ?? reviewOnly,
                   }
                 : entry,
             ),
@@ -372,12 +404,12 @@ export function OracleChatPanel({
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold tracking-tight text-foreground">
-          Standards Chat
+          Oracle Chat
         </h1>
         <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
-          AEGIS-style operator chat, grounded only in the authority packs you select.
-          Oracle cites governing clauses, supports compare-only mode, and stays advisory
-          rather than issuing approval or waiver decisions.
+          Switch between authority-grounded pack chat and review-only critique.
+          Authority mode cites governing clauses from selected packs. Review-only mode
+          inspects draft requirements and specs without claiming external authority.
         </p>
       </div>
 
@@ -387,7 +419,7 @@ export function OracleChatPanel({
             <CardHeader>
               <div className="flex items-center justify-between gap-3">
                 <CardTitle className="text-lg font-semibold tracking-tight">
-                  Authority Scope
+                  Chat Scope
                 </CardTitle>
                 <Button
                   type="button"
@@ -405,18 +437,54 @@ export function OracleChatPanel({
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <div className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-                      Chat Mode
+                      Source Mode
+                    </div>
+                    <p className="mt-1 text-sm text-foreground">
+                      {reviewOnly
+                        ? "Review-only critique for draft requirements, approval language, and spec wording."
+                        : "Authority-grounded answers from the selected packs only."}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      variant={reviewOnly ? "outline" : "default"}
+                      size="sm"
+                      onClick={() => setReviewOnly(false)}
+                    >
+                      Authority
+                    </Button>
+                    <Button
+                      type="button"
+                      variant={reviewOnly ? "default" : "outline"}
+                      size="sm"
+                      onClick={() => setReviewOnly(true)}
+                    >
+                      Review Only
+                    </Button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-border bg-muted/20 p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                      Compare Mode
                     </div>
                     <p className="mt-1 text-sm text-foreground">
                       {compareOnly
                         ? "Compare the first two selected packs side by side."
-                        : "Stay anchored to one selected pack for precise clause lookup."}
+                        : reviewOnly
+                          ? "Unavailable in review-only mode."
+                          : "Stay anchored to one selected pack for precise clause lookup."}
                     </p>
                   </div>
                   <Button
                     type="button"
                     variant={compareOnly ? "default" : "outline"}
                     size="sm"
+                    disabled={reviewOnly}
                     onClick={() => setCompareOnly((prev) => !prev)}
                   >
                     <ArrowRightLeft className="h-3.5 w-3.5" data-icon="inline-start" />
@@ -445,6 +513,11 @@ export function OracleChatPanel({
                     </span>
                   )}
                 </div>
+                <p className="mt-3 text-xs text-muted-foreground">
+                  {reviewOnly
+                    ? "Review-only mode ignores pack selections. Keep packs selected here if you plan to switch back to authority mode."
+                    : "Authority mode uses only the packs selected here."}
+                </p>
               </div>
 
               <div className="space-y-3">
@@ -503,7 +576,7 @@ export function OracleChatPanel({
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              {STARTER_PROMPTS.map((prompt) => (
+              {starterPrompts.map((prompt) => (
                 <button
                   key={prompt}
                   type="button"
@@ -528,11 +601,14 @@ export function OracleChatPanel({
                   Oracle Chat
                 </CardTitle>
                 <p className="mt-1 text-sm text-muted-foreground">
-                  Research-only clause support with citations and follow-up prompts.
+                  {reviewOnly
+                    ? "Review-only critique for draft requirements, scope changes, approval language, and missing acceptance criteria."
+                    : "Research-only clause support with citations and follow-up prompts."}
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 <Badge variant="outline">Status {liveStatus ?? "READY"}</Badge>
+                <Badge variant="outline">{reviewOnly ? "Review Only" : "Authority"}</Badge>
                 <Badge variant="outline">Advisory Only</Badge>
               </div>
             </div>
@@ -561,10 +637,17 @@ export function OracleChatPanel({
                       {message.role === "user" ? "Operator" : "Oracle"}
                     </span>
                     {message.advisoryOnly && message.role === "assistant" && (
-                      <span className="inline-flex items-center gap-1 text-[11px] uppercase tracking-[0.18em] text-amber-400">
-                        <ShieldAlert className="h-3.5 w-3.5" />
-                        Advisory
-                      </span>
+                      <div className="flex items-center gap-2">
+                        {message.reviewOnly && (
+                          <span className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
+                            Review Only
+                          </span>
+                        )}
+                        <span className="inline-flex items-center gap-1 text-[11px] uppercase tracking-[0.18em] text-amber-400">
+                          <ShieldAlert className="h-3.5 w-3.5" />
+                          Advisory
+                        </span>
+                      </div>
                     )}
                   </div>
 
@@ -631,7 +714,9 @@ export function OracleChatPanel({
                   value={draft}
                   onChange={(event) => setDraft(event.target.value)}
                   placeholder={
-                    selectedPacks.length === 0
+                    reviewOnly
+                      ? "Paste draft requirement text or ask Oracle to critique the wording."
+                      : selectedPacks.length === 0
                       ? "Select a pack before chatting."
                       : compareOnly
                         ? "Ask Oracle to compare the selected standards on a specific topic."
@@ -642,7 +727,9 @@ export function OracleChatPanel({
                 />
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <p className="text-xs text-muted-foreground">
-                    {selectedPacks.length === 0
+                    {reviewOnly
+                      ? "Review-only mode is not authority-grounded. Paste the draft language you want critiqued."
+                      : selectedPacks.length === 0
                       ? "Oracle chat is disabled until you select an authority pack."
                       : compareOnly && selectedPacks.length < 2
                         ? "Compare mode needs at least two selected packs."
