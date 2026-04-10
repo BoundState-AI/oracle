@@ -364,13 +364,21 @@ ORACLE_ROSTER: dict[str, OracleConfig] = {
 
 
 def _call_anthropic(config: OracleConfig, user_message: str) -> dict:
-    """Call Anthropic Messages API (Beth / Sonnet)."""
+    """Call Anthropic Messages API (Beth / Sonnet) via streaming.
+
+    Uses `client.messages.stream()` + `get_final_message()` instead of
+    `messages.create()` because non-streaming requests over 10 minutes are
+    not supported by the Anthropic API. Beth with extended thinking on a
+    large input regularly exceeds that ceiling, so streaming is mandatory.
+    See https://docs.anthropic.com/en/api/errors#long-requests.
+    """
     import httpx
     from anthropic import Anthropic
 
     client = Anthropic(
         api_key=os.environ.get("ANTHROPIC_API_KEY"),
         timeout=httpx.Timeout(config.timeout, connect=10.0),
+        max_retries=0,
     )
     kwargs: dict[str, Any] = {
         "model": config.model,
@@ -379,15 +387,20 @@ def _call_anthropic(config: OracleConfig, user_message: str) -> dict:
         "messages": [{"role": "user", "content": user_message}],
     }
     if "opus" in config.model:
-        # Extended thinking: budget_tokens for internal reasoning, temperature must be 1
+        # Adaptive thinking: the model sizes its own reasoning budget per turn.
+        # budget_tokens is deprecated on Opus 4.6 / Sonnet 4.6 and will be
+        # removed in a future model release. Temperature must be 1 for any
+        # thinking mode.
         kwargs["temperature"] = 1
-        kwargs["thinking"] = {"type": "enabled", "budget_tokens": 16384}
+        kwargs["thinking"] = {"type": "adaptive"}
     else:
         kwargs["temperature"] = config.temperature
 
-    response = client.messages.create(**kwargs)
+    with client.messages.stream(**kwargs) as stream:
+        final_message = stream.get_final_message()
+
     text = ""
-    for block in response.content:
+    for block in final_message.content:
         if getattr(block, "type", None) == "text":
             text = block.text
             break
