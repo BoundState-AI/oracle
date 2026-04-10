@@ -126,6 +126,11 @@ SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 SESSION_STATE_FILE = "session_state.json"
 MAX_LOG_MESSAGES = 200
 
+# Hard ceiling for UI-driven reviews. Each round fans out to ~4 reviewer LLMs
+# over the full document, so cost scales roughly linearly. The CLI can still
+# exceed this; the cap applies only to requests that come through the HTTP API.
+UI_MAX_ROUNDS_CEILING = 4
+
 
 def _max_rounds_for_mode(mode: str) -> int:
     """Return the configured review budget for a given UI mode."""
@@ -139,10 +144,28 @@ def _max_rounds_for_mode(mode: str) -> int:
     if not raw:
         return defaults[mode]
     try:
-        return max(1, int(raw))
+        parsed = int(raw)
     except ValueError:
         LOGGER.warning("Invalid %s=%r, falling back to %d", env_name, raw, defaults[mode])
         return defaults[mode]
+    return max(1, min(UI_MAX_ROUNDS_CEILING, parsed))
+
+
+def _clamp_user_rounds(requested: int | None, mode: str) -> int:
+    """Clamp a user-supplied max_rounds value to the UI ceiling.
+
+    Falls back to the mode default when not supplied. Values below 1 are
+    coerced to 1; values above UI_MAX_ROUNDS_CEILING are coerced to the
+    ceiling. The backend is the source of truth — the frontend cap is
+    purely a UX hint.
+    """
+    if requested is None:
+        return _max_rounds_for_mode(mode)
+    if requested < 1:
+        return 1
+    if requested > UI_MAX_ROUNDS_CEILING:
+        return UI_MAX_ROUNDS_CEILING
+    return requested
 
 
 def extract_text(file_path: Path) -> str:
@@ -578,7 +601,7 @@ async def analyze(
     # Create message queue and start background thread
     msg_queue: queue.Queue[str | None] = queue.Queue()
     output_dir = session_dir / "oracle_output"
-    review_budget = max_rounds or _max_rounds_for_mode(mode)
+    review_budget = _clamp_user_rounds(max_rounds, mode)
 
     # Store queue for the stream endpoint to read
     _sessions[session_id] = {
