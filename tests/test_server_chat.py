@@ -265,7 +265,9 @@ def test_chat_compare_only_uses_multiple_packs(workspace_tmp_path, monkeypatch):
     assert response.status_code == 200
     body = response.json()
     assert body["compare_only"] is True
-    assert "Oracle comparison across selected standards" in body["response"]
+    assert body["response"].startswith("Comparison across selected standards.")
+    assert "NASA-STD-5009C:" in body["response"]
+    assert "MSFC-STD-3012A:" in body["response"]
     assert len(body["selected_packs"]) == 2
     assert any("NASA-STD-5009C" in citation for citation in body["citations"])
     assert any("MSFC-STD-3012A" in citation for citation in body["citations"])
@@ -413,7 +415,7 @@ def test_chat_synthesizes_scope_and_funding_answer(workspace_tmp_path, monkeypat
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "PASS"
-    assert body["response"].startswith("Likely yes.")
+    assert body["response"].startswith("ESSCA-II-J-21 routes this kind of scope-and-funding change into formal change control.")
     assert "TOCR" in body["response"]
     assert "funding" in body["response"].lower()
     assert "place of performance" not in body["response"].lower()

@@ -13,6 +13,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from oracle.chat_contract import OracleChatEnvelope, OracleEvidenceItem
+from oracle.chat_formatter import format_chat_response
+from oracle.chat_grader import grade_chat_response
 from oracle.cli import load_pack as cli_load_pack
 
 LOGGER = logging.getLogger("oracle.chat")
@@ -238,6 +241,10 @@ def _is_scope_funding_query(query: str) -> bool:
     return bool(_SCOPE_PATTERN.search(query) and _FUNDING_PATTERN.search(query))
 
 
+def _wants_exact_text(query: str) -> bool:
+    return bool(re.search(r"\b(show|quote|exact|verbatim|full text)\b", query, re.IGNORECASE))
+
+
 @dataclass(frozen=True)
 class ChatRule:
     pack_slug: str
@@ -461,6 +468,114 @@ def _summarize_rule(rule: ChatRule) -> str:
     return rule.statement_text.rstrip(".") + "."
 
 
+def _rule_topic(rule: ChatRule) -> str:
+    return rule.subject or rule.requirement or rule.statement_text
+
+
+def _rule_stance(rule: ChatRule) -> str:
+    text = " ".join(
+        part for part in [rule.obligation_type, rule.obligation_keyword, rule.statement_text, rule.requirement] if part
+    ).lower()
+    if any(token in text for token in ("shall not", "must not", "prohibit", "not be used", "not use")):
+        return "prohibits"
+    if rule.obligation_type == "recommendation" or rule.obligation_keyword == "should":
+        return "recommends"
+    if rule.obligation_type == "permission" or rule.obligation_keyword == "may":
+        return "allows"
+    return "requires"
+
+
+def _topic_answer_sentence(query: str, pack: ChatPack, top_matches: list[tuple[ChatRule, int]]) -> str:
+    lead_rule = top_matches[0][0]
+    lead_summary = _summarize_rule(lead_rule)
+    stance = _rule_stance(lead_rule)
+    topic = _normalize_space(_rule_topic(lead_rule))
+
+    if _is_scope_funding_query(query):
+        return (
+            f"{pack.standard_id} routes this kind of scope-and-funding change into formal change control. "
+            f"Lead requirement: {lead_summary}"
+        )
+    if _is_yes_no_query(query):
+        if stance == "prohibits":
+            return f"No. {lead_summary}"
+        if stance == "allows":
+            return f"Yes, within the limits of the cited clause. {lead_summary}"
+        return f"The selected standard does not read as an informal yes. It {stance} the following: {lead_summary}"
+    if _is_clause_lookup_query(query):
+        if topic:
+            return f"On {topic}, {pack.standard_id} says: {lead_summary}"
+        return f"{pack.standard_id} says: {lead_summary}"
+    return f"{pack.standard_id} answers this topic with: {lead_summary}"
+
+
+def _render_grounded_pack_answer(
+    *,
+    query: str,
+    pack: ChatPack,
+    top_matches: list[tuple[ChatRule, int]],
+) -> str:
+    citations = [_citation(rule) for rule, _score in top_matches]
+    lines = [_topic_answer_sentence(query, pack, top_matches), ""]
+
+    lines.append("Why:")
+    for rule, _score in top_matches[:3]:
+        summary = _summarize_rule(rule)
+        topic = _normalize_space(rule.subject)
+        detail = f"- {summary} ({_citation(rule)})"
+        if topic and topic.lower() not in summary.lower():
+            detail += f" Topic: {topic}."
+        lines.append(detail)
+
+    lines.append("")
+    lines.append("Bottom line:")
+    if _is_scope_funding_query(query):
+        lines.append(
+            "Do not treat this as an informal scope insert. The cited clauses point you to formal TOCR/change-control handling with cost and funding data."
+        )
+    elif _is_yes_no_query(query):
+        lines.append(
+            "Use the cited clauses as the governing basis for the answer. If your facts differ from the matched topic, narrow the question by clause or section."
+        )
+    else:
+        lines.append(
+            "This is the grounded answer from the selected pack, not a final approval or waiver decision."
+        )
+
+    lines.append("")
+    lines.append("Citations:")
+    for citation in citations:
+        lines.append(f"- {citation}")
+    return "\n".join(lines).strip()
+
+
+def _render_compare_answer(
+    *,
+    query: str,
+    packs: list[ChatPack],
+    findings: list[dict[str, Any]],
+) -> str:
+    lines = ["Comparison across selected standards.", ""]
+    for finding in findings:
+        pack = finding["pack"]
+        matches = finding["matches"]
+        if not matches:
+            lines.append(f"{pack.standard_id}: No grounded requirement match found for this topic.")
+            lines.append("")
+            continue
+
+        lead_rule = matches[0][0]
+        lines.append(f"{pack.standard_id}: {_topic_answer_sentence(query, pack, matches)}")
+        for rule, _score in matches[:2]:
+            lines.append(f"- {_summarize_rule(rule)} ({_citation(rule)})")
+        lines.append("")
+
+    lines.append(
+        "Use this to compare governing clauses. Oracle still does not issue final sign-off, certification, or waiver decisions."
+    )
+    return "\n".join(lines).strip()
+
+
 def _review_only_findings(query: str) -> list[tuple[str, str]]:
     findings: list[tuple[str, str]] = []
 
@@ -509,42 +624,47 @@ def _review_only_findings(query: str) -> list[tuple[str, str]]:
 
 def _answer_review_only(query: str, compare_only: bool) -> dict[str, Any]:
     if compare_only:
-        return _chat_result(
-            status="INSUFFICIENT_DATA",
-            response=(
-                "Review-only mode does not compare authority packs. Switch back to authority-grounded mode to compare standards, "
-                "or paste two draft clauses and ask for a wording comparison."
-            ),
-            citations=[],
-            follow_ups=[
-                "Turn off review-only and compare the selected packs.",
-                "Paste two draft clauses and ask which one is tighter.",
-            ],
-            selected_packs=[],
-            compare_only=False,
-            review_only=True,
+        return _emit_envelope(
+            OracleChatEnvelope(
+                status="INSUFFICIENT_DATA",
+                query=query,
+                intent="review_only",
+                selected_packs=[],
+                compare_only=False,
+                review_only=True,
+                missing_inputs=[
+                    "Turn off review-only mode if you want a standards comparison.",
+                ],
+                follow_ups=[
+                    "Turn off review-only and compare the selected packs.",
+                    "Paste two draft clauses and ask which one is tighter.",
+                ],
+                draft_answer_text=(
+                    "Review-only mode does not compare authority packs. Switch back to authority-grounded mode to compare standards, "
+                    "or paste two draft clauses and ask for a wording comparison."
+                ),
+            )
         )
 
     findings = _review_only_findings(query)
     if not findings:
-        return _chat_result(
-            status="PASS",
-            response=(
-                "Review-only assessment. No authority packs were applied.\n\n"
-                "I do not see a strong defect signal from the text you sent, but review-only mode is much stronger when you paste the actual requirement, paragraph, or approval language to inspect.\n\n"
-                "What I would test next:\n"
-                "- Name the accountable actor.\n"
-                "- Add measurable acceptance criteria or required artifacts.\n"
-                "- State any approval path, timing, and downstream update obligations."
-            ),
-            citations=[],
-            follow_ups=[
-                "Review this requirement for ambiguity and missing acceptance criteria: <paste text>",
-                "Rewrite this clause so it is testable and names the responsible actor.",
-            ],
-            selected_packs=[],
-            compare_only=False,
-            review_only=True,
+        return _emit_envelope(
+            OracleChatEnvelope(
+                status="PASS",
+                query=query,
+                intent="review_only",
+                selected_packs=[],
+                compare_only=False,
+                review_only=True,
+                follow_ups=[
+                    "Review this requirement for ambiguity and missing acceptance criteria: <paste text>",
+                    "Rewrite this clause so it is testable and names the responsible actor.",
+                ],
+                draft_answer_text=(
+                    "Review-only assessment. No authority packs were applied. I do not see a strong defect signal from the text you sent, "
+                    "but review-only mode is much stronger when you paste the actual requirement, paragraph, or approval language to inspect."
+                ),
+            )
         )
 
     top_findings = findings[:3]
@@ -563,17 +683,25 @@ def _answer_review_only(query: str, compare_only: bool) -> dict[str, Any]:
         ]
     )
 
-    return _chat_result(
-        status="PASS",
-        response="\n".join(lines).strip(),
-        citations=[f"review-only/{category}" for category, _detail in top_findings],
-        follow_ups=[
-            "Rewrite this requirement in a tighter, testable form.",
-            "Show me the missing approvals, artifacts, and acceptance criteria in this draft.",
-        ],
-        selected_packs=[],
-        compare_only=False,
-        review_only=True,
+    return _emit_envelope(
+        OracleChatEnvelope(
+            status="PASS",
+            query=query,
+            intent="review_only",
+            selected_packs=[],
+            compare_only=False,
+            review_only=True,
+            citations=[f"review-only/{category}" for category, _detail in top_findings],
+            evidence=[
+                OracleEvidenceItem(citation=f"review-only/{category}", summary=detail)
+                for category, detail in top_findings
+            ],
+            follow_ups=[
+                "Rewrite this requirement in a tighter, testable form.",
+                "Show me the missing approvals, artifacts, and acceptance criteria in this draft.",
+            ],
+            draft_answer_text="\n".join(lines).strip(),
+        )
     )
 
 
@@ -622,6 +750,50 @@ def _chat_result(
     if stage_artifacts:
         result["stage_artifacts"] = stage_artifacts
     return result
+
+
+def _evidence_item(
+    *,
+    rule: ChatRule,
+    score: int | None = None,
+) -> OracleEvidenceItem:
+    return OracleEvidenceItem(
+        citation=_citation(rule),
+        summary=_summarize_rule(rule),
+        statement_text=rule.statement_text,
+        topic=rule.subject,
+        standard_id=rule.standard_id,
+        score=score,
+    )
+
+
+def _emit_envelope(envelope: OracleChatEnvelope) -> dict[str, Any]:
+    formatted = format_chat_response(envelope, allow_draft_answer=True)
+    grade = grade_chat_response(formatted, envelope)
+
+    diagnostics = dict(envelope.diagnostics or {})
+    validation_failures = list(diagnostics.get("validation_failures", []))
+    if not grade.passed:
+        validation_failures.extend(grade.failures)
+        diagnostics["fallback_used"] = True
+        diagnostics["fallback_reason"] = diagnostics.get("fallback_reason") or "formatter_grader_failure"
+        diagnostics["validation_failures"] = validation_failures
+        formatted = format_chat_response(envelope, allow_draft_answer=False)
+    elif "validation_failures" not in diagnostics:
+        diagnostics["validation_failures"] = validation_failures
+
+    return _chat_result(
+        status=envelope.status,
+        response=formatted,
+        citations=envelope.citations_or_authority(),
+        follow_ups=envelope.follow_ups,
+        selected_packs=envelope.selected_packs,
+        compare_only=envelope.compare_only,
+        review_only=envelope.review_only,
+        evidence_assessment=envelope.evidence_assessment,
+        diagnostics=diagnostics,
+        stage_artifacts=envelope.stage_artifacts,
+    )
 
 
 def _chat_model_provider() -> str | None:
@@ -1184,60 +1356,39 @@ def _build_single_pack_synthesis(
 ) -> dict[str, Any]:
     top_matches = _dedupe_rules(matches, 3)
     citations = [_citation(rule) for rule, _score in top_matches]
-    lines: list[str] = []
-
-    if _is_yes_no_query(query):
-        lines.append("Likely yes.")
-        if _is_scope_funding_query(query):
-            lines.append(
-                "A scope change without corresponding funding or cost handling looks inconsistent with the selected standard's required TOCR process."
-            )
-        else:
-            lines.append(
-                f"Based on the matched clauses in {pack.standard_id}, this looks inconsistent with the required process."
-            )
-    else:
-        lines.append(f"Grounded answer from {pack.standard_id}.")
-
-    lines.append("")
-    if _is_scope_funding_query(query):
-        lines.append(
-            "I am interpreting 'do not fund it' as missing funding-source data or an unaddressed cost impact."
-        )
-        lines.append("")
-
-    lines.append("Why:")
-    for rule, _score in top_matches:
-        lines.append(f"- {_summarize_rule(rule)} ({_citation(rule)})")
-
-    lines.append("")
-    lines.append("Bottom line:")
-    if _is_scope_funding_query(query):
-        lines.append(
-            "If the scope insertion changes the work and carries cost or funding consequences, J-21 points you into the TOCR path with cost-impact disclosure, funding/CWBS data, and the full approval chain."
-        )
-    elif _is_yes_no_query(query):
-        lines.append(
-            "Treat this as a compliance issue unless the change is routed through the process the cited clauses require."
-        )
-    else:
-        lines.append("Use the cited clauses below as the governing support for the answer.")
-
     follow_ups = [
         f"Show me the exact clause text for {citations[0]}.",
         f"What would make this compliant under {pack.standard_id}?",
     ]
-    return _chat_result(
-        status="PASS",
-        response="\n".join(lines).strip(),
-        citations=citations,
-        follow_ups=follow_ups,
-        selected_packs=[pack.pack_slug],
-        compare_only=False,
-        review_only=False,
-        evidence_assessment=evidence_assessment,
-        diagnostics=diagnostics,
-        stage_artifacts=stage_artifacts,
+    return _emit_envelope(
+        OracleChatEnvelope(
+            status="PASS",
+            query=query,
+            intent="lookup",
+            selected_packs=[pack.pack_slug],
+            compare_only=False,
+            review_only=False,
+            authority_basis=[pack.standard_id],
+            citations=citations,
+            evidence=[_evidence_item(rule=rule, score=score) for rule, score in top_matches],
+            follow_ups=follow_ups,
+            draft_answer_text=_render_grounded_pack_answer(
+                query=query,
+                pack=pack,
+                top_matches=top_matches,
+            ),
+            evidence_assessment=evidence_assessment,
+            diagnostics=diagnostics or {},
+            stage_artifacts=stage_artifacts or {},
+            metadata={
+                "gaps": (
+                    ["The question may need a narrower clause or section reference if your facts differ from the matched rule topic."]
+                    if not _is_yes_no_query(query)
+                    else []
+                ),
+            },
+            wants_exact_text=_wants_exact_text(query),
+        )
     )
 
 
@@ -1250,47 +1401,58 @@ def _compare_packs(
     diagnostics: dict[str, Any] | None = None,
     stage_artifacts: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    lines = ["Oracle comparison across selected standards:", ""]
     citations: list[str] = []
     findings = pack_findings or [{"pack": pack, "matches": _dedupe_rules(_rank_rules(message, pack.rules), 3)} for pack in packs]
     for finding in findings:
-        pack = finding["pack"]
-        matches = finding["matches"]
-        lines.append(f"{pack.standard_id}:")
-        if not matches:
-            lines.append("  No grounded requirement match found for this topic.")
-            lines.append("")
-            continue
-        for rule, _score in matches:
+        for rule, _score in finding["matches"]:
             citation = _citation(rule)
             citations.append(citation)
-            lines.append(f"  - {citation}")
-            lines.append(f"    {rule.statement_text}")
-        lines.append("")
-
-    lines.append(
-        "Use this as a clause-level comparison aid. Oracle does not issue final sign-off, certification, or waiver decisions."
-    )
     first = packs[0]
     follow_ups = [
         f"Which clause is stricter between {packs[0].standard_id} and {packs[1].standard_id}?",
         f"Show the exact governing text from {first.standard_id}.",
     ]
-    return _chat_result(
-        status="PASS" if citations else "INSUFFICIENT_DATA",
-        response="\n".join(lines).strip(),
-        citations=citations,
-        follow_ups=follow_ups,
-        selected_packs=[pack.pack_slug for pack in packs],
-        compare_only=True,
-        review_only=False,
-        evidence_assessment=evidence_assessment,
-        diagnostics=diagnostics,
-        stage_artifacts=stage_artifacts,
+    evidence: list[OracleEvidenceItem] = []
+    for finding in findings:
+        pack = finding["pack"]
+        matches = finding["matches"]
+        for rule, score in matches[:2]:
+            evidence.append(_evidence_item(rule=rule, score=score))
+        if not matches:
+            evidence.append(
+                OracleEvidenceItem(
+                    citation=pack.standard_id,
+                    summary="No grounded requirement match found for this topic.",
+                    standard_id=pack.standard_id,
+                )
+            )
+
+    return _emit_envelope(
+        OracleChatEnvelope(
+            status="PASS" if citations else "INSUFFICIENT_DATA",
+            query=message,
+            intent="comparison",
+            selected_packs=[pack.pack_slug for pack in packs],
+            compare_only=True,
+            review_only=False,
+            authority_basis=[pack.standard_id for pack in packs],
+            citations=citations or [pack.standard_id for pack in packs],
+            evidence=evidence,
+            follow_ups=follow_ups,
+            draft_answer_text=_render_compare_answer(
+                query=message,
+                packs=packs,
+                findings=findings,
+            ),
+            evidence_assessment=evidence_assessment,
+            diagnostics=diagnostics or {},
+            stage_artifacts=stage_artifacts or {},
+        )
     )
 
 
 def _build_clause_lookup_answer(
+    query: str,
     pack: ChatPack,
     top_matches: list[tuple[ChatRule, int]],
     *,
@@ -1298,39 +1460,36 @@ def _build_clause_lookup_answer(
     diagnostics: dict[str, Any] | None = None,
     stage_artifacts: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    lines = [
-        f"Oracle matched {len(top_matches)} governing requirement(s) in {pack.standard_id}.",
-        "",
-    ]
     citations: list[str] = []
-    for idx, (rule, _score) in enumerate(top_matches, start=1):
+    for rule, _score in top_matches:
         citation = _citation(rule)
         citations.append(citation)
-        lines.append(f"{idx}. {citation}")
-        lines.append(f"   {rule.statement_text}")
-        if rule.requirement and rule.requirement != rule.statement_text:
-            lines.append(f"   Practical meaning: {rule.requirement}")
-        if rule.subject:
-            lines.append(f"   Topic: {rule.subject}")
-        lines.append("")
-    lines.append(
-        "If you want a tighter answer, ask for a specific section, table note, appendix, or compare it against another selected standard."
-    )
 
-    return _chat_result(
-        status="PASS",
-        response="\n".join(lines).strip(),
-        citations=citations,
-        follow_ups=[
-            f"Show the exact requirement text from {citations[0]}.",
-            f"List the top requirements in {pack.standard_id} for this topic.",
-        ],
-        selected_packs=[pack.pack_slug],
-        compare_only=False,
-        review_only=False,
-        evidence_assessment=evidence_assessment,
-        diagnostics=diagnostics,
-        stage_artifacts=stage_artifacts,
+    return _emit_envelope(
+        OracleChatEnvelope(
+            status="PASS",
+            query=query,
+            intent="clause_lookup",
+            selected_packs=[pack.pack_slug],
+            compare_only=False,
+            review_only=False,
+            authority_basis=[pack.standard_id],
+            citations=citations,
+            evidence=[_evidence_item(rule=rule, score=score) for rule, score in top_matches],
+            follow_ups=[
+                f"Show the exact requirement text from {citations[0]}.",
+                f"List the top requirements in {pack.standard_id} for this topic.",
+            ],
+            draft_answer_text=_render_grounded_pack_answer(
+                query=query,
+                pack=pack,
+                top_matches=top_matches,
+            ),
+            evidence_assessment=evidence_assessment,
+            diagnostics=diagnostics or {},
+            stage_artifacts=stage_artifacts or {},
+            wants_exact_text=_wants_exact_text(query),
+        )
     )
 
 
@@ -1375,17 +1534,39 @@ def _build_llm_guided_answer(
         if llm_summary and llm_summary.get("follow_ups")
         else llm_reasoning.get("follow_ups", [])
     )
-    return _chat_result(
-        status="PASS",
-        response="\n".join(line for line in response_lines if line is not None).strip(),
-        citations=citations,
-        follow_ups=follow_ups,
-        selected_packs=selected_packs,
-        compare_only=compare_only,
-        review_only=False,
-        evidence_assessment=evidence_assessment,
-        diagnostics=diagnostics,
-        stage_artifacts=stage_artifacts,
+    evidence: list[OracleEvidenceItem] = []
+    retrieval = (stage_artifacts or {}).get("retrieval", {})
+    match_groups = retrieval.get("matches_by_pack") or []
+    for group in match_groups:
+        for item in group.get("matches", [])[:2]:
+            evidence.append(
+                OracleEvidenceItem(
+                    citation=item.get("display_citation", ""),
+                    summary=item.get("requirement") or item.get("statement_text") or "",
+                    statement_text=item.get("statement_text", ""),
+                    topic=item.get("subject", ""),
+                    standard_id=item.get("standard_id", ""),
+                    score=item.get("score"),
+                )
+            )
+
+    return _emit_envelope(
+        OracleChatEnvelope(
+            status="PASS",
+            query=(stage_artifacts or {}).get("gatekeeper", {}).get("normalized_query", ""),
+            intent="comparison" if compare_only else "lookup",
+            selected_packs=selected_packs,
+            compare_only=compare_only,
+            review_only=False,
+            authority_basis=[],
+            citations=citations,
+            evidence=evidence,
+            follow_ups=follow_ups,
+            draft_answer_text="\n".join(line for line in response_lines if line is not None).strip(),
+            evidence_assessment=evidence_assessment,
+            diagnostics=diagnostics or {},
+            stage_artifacts=stage_artifacts or {},
+        )
     )
 
 
@@ -1399,18 +1580,23 @@ def answer_query(
 ) -> dict[str, Any]:
     query = _normalize_space(message)
     if not query:
-        return _chat_result(
-            status="INSUFFICIENT_DATA",
-            response=(
-                "Oracle needs a question, requirement, or draft clause to inspect."
-                if review_only
-                else "Oracle needs a standards question to answer."
-            ),
-            citations=[],
-            follow_ups=[],
-            selected_packs=pack_names,
-            compare_only=compare_only,
-            review_only=review_only,
+        return _emit_envelope(
+            OracleChatEnvelope(
+                status="INSUFFICIENT_DATA",
+                query="",
+                intent="review_only" if review_only else "lookup",
+                selected_packs=pack_names,
+                compare_only=compare_only,
+                review_only=review_only,
+                missing_inputs=[
+                    "A question, requirement, or draft clause to inspect.",
+                ],
+                draft_answer_text=(
+                    "Oracle needs a question, requirement, or draft clause to inspect."
+                    if review_only
+                    else "Oracle needs a standards question to answer."
+                ),
+            )
         )
 
     if review_only:
@@ -1418,26 +1604,34 @@ def answer_query(
 
     gatekeeper = _gatekeep_query(query, pack_names, compare_only)
     if gatekeeper["status"] == "REFUSE":
-        return _chat_result(
-            status="REFUSE",
-            response=gatekeeper["refusal_reason"],
-            citations=[],
-            follow_ups=[],
-            selected_packs=gatekeeper["selected_packs"],
-            compare_only=bool(gatekeeper["compare_mode"]),
-            review_only=False,
-            stage_artifacts={"gatekeeper": gatekeeper},
+        return _emit_envelope(
+            OracleChatEnvelope(
+                status="REFUSE",
+                query=query,
+                intent="refusal",
+                selected_packs=gatekeeper["selected_packs"],
+                compare_only=bool(gatekeeper["compare_mode"]),
+                review_only=False,
+                draft_answer_text=gatekeeper["refusal_reason"],
+                diagnostics={},
+                stage_artifacts={"gatekeeper": gatekeeper},
+            )
         )
     if gatekeeper["status"] == "INSUFFICIENT_DATA":
-        return _chat_result(
-            status="INSUFFICIENT_DATA",
-            response=gatekeeper["error"],
-            citations=[],
-            follow_ups=[],
-            selected_packs=gatekeeper["selected_packs"],
-            compare_only=bool(gatekeeper["compare_mode"]),
-            review_only=False,
-            stage_artifacts={"gatekeeper": gatekeeper},
+        return _emit_envelope(
+            OracleChatEnvelope(
+                status="INSUFFICIENT_DATA",
+                query=query,
+                intent="lookup",
+                selected_packs=gatekeeper["selected_packs"],
+                compare_only=bool(gatekeeper["compare_mode"]),
+                review_only=False,
+                missing_inputs=[
+                    "Select at least one authority pack for authority-grounded chat."
+                ],
+                draft_answer_text=gatekeeper["error"],
+                stage_artifacts={"gatekeeper": gatekeeper},
+            )
         )
 
     retrieval = _retrieve_chat_context(gatekeeper, pack_dir)
@@ -1459,15 +1653,23 @@ def answer_query(
             ]
             citations = [pack.standard_id]
 
-        return _chat_result(
-            status="INSUFFICIENT_DATA",
-            response=retrieval["error"],
-            citations=citations,
-            follow_ups=follow_ups,
-            selected_packs=gatekeeper["selected_packs"],
-            compare_only=bool(gatekeeper["compare_mode"]),
-            review_only=False,
-            stage_artifacts={"gatekeeper": gatekeeper, "retrieval": retrieval},
+        return _emit_envelope(
+            OracleChatEnvelope(
+                status="INSUFFICIENT_DATA",
+                query=query,
+                intent=gatekeeper["intent"],
+                selected_packs=gatekeeper["selected_packs"],
+                compare_only=bool(gatekeeper["compare_mode"]),
+                review_only=False,
+                authority_basis=citations,
+                citations=citations,
+                missing_inputs=[
+                    "A narrower topic, section, table note, appendix, or a different selected pack."
+                ],
+                follow_ups=follow_ups,
+                draft_answer_text=retrieval["error"],
+                stage_artifacts={"gatekeeper": gatekeeper, "retrieval": retrieval},
+            )
         )
 
     reasoning = _reason_about_chat_context(query, gatekeeper, retrieval)
@@ -1476,6 +1678,17 @@ def answer_query(
         "retrieval": {
             "compare_mode": retrieval["compare_mode"],
             "packs_queried": retrieval["packs_queried"],
+            "matches": [
+                _serialize_rule(rule, score) for rule, score in retrieval.get("matches", [])
+            ],
+            "matches_by_pack": [
+                {
+                    "pack_slug": finding["pack"].pack_slug,
+                    "standard_id": finding["pack"].standard_id,
+                    "matches": [_serialize_rule(rule, score) for rule, score in finding["matches"]],
+                }
+                for finding in retrieval.get("pack_findings", [])
+            ],
         },
         "reasoning": {
             "answer_type": reasoning["answer_type"],
@@ -1559,6 +1772,7 @@ def answer_query(
     top_matches = reasoning["top_matches"]
     if gatekeeper["intent"] == "clause_lookup":
         return _build_clause_lookup_answer(
+            query,
             pack,
             top_matches,
             evidence_assessment=reasoning.get("evidence_assessment"),
