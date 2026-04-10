@@ -378,6 +378,7 @@ def _call_anthropic(config: OracleConfig, user_message: str) -> dict:
     client = Anthropic(
         api_key=os.environ.get("ANTHROPIC_API_KEY"),
         timeout=httpx.Timeout(config.timeout, connect=10.0),
+        max_retries=0,
     )
     kwargs: dict[str, Any] = {
         "model": config.model,
