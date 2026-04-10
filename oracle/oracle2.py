@@ -386,8 +386,12 @@ def _call_anthropic(config: OracleConfig, user_message: str) -> dict:
         "messages": [{"role": "user", "content": user_message}],
     }
     if "opus" in config.model:
+        # Adaptive thinking: the model sizes its own reasoning budget per turn.
+        # budget_tokens is deprecated on Opus 4.6 / Sonnet 4.6 and will be
+        # removed in a future model release. Temperature must be 1 for any
+        # thinking mode.
         kwargs["temperature"] = 1
-        kwargs["thinking"] = {"type": "enabled", "budget_tokens": 16384}
+        kwargs["thinking"] = {"type": "adaptive"}
     else:
         kwargs["temperature"] = config.temperature
 
