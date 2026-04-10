@@ -15,6 +15,11 @@ import {
 import { BoundStateLogo } from "@/components/BoundStateLogo";
 import { DropZone } from "@/components/DropZone";
 import { ModeSelector, type ProcessingMode } from "@/components/ModeSelector";
+import {
+  RoundsSelector,
+  MIN_ROUNDS,
+  MAX_ROUNDS,
+} from "@/components/RoundsSelector";
 import { StatusSpinner } from "@/components/StatusSpinner";
 import { CritiquePanel } from "@/components/CritiquePanel";
 import { DownloadPanel } from "@/components/DownloadPanel";
@@ -202,6 +207,7 @@ export function OracleWorkspace() {
   const [activeTab, setActiveTab] = useState<"review" | "packs" | "chat">("review");
   const [file, setFile] = useState<File | null>(null);
   const [mode, setMode] = useState<ProcessingMode>("review");
+  const [maxRounds, setMaxRounds] = useState<number>(1);
   const [phase, setPhase] = useState<Phase>({ step: "upload" });
   const [availablePacks, setAvailablePacks] = useState<PackSummary[]>([]);
   const [packsLoading, setPacksLoading] = useState(false);
@@ -317,6 +323,7 @@ export function OracleWorkspace() {
     clearLiveJob();
     setFile(null);
     setMode("review");
+    setMaxRounds(1);
     setPhase({ step: "upload" });
     setSelectedPacks([]);
     setPackParts({});
@@ -338,11 +345,17 @@ export function OracleWorkspace() {
 
     setPhase({ step: "analyzing", logMessages: ["Starting Oracle..."] });
 
+    const clampedRounds = Math.max(
+      MIN_ROUNDS,
+      Math.min(MAX_ROUNDS, maxRounds),
+    );
+
     const form = new FormData();
     form.append("file", file);
     form.append("mode", mode);
     form.append("packs", JSON.stringify(selectedPacks));
     form.append("pack_parts", JSON.stringify(selectedPackPartMap));
+    form.append("max_rounds", String(clampedRounds));
 
     try {
       const res = await apiPost("/analyze", form);
@@ -678,6 +691,10 @@ export function OracleWorkspace() {
                         <CardContent className="space-y-6 pt-6">
                           <DropZone file={file} onFileSelect={setFile} />
                           <ModeSelector value={mode} onChange={setMode} />
+                          <RoundsSelector
+                            value={maxRounds}
+                            onChange={setMaxRounds}
+                          />
 
                           <Button
                             className="w-full"
