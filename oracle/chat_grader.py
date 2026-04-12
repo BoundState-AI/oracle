@@ -1,9 +1,19 @@
 """
 Module: oracle.chat_grader
 Purpose: Deterministic safety/grounding gate for formatted Oracle chat output.
+
+__safety_critical__: bool = True — safety gate for prohibited language in compliance output
+
+BoundState AI 2026
+Classification: BoundState Proprietary
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+Co-Authored-By: Dr. Joseph Wilde, BoundState AI
 """
 
 from __future__ import annotations
+
+__safety_critical__: bool = True
 
 import re
 from dataclasses import dataclass, field
@@ -14,6 +24,9 @@ _PROHIBITED_DECISION_LANGUAGE_PATTERN = re.compile(
     r"\b(?:approved?|approval|certif(?:y|ied|ication)|waiv(?:e|er|ed)|sign-?off|accepted?|greenlight(?:ed)?)\b",
     re.IGNORECASE,
 )
+
+# Public alias for cross-module import (used by chat_engine.py).
+PROHIBITED_DECISION_LANGUAGE_PATTERN = _PROHIBITED_DECISION_LANGUAGE_PATTERN
 
 
 @dataclass

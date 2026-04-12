@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Shall Statement Extractor - Local-Only Processing
+Module: oracle.shall_extractor
+Purpose: Extracts binding obligation statements from regulatory/standards PDFs.
 
 Extracts obligation statements from PDF text:
   Pass 1: PyMuPDF text extraction + regex + tagged requirement parsing
@@ -8,9 +9,19 @@ Extracts obligation statements from PDF text:
   Pass 2: Local Ollama LLM classification (optional)
 
 Output is always written to JSON + summary text.
+
+__safety_critical__: bool = True — extracts binding obligations that drive compliance review
+
+BoundState AI 2026
+Classification: BoundState Proprietary
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+Co-Authored-By: Dr. Joseph Wilde, BoundState AI
 """
 
 from __future__ import annotations
+
+__safety_critical__: bool = True
 
 import argparse
 import base64
@@ -27,13 +38,45 @@ from typing import Optional
 
 import fitz  # PyMuPDF
 
-logger = logging.getLogger(__name__)
+LOGGER = logging.getLogger(__name__)
 
 
 # ============================================================================
 # Models
 # ============================================================================
 
+# ---------------------------------------------------------------------------
+# Obligation keyword -> type mapping.
+#
+# WHY these specific keywords and types:
+#   These are the canonical obligation verbs defined by NASA/DoD standards
+#   writing conventions (see NASA-STD-0005, MIL-STD-961E, IEEE 830):
+#
+#   "shall" / "must" / "is required" = MANDATORY — legally binding, must
+#     be verified.  These are the words that create enforceable requirements.
+#   "shall not" / "must not" / "is prohibited" / "may not" = PROHIBITION —
+#     explicitly forbidden actions.  Critical for safety: "shall not use
+#     Teflon in LOX service above 350 psi."
+#   "will" = INTENT — declaration of future action by the authoring body,
+#     not an obligation on the implementer.  Often confused with "shall"
+#     in informal writing; distinguishing them prevents over-scoping.
+#   "should" / "should not" = RECOMMENDATION — best practice, not binding.
+#     Important to capture because auditors sometimes treat "should" as
+#     mandatory; tagging it correctly prevents scope creep.
+#   "may" = PERMISSION — explicitly grants latitude.  Without this tag,
+#     engineers may assume a permissive clause is mandatory.
+#
+# The multi-word forms ("shall not", "is required to") are listed before
+# their single-word substrings so regex alternation matches the longest
+# form first (OBLIGATION_PATTERN uses these in longest-first order).
+#
+# Known edge cases:
+#   - "required" alone (without "is") catches adjectival usage like
+#     "required documentation" — acceptable, as these still indicate
+#     mandatory artifacts.
+#   - "will" is ambiguous (intent vs. future tense narrative); Pass 2
+#     LLM classification can reclassify if needed.
+# ---------------------------------------------------------------------------
 OBLIGATION_KEYWORDS = {
     "shall": "mandatory",
     "shall not": "prohibition",
@@ -84,7 +127,47 @@ RATIONALE_PATTERN = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
-# Domain vocabulary for keyword extraction
+# ---------------------------------------------------------------------------
+# Domain vocabulary for keyword extraction.
+#
+# WHY these specific terms:
+#   These are the high-signal nouns from NASA M&P (Materials & Processes)
+#   standards — specifically NASA-STD-6001B (flammability), 6016C (M&P
+#   requirements), MMPDS (metallic design data), and CMH-17 (composites).
+#
+#   Each term was selected because it appears in rule text AND is useful
+#   for downstream classification:
+#
+#   Materials: material(s), metallic, nonmetallic, polymer, composite,
+#     adhesive, elastomer, fluoropolymer — identifies WHAT is being
+#     regulated.  Enables filtering by material family.
+#
+#   Processes: welding, bonding, coating, plating, heat-treat, annealing,
+#     braze, solder, weld — identifies manufacturing processes that carry
+#     their own qualification requirements.
+#
+#   Environments: oxygen, hydrogen, cryogenic, vacuum, propellant,
+#     flammability — identifies service environments that trigger
+#     additional testing requirements (e.g. O2 compatibility per 6001B).
+#
+#   Failure modes: corrosion, fracture, fatigue, embrittlement, toxicity,
+#     outgassing — identifies the risk being mitigated.  Critical for
+#     mapping rules to FMEA entries.
+#
+#   Program artifacts: MUA, MAPTIS, NDE, qualification, certification,
+#     specification — identifies process/documentation requirements vs.
+#     technical requirements.
+#
+#   Both singular and plural forms are included (material/materials,
+#   process/processes) because PDF extraction may capture either form
+#   and the extractor does not stem these terms.
+#
+# WHY this enables downstream use:
+#   After extraction, each shall statement is tagged with matching domain
+#   keywords.  This powers: (1) faceted search in rule packs, (2) auto-
+#   routing to the correct MIRA engine (H2, galvanic, flammability),
+#   (3) applicability filtering when building project-specific rule sets.
+# ---------------------------------------------------------------------------
 DOMAIN_KEYWORDS = {
     "material", "materials", "process", "processes", "test", "testing",
     "oxygen", "hydrogen", "flammability", "compatibility", "corrosion",
@@ -102,7 +185,45 @@ DOMAIN_KEYWORDS = {
     "weld", "braze", "solder", "heat-treat", "annealing",
 }
 
-# Applicability classification patterns
+# ---------------------------------------------------------------------------
+# Applicability classification patterns.
+#
+# WHY these patterns matter:
+#   NASA requirements are not universally applied — they are scoped by
+#   service environment, criticality level, and material class.  A rule
+#   that applies to "human-rated oxygen systems" does NOT apply to an
+#   unmanned structural component.  These patterns auto-tag each extracted
+#   shall statement with its applicability scope.
+#
+#   human_rated: Triggers the most stringent requirements (crew safety).
+#     Human-rated hardware must meet NASA-STD-5009 and additional testing.
+#   mission_critical / safety_critical / flight_critical: Tiered
+#     criticality levels that determine required test depth and review
+#     authority.
+#   oxygen_service: O2-compatible materials require flammability testing
+#     per NASA-STD-6001B.  LOX = liquid oxygen, GOX = gaseous oxygen.
+#   hydrogen_service: H2 compatibility requires embrittlement assessment.
+#     LH2 = liquid hydrogen, GH2 = gaseous hydrogen.
+#   propellant: Hypergolic propellants (NTO = nitrogen tetroxide,
+#     MMH = monomethylhydrazine) require unique compatibility testing.
+#   pressure_systems: Pressure vessels/lines require fracture-mechanics
+#     analysis per NASA-STD-5019.
+#   structural: Load-bearing components require fatigue and fracture
+#     assessment.
+#   thermal: Cryogenic or elevated-temperature service changes allowable
+#     properties and requires specific test data.
+#   contamination_control: NVR = non-volatile residue, outgassing per
+#     ASTM E595 — critical for vacuum/optical/oxygen systems.
+#   metallic / nonmetallic: Fundamental material class split that
+#     determines which standards apply (MMPDS vs. CMH-17, different
+#     flammability test methods).
+#
+# WHY regex instead of keyword sets:
+#   These terms appear in compound forms with varying punctuation in PDFs
+#   (e.g. "human-rated", "human rated", "humanrated" after OCR).  Regex
+#   with .? wildcards handles the variation without maintaining separate
+#   entries for each spelling.
+# ---------------------------------------------------------------------------
 APPLICABILITY_PATTERNS = {
     "human_rated": re.compile(
         r"human.?rated|crew|life.?critical|habitable|crewed", re.IGNORECASE
@@ -363,6 +484,31 @@ def _statement_is_covered_by_tagged_requirement(
 # Pass 1 extraction (improved)
 # ============================================================================
 
+# ---------------------------------------------------------------------------
+# Noise terms: strings whose presence in a sentence indicates boilerplate
+# or document-navigation text rather than an actual obligation.
+#
+# WHY these specific terms:
+#   "page " — page number artifacts from PDF extraction (e.g. "page 12 of
+#     45").  The trailing space distinguishes "page 12" from legitimate
+#     uses like "page-level requirements."
+#   "table of contents" — TOC entries contain obligation keywords ("shall"
+#     appears in the title of sections about shall-statements) but are
+#     not obligations themselves.  Without this filter, every TOC line
+#     would generate a false extraction.
+#   "revision history" — revision log entries describe past changes using
+#     obligation language ("added shall statement in 4.2") but are not
+#     current requirements.
+#   "export controlled" — ITAR/EAR markings appear on every page of
+#     controlled documents.  They contain "shall" in the warning text
+#     but are not technical requirements.
+#   "proprietary" — similar to export-controlled; proprietary notices
+#     use mandatory language about handling restrictions that would
+#     pollute the obligation set.
+#
+# These are checked via substring match (case-insensitive) — simple and
+# fast.  A sentence matching ANY noise term is skipped entirely.
+# ---------------------------------------------------------------------------
 NOISE_TERMS = (
     "page ",
     "table of contents",
@@ -371,6 +517,28 @@ NOISE_TERMS = (
     "proprietary",
 )
 
+# ---------------------------------------------------------------------------
+# Generic skip-page patterns: regex patterns that identify entire pages
+# whose content should be excluded from obligation extraction.
+#
+# WHY these specific patterns:
+#   "requirements identification matrix" — RIM/RTM pages are cross-reference
+#     tables that LIST requirement IDs but do not DEFINE them.  Extracting
+#     from these pages produces duplicate, context-free fragments.
+#   "requirement in this standard" — meta-discussion about the standard's
+#     own requirement structure (e.g. "Each requirement in this standard
+#     is verified by...").  These are about the document, not the domain.
+#   "for example purposes only" — example/illustration pages that use
+#     obligation language in hypothetical contexts.  Extracting these
+#     would create false requirements.
+#   "not requirements related to this standard" — explicit disclaimer
+#     pages that warn the reader certain content is informational only.
+#
+# These patterns are checked against the full page text.  If ANY pattern
+# matches, the entire page is skipped.  This is aggressive but correct:
+# these page types consistently produce false extractions, and any real
+# obligations on these pages are restated in their canonical location.
+# ---------------------------------------------------------------------------
 GENERIC_SKIP_PAGE_PATTERNS = (
     re.compile(r"requirements identification matrix", re.IGNORECASE),
     re.compile(r"requirement in this standard", re.IGNORECASE),
@@ -609,7 +777,7 @@ def _extract_generic_requirements(
     dedup_removed = before_dedup - len(generic_statements)
 
     if boilerplate:
-        logger.info(
+        LOGGER.info(
             "Fix 1: removed %d boilerplate duplicates (%d unique patterns)",
             dedup_removed, len(boilerplate),
         )
@@ -633,13 +801,13 @@ def extract_pass1(pdf_path: Path) -> ExtractionResult:
 
     doc = fitz.open(pdf_path)
     total_pages = len(doc)
-    logger.info("Pass 1: extracting from %s (%d pages)", pdf_path.name, total_pages)
+    LOGGER.info("Pass 1: extracting from %s (%d pages)", pdf_path.name, total_pages)
 
     # Phase A: Tagged requirements
     tagged_stmts, tagged_texts_by_page, first_tp, last_tp, stmt_id = (
         _extract_tagged_requirements(doc)
     )
-    logger.info("Phase A: %d MPR/FCR tagged requirements", len(tagged_stmts))
+    LOGGER.info("Phase A: %d MPR/FCR tagged requirements", len(tagged_stmts))
 
     # Phase B: Generic requirements
     tagged_standard = len({s.mpr_id for s in tagged_stmts if s.mpr_id}) >= 20
@@ -671,7 +839,7 @@ def extract_pass1(pdf_path: Path) -> ExtractionResult:
         statements=statements,
     )
 
-    logger.info(
+    LOGGER.info(
         "Pass 1 complete: %d statements (%d MPR/FCR, %d generic, %d deduped)",
         result.total_statements, mpr_count, len(generic_stmts), dedup_removed,
     )
@@ -740,7 +908,7 @@ def enrich_with_sonnet(
     justification, keywords, and applies_to extraction."""
     mpr_stmts = [s for s in result.statements if s.mpr_id]
     if not mpr_stmts:
-        logger.info("Sonnet enrichment skipped: no MPR/FCR statements")
+        LOGGER.info("Sonnet enrichment skipped: no MPR/FCR statements")
         return result
 
     # Group by page
@@ -753,7 +921,7 @@ def enrich_with_sonnet(
         pages = pages[:max_pages]
 
     total_pages = len(pages)
-    logger.info(
+    LOGGER.info(
         "Sonnet enrichment: %d MPR/FCR across %d pages",
         sum(len(by_page[p]) for p in pages),
         total_pages,
@@ -845,7 +1013,7 @@ def enrich_with_sonnet(
             elapsed = time.time() - started
             avg = elapsed / i
             eta = max(0, (total_pages - i) * avg)
-            logger.info(
+            LOGGER.info(
                 "  Page %d/%d (p.%d): %d/%d enriched (%.1fs, ETA ~%.0fs)",
                 i,
                 total_pages,
@@ -858,14 +1026,14 @@ def enrich_with_sonnet(
 
         except json.JSONDecodeError as e:
             failed_count += len(page_stmts)
-            logger.warning("  Page %d: JSON parse failed: %s", page_num, e)
+            LOGGER.warning("  Page %d: JSON parse failed: %s", page_num, e)
         except Exception as e:
             failed_count += len(page_stmts)
-            logger.error("  Page %d: %s", page_num, e)
+            LOGGER.error("  Page %d: %s", page_num, e)
 
     doc.close()
 
-    logger.info(
+    LOGGER.info(
         "Sonnet enrichment complete: %d/%d enriched, %d failed (%.1fs total)",
         enriched_count,
         len(mpr_stmts),
@@ -1013,7 +1181,7 @@ def detect_implicit_obligations(
     if max_pages and max_pages > 0:
         pages_to_process = pages_to_process[:max_pages]
 
-    logger.info(
+    LOGGER.info(
         "Pass 1c: detecting implicit obligations across %d pages",
         len(pages_to_process),
     )
@@ -1146,7 +1314,7 @@ def detect_implicit_obligations(
                 next_id += 1
                 chunk_new += 1
 
-            logger.info(
+            LOGGER.info(
                 "  Pages %d–%d: found %d implicit obligations",
                 chunk_page_numbers[0],
                 chunk_page_numbers[-1],
@@ -1155,7 +1323,7 @@ def detect_implicit_obligations(
 
         except json.JSONDecodeError as e:
             failed_pages += len(chunk_page_indices)
-            logger.warning(
+            LOGGER.warning(
                 "  Pages %d–%d: JSON parse failed: %s",
                 chunk_page_numbers[0],
                 chunk_page_numbers[-1],
@@ -1163,7 +1331,7 @@ def detect_implicit_obligations(
             )
         except Exception as e:
             failed_pages += len(chunk_page_indices)
-            logger.error(
+            LOGGER.error(
                 "  Pages %d–%d: %s",
                 chunk_page_numbers[0],
                 chunk_page_numbers[-1],
@@ -1188,7 +1356,7 @@ def detect_implicit_obligations(
         s.id = i
 
     elapsed = time.time() - started
-    logger.info(
+    LOGGER.info(
         "Pass 1c complete: %d implicit obligations found, %d pages failed (%.1fs)",
         len(new_statements),
         failed_pages,
@@ -1260,7 +1428,7 @@ def _call_ollama(
                 return str(content)
         except (TimeoutError, socket.timeout) as e:
             if attempt < retries:
-                logger.warning(
+                LOGGER.warning(
                     "Ollama timeout (attempt %d/%d), retrying...",
                     attempt + 1,
                     retries + 1,
@@ -1274,7 +1442,7 @@ def _call_ollama(
             msg = str(e).lower()
             if "timed out" in msg:
                 if attempt < retries:
-                    logger.warning(
+                    LOGGER.warning(
                         "Ollama timeout/URLError (attempt %d/%d), retrying...",
                         attempt + 1,
                         retries + 1,
@@ -1316,7 +1484,7 @@ def _parse_llm_classifications(response_text: str) -> list[dict]:
                 except json.JSONDecodeError:
                     continue
         if parsed is None:
-            logger.warning("Could not parse LLM JSON payload (prefix=%r)", text[:120])
+            LOGGER.warning("Could not parse LLM JSON payload (prefix=%r)", text[:120])
             return []
 
     if isinstance(parsed, dict):
@@ -1367,11 +1535,11 @@ def extract_pass2(
 
     total = len(statements)
     if total == 0:
-        logger.info("Pass 2 skipped: no statements")
+        LOGGER.info("Pass 2 skipped: no statements")
         return result
 
     total_batches = (total + batch_size - 1) // batch_size
-    logger.info(
+    LOGGER.info(
         "Pass 2: classifying %d statements with %s (%d batches x %d)",
         total,
         model,
@@ -1428,7 +1596,7 @@ def extract_pass2(
             avg = (time.time() - started) / batch_num
             rem = max(0, total_batches - batch_num)
             eta_min = int((avg * rem) / 60)
-            logger.info(
+            LOGGER.info(
                 "  Batch %d/%d: %d/%d OK (%d/%d total, %d%%, %.1fs, ETA ~%dm)",
                 batch_num,
                 total_batches,
@@ -1442,12 +1610,12 @@ def extract_pass2(
             )
 
         except ConnectionError:
-            logger.error("Ollama not available - aborting pass 2")
+            LOGGER.error("Ollama not available - aborting pass 2")
             break
         except TimeoutError as e:
             failed_count += len(batch)
             consecutive_failures += 1
-            logger.error(
+            LOGGER.error(
                 "  Batch %d/%d timeout: %s (%d/%d total)",
                 batch_num,
                 total_batches,
@@ -1456,7 +1624,7 @@ def extract_pass2(
                 total,
             )
             if consecutive_failures >= max_consecutive_failures:
-                logger.error(
+                LOGGER.error(
                     "Stopping pass 2 after %d consecutive failures.",
                     consecutive_failures,
                 )
@@ -1464,7 +1632,7 @@ def extract_pass2(
         except Exception as e:
             failed_count += len(batch)
             consecutive_failures += 1
-            logger.error(
+            LOGGER.error(
                 "  Batch %d/%d failed: %s (%d/%d total)",
                 batch_num,
                 total_batches,
@@ -1473,13 +1641,13 @@ def extract_pass2(
                 total,
             )
             if consecutive_failures >= max_consecutive_failures:
-                logger.error(
+                LOGGER.error(
                     "Stopping pass 2 after %d consecutive failures.",
                     consecutive_failures,
                 )
                 break
 
-    logger.info(
+    LOGGER.info(
         "Pass 2 complete: %d/%d classified, %d failed",
         classified_count,
         total,
@@ -1562,8 +1730,8 @@ def save_results(result: ExtractionResult, output_dir: Path) -> dict[str, Path]:
                     f.write(f"    Applies to: {', '.join(s.applies_to)}\n")
                 f.write("\n")
 
-    logger.info("Saved: %s", json_path)
-    logger.info("Saved: %s", summary_path)
+    LOGGER.info("Saved: %s", json_path)
+    LOGGER.info("Saved: %s", summary_path)
     return {"json": json_path, "summary": summary_path}
 
 
@@ -1693,11 +1861,11 @@ def main() -> None:
         result.by_type = {}
         for s in result.statements:
             result.by_type[s.obligation_type] = result.by_type.get(s.obligation_type, 0) + 1
-        logger.info("Filtered to mandatory/prohibition: %d -> %d", before, result.total_statements)
+        LOGGER.info("Filtered to mandatory/prohibition: %d -> %d", before, result.total_statements)
 
     # Always checkpoint pass 1 immediately so caller gets JSON even if enrichment is slow.
     checkpoint = save_results(result, output_dir)
-    logger.info("Pass 1 checkpoint written: %s", checkpoint["json"])
+    LOGGER.info("Pass 1 checkpoint written: %s", checkpoint["json"])
 
     # Sonnet Vision enrichment (Pass 1.5)
     if args.enrich_sonnet:
@@ -1710,7 +1878,7 @@ def main() -> None:
         )
         # Checkpoint after enrichment
         save_results(result, output_dir)
-        logger.info("Sonnet enrichment checkpoint written")
+        LOGGER.info("Sonnet enrichment checkpoint written")
 
     # Implicit obligation detection (Pass 1c)
     if args.implicit:
@@ -1722,7 +1890,7 @@ def main() -> None:
             min_confidence=args.implicit_min_confidence,
         )
         save_results(result, output_dir)
-        logger.info("Implicit obligation detection checkpoint written")
+        LOGGER.info("Implicit obligation detection checkpoint written")
 
     if args.classify:
         result = extract_pass2(

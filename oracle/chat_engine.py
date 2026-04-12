@@ -1,9 +1,19 @@
 """
 Module: oracle.chat_engine
 Purpose: Deterministic Oracle-native pack chat over registered rule packs.
+
+__safety_critical__: bool = True — routes compliance queries against rule packs
+
+BoundState AI 2026
+Classification: BoundState Proprietary
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+Co-Authored-By: Dr. Joseph Wilde, BoundState AI
 """
 
 from __future__ import annotations
+
+__safety_critical__: bool = True
 
 import json
 import logging
@@ -15,7 +25,7 @@ from typing import Any
 
 from oracle.chat_contract import OracleChatEnvelope, OracleEvidenceItem
 from oracle.chat_formatter import format_chat_response
-from oracle.chat_grader import grade_chat_response
+from oracle.chat_grader import PROHIBITED_DECISION_LANGUAGE_PATTERN, grade_chat_response
 from oracle.cli import load_pack as cli_load_pack
 
 LOGGER = logging.getLogger("oracle.chat")
@@ -24,6 +34,27 @@ _TOKEN_ALIASES = {
     "sn": "tin",
 }
 
+# ---------------------------------------------------------------------------
+# Stop words: removed during tokenization so they don't pollute keyword
+# matching against rule-pack content.
+#
+# WHY these specific words:
+#   - Standard English stop words (a, an, the, of, in, etc.) add no
+#     discriminative value when matching user queries to rule text.
+#   - Domain-structural words (section, clause, paragraph, table, part)
+#     appear in nearly every rule and would dominate similarity scoring
+#     without contributing to topical relevance.
+#   - Query-action verbs (show, tell, say, compare, finish) express user
+#     intent, not rule content.  Intent is handled by dedicated pattern
+#     matchers below; keeping these in the token stream would create false
+#     keyword hits.
+#
+# Known false-positive risk: "standard" is a stop word here, which means a
+# query about a specific standard (e.g. "NASA-STD-6016C") must rely on the
+# hyphenated token surviving tokenization rather than the bare word.
+# Known false-negative risk: none identified — removing noise words only
+# improves recall of meaningful tokens.
+# ---------------------------------------------------------------------------
 _STOP_WORDS = {
     "a",
     "about",
@@ -69,71 +100,368 @@ _STOP_WORDS = {
     "finishes",
 }
 
+# ---------------------------------------------------------------------------
+# Section reference pattern: detects explicit clause/section citations in the
+# user query (e.g. "section 4.2.1", "para 3.1a(2)").
+#
+# WHY: When a user cites a specific section, the engine can bypass keyword
+# search entirely and do a direct lookup against the rule pack's section
+# index.  This is the highest-confidence routing path — if a section ref is
+# found, it should dominate the response.
+#
+# False-positive risk: abbreviations like "sec." could collide with "sec"
+# as "second", but the trailing digit requirement makes this unlikely.
+# False-negative risk: section references using non-standard delimiters
+# (e.g. "Section 4-2-1" with hyphens) will not match.
+# ---------------------------------------------------------------------------
 _SECTION_PATTERN = re.compile(
     r"\b(?:section|sec\.?|clause|paragraph|para\.?)\s+([A-Z]?\d+(?:\.\d+)*(?:[a-z](?:\(\d+\))?)?)\b",
     re.IGNORECASE,
 )
+# ---------------------------------------------------------------------------
+# Table note pattern: detects references to specific notes within tables
+# (e.g. "Table III note 2", "table 5 note 1").
+#
+# WHY: Table notes in NASA/aerospace standards often contain critical
+# applicability conditions and exceptions.  Users frequently ask about a
+# specific table note, and this pattern lets the engine locate the exact
+# note rather than returning the entire table.
+#
+# False-positive risk: minimal — the "table ... note" structure is
+# unambiguous in standards documents.
+# False-negative risk: informal references like "the note under table 5"
+# or "footnote 2 in table III" will miss.
+# ---------------------------------------------------------------------------
 _TABLE_NOTE_PATTERN = re.compile(
     r"\btable\s+([IVXLCDM]+|\d+)\s+note\s+(\d+)\b",
     re.IGNORECASE,
 )
+
+# ---------------------------------------------------------------------------
+# Compare pattern: detects cross-reference / comparison queries
+# (e.g. "compare 6001B vs 6016C", "comparison of section 4 versus 5").
+#
+# WHY: Comparison queries require fundamentally different response
+# formatting — side-by-side evidence from multiple sources rather than a
+# single-source answer.  The router uses this to set compare_only mode on
+# the envelope, which the formatter and grader enforce.
+#
+# False-positive risk: low — these are explicit comparison verbs.
+# False-negative risk: implicit comparisons ("how does X differ from Y",
+# "what changed between revisions") will not trigger this pattern.
+# ---------------------------------------------------------------------------
 _COMPARE_PATTERN = re.compile(r"\b(?:compare|comparison|versus|vs\.?)\b", re.IGNORECASE)
+
+# ---------------------------------------------------------------------------
+# Approval pattern: detects queries that request the system to make or
+# endorse an engineering decision (e.g. "approve this", "sign off",
+# "waive requirement").
+#
+# WHY: The Oracle must NEVER act as a decision authority.  Queries matching
+# this pattern are routed to a REFUSE response with the MUA authority
+# boundary disclaimer.  This is a safety-critical gate — if it misses a
+# query, the system could appear to endorse an engineering disposition.
+#
+# False-positive risk: a user asking "who can approve this?" (informational)
+# will trigger a refusal.  Acceptable — false-positive refusals are safer
+# than false-negative approvals.
+# False-negative risk: oblique phrasing like "is this acceptable?" or
+# "can we proceed?" may slip through.  The grader's prohibited-language
+# check provides a second safety net on the output side.
+# ---------------------------------------------------------------------------
 _APPROVAL_PATTERN = re.compile(
     r"\b(?:approve\s+this|certify|sign\s+off|waive|final\s+disposition)\b",
     re.IGNORECASE,
 )
+
+# ---------------------------------------------------------------------------
+# Clause lookup pattern: detects queries requesting verbatim rule text
+# (e.g. "show me section 4.2", "quote the exact clause", "table 3").
+#
+# WHY: Verbatim-lookup queries should return the raw rule text with minimal
+# interpretation.  This pattern sets the response mode to direct quotation
+# rather than synthesis, reducing hallucination risk.
+#
+# False-positive risk: "show" and "note" are common words that could match
+# non-lookup queries.  Mitigated by combining this with other signals
+# (e.g. presence of a section reference).
+# False-negative risk: queries like "what does 4.2.1 say?" rely on
+# _SECTION_PATTERN instead, which is fine — the section ref alone triggers
+# direct lookup.
+# ---------------------------------------------------------------------------
 _CLAUSE_LOOKUP_PATTERN = re.compile(
     r"\b(?:show|quote|exact|text|verbatim|section|sec\.?|clause|paragraph|para\.?|table|note)\b",
     re.IGNORECASE,
 )
+
+# ---------------------------------------------------------------------------
+# Yes/no pattern: detects binary questions that start with an auxiliary verb
+# (e.g. "Is titanium allowed in LOX service?", "Can we use PTFE here?").
+#
+# WHY: Yes/no questions require a definitive compliance determination
+# backed by specific rule citations.  The engine structures the response
+# as: answer (YES/NO/CONDITIONAL) + governing rule + evidence.  This
+# avoids the common LLM failure mode of hedging without commitment.
+#
+# False-positive risk: rhetorical questions ("Would it help to review
+# section 5?") are rare in compliance contexts.
+# False-negative risk: yes/no questions that don't start with an auxiliary
+# (e.g. "Titanium in LOX — allowed?") will not match.
+# ---------------------------------------------------------------------------
 _YES_NO_PATTERN = re.compile(r"^(?:if|is|are|can|could|does|do|would|will|should)\b", re.IGNORECASE)
+
+# ---------------------------------------------------------------------------
+# Compliance risk pattern: detects queries about rule violations, allowed
+# usage, and requirement status.
+#
+# WHY: These queries need the engine to evaluate a material/process/design
+# against specific rules and return a compliance determination with
+# citations.  This is the core use case for Oracle chat — "is X compliant
+# with Y?" — and the pattern captures the vocabulary of compliance inquiry.
+#
+# False-positive risk: "ok" and "okay" could match casual conversation,
+# but Oracle chat is a professional tool where these words almost always
+# mean "is this acceptable per the standard?"
+# False-negative risk: domain-specific compliance language (e.g. "red-lined",
+# "non-conformance") is not captured here.
+# ---------------------------------------------------------------------------
 _COMPLIANCE_RISK_PATTERN = re.compile(
     r"\b(?:against|violate|violation|non-?compliant|compliant|allowed|permit|permitted|ok|okay|require|required|must)\b",
     re.IGNORECASE,
 )
+
+# ---------------------------------------------------------------------------
+# Scope pattern: detects queries about document scope, changes, and
+# revisions (e.g. "what changed in revision C?", "scope of section 5").
+#
+# WHY: Scope and revision queries require the engine to pull metadata
+# about the standard itself (revision history, applicability scope) rather
+# than individual rules.  This enables delta-analysis responses.
+#
+# False-positive risk: "change" is common in rule text ("change in
+# temperature"); combining with other signals reduces false triggers.
+# False-negative risk: queries using "difference" or "delta" without
+# scope-specific terms will not match.
+# ---------------------------------------------------------------------------
 _SCOPE_PATTERN = re.compile(r"\b(?:scope|change|insert|added?|modify|revision)\b", re.IGNORECASE)
+
+# ---------------------------------------------------------------------------
+# Funding pattern: detects queries about cost, budget, and financial
+# identifiers (CWBS = Contract Work Breakdown Structure, PSID = Project
+# Structure Identifier).
+#
+# WHY: Funding questions require a completely different evidence set —
+# contract/financial data rather than technical rules.  Detecting this
+# early lets the router either redirect to the appropriate data source
+# or return a clear "out of scope for this rule pack" response.
+#
+# False-positive risk: "cost" appears in technical contexts ("cost of
+# testing"); low impact since funding-mode responses are informational.
+# False-negative risk: informal budget language ("how much", "price") is
+# not captured.
+# ---------------------------------------------------------------------------
 _FUNDING_PATTERN = re.compile(
     r"\b(?:fund|funding|unfunded|cost|budget|charge code|cwbs|psid)\b",
     re.IGNORECASE,
 )
+
+# ---------------------------------------------------------------------------
+# Vague term pattern: detects weasel words and subjective qualifiers that
+# indicate a poorly-specified requirement or an ambiguous user query.
+#
+# WHY: Two purposes: (1) When found in rule text, these terms flag
+# requirements that lack measurable acceptance criteria — the engine can
+# warn that the rule is vague.  (2) When found in a user query, they
+# signal that the question may need clarification before a meaningful
+# compliance answer can be given.
+#
+# False-positive risk: "support" is overloaded (structural support vs.
+# organizational support); context usually disambiguates.
+# False-negative risk: domain-specific vagueness ("suitable", "compatible")
+# is not captured here but may be in domain-specific packs.
+# ---------------------------------------------------------------------------
 _VAGUE_TERM_PATTERN = re.compile(
     r"\b(?:appropriate|adequate|sufficient|timely|reasonable|as needed|as appropriate|where possible|support|supports|optimi[sz]e|minimi[sz]e|robust|user-friendly|efficient)\b",
     re.IGNORECASE,
 )
+
+# ---------------------------------------------------------------------------
+# Owner pattern: detects references to organizational roles and responsible
+# parties in contract/requirements language.
+#
+# WHY: Identifying the responsible party is critical for obligation
+# analysis — "the contractor shall" vs "the government shall" assigns
+# completely different ownership.  This pattern enables the engine to
+# extract WHO is obligated, not just WHAT the obligation is.  The short
+# acronyms (COR, CO, TM, RA, TI) are standard NASA/DoD contract roles:
+#   COR = Contracting Officer's Representative
+#   CO  = Contracting Officer
+#   TM  = Technical Monitor
+#   RA  = Responsible Authority
+#   TI  = Technical Inspector
+#
+# False-positive risk: two-letter acronyms (co, tm, ra, ti) can collide
+# with common words in case-insensitive mode.  Mitigated by combining
+# with obligation verbs (_ACTION_PATTERN).
+# False-negative risk: non-standard role titles ("lead analyst",
+# "designated approver") will not match.
+# ---------------------------------------------------------------------------
 _OWNER_PATTERN = re.compile(
     r"\b(?:contractor|government|team|program|office|manager|engineer|reviewer|operator|system|supplier|vendor|customer|cor|co|tm|ra|ti)\b",
     re.IGNORECASE,
 )
+
+# ---------------------------------------------------------------------------
+# Action pattern: detects obligation and directive verbs — the core verbs
+# that turn prose into enforceable requirements.
+#
+# WHY: These verbs are the spine of any "shall statement."  Matching them
+# lets the engine identify which rules are actionable obligations vs.
+# informational background.  Combined with _OWNER_PATTERN, they enable
+# full WHO-SHALL-WHAT decomposition of requirements.
+#
+# The verb hierarchy follows NASA/DoD standards convention:
+#   shall/must = mandatory | will = declaration of intent
+#   should = recommendation | provide/deliver/submit/etc. = action verbs
+#
+# False-positive risk: "review" and "document" are both nouns and verbs;
+# context (presence of a subject + shall) disambiguates.
+# False-negative risk: passive constructions ("shall be provided") are
+# captured because "shall" triggers independently of "provide."
+# ---------------------------------------------------------------------------
 _ACTION_PATTERN = re.compile(
     r"\b(?:shall|must|will|should|provide|deliver|submit|update|maintain|complete|implement|notify|document|record|verify|validate|review)\b",
     re.IGNORECASE,
 )
+
+# ---------------------------------------------------------------------------
+# Measure pattern: detects quantitative criteria, deadlines, and evidence
+# artifacts that make a requirement testable/verifiable.
+#
+# WHY: A requirement without a measurable acceptance criterion is
+# unenforceable.  This pattern identifies the verification side of
+# obligations — deadlines ("within 30 days"), thresholds ("at least 95%"),
+# evidence types ("test", "inspection", "deliverable").  Used with
+# _ACTION_PATTERN to score requirement completeness.
+#
+# False-positive risk: bare numbers (\d+) will match version numbers,
+# section numbers, etc.  Acceptable — this is a signal, not a classifier.
+# False-negative risk: implicit measures ("prior to CDR", "before ATP")
+# use milestone names rather than time units and will not match.
+# ---------------------------------------------------------------------------
 _MEASURE_PATTERN = re.compile(
     r"\b(?:within|no later than|at least|at most|maximum|min(?:imum)?|threshold|metric|acceptance|evidence|artifact|deliverable|report|log|record|trace|test|inspection|review criteria|\d+%?|\d+\s*(?:day|days|hour|hours|week|weeks|month|months))\b",
     re.IGNORECASE,
 )
+
+# ---------------------------------------------------------------------------
+# Change control pattern: detects modification/revision actions in contract
+# and requirements management contexts.
+#
+# WHY: Change-control queries ("can I modify section 5?", "what happens if
+# we revise this requirement?") need the engine to surface change-authority
+# rules, configuration management procedures, and impact-assessment
+# requirements — a distinct evidence set from normal compliance queries.
+#
+# Overlaps with _SCOPE_PATTERN by design: scope detection identifies the
+# query topic, while change-control detection identifies the governance
+# process around modifications.
+#
+# False-positive risk: "update" and "replace" appear in normal technical
+# instructions; combining with _IMPACT_PATTERN sharpens the signal.
+# False-negative risk: domain jargon ("ECR", "ECP", "red-line") is not
+# captured.
+# ---------------------------------------------------------------------------
 _CHANGE_CONTROL_PATTERN = re.compile(
     r"\b(?:change|scope|insert|modify|revision|revise|update|delete|replace|addition)\b",
     re.IGNORECASE,
 )
+
+# ---------------------------------------------------------------------------
+# Impact pattern: detects terms associated with programmatic impact
+# assessment — cost, schedule, configuration, and contract artifacts.
+#
+# WHY: When a change or scope query is detected, the engine needs to
+# identify what dimensions of impact are relevant.  This pattern captures
+# the vocabulary of impact analysis (cost, schedule, interface, baseline)
+# plus the artifacts that must be updated (documents, drawings, approvals).
+# CWBS/PSID are NASA/DoD financial tracking identifiers.
+#
+# False-positive risk: "document" and "approval" appear in many contexts;
+# this pattern is only meaningful when combined with _CHANGE_CONTROL_PATTERN.
+# False-negative risk: program-specific impact categories (e.g. "mass
+# budget", "power allocation") are not captured.
+# ---------------------------------------------------------------------------
 _IMPACT_PATTERN = re.compile(
     r"\b(?:cost|fund|funding|schedule|interface|baseline|configuration|document|drawing|approval|impact|cwbs|psid|artifact)\b",
     re.IGNORECASE,
 )
+
+# ---------------------------------------------------------------------------
+# Review governance pattern: detects authorization and concurrence language.
+#
+# WHY: Queries about who must approve, authorize, or sign off on actions
+# need the engine to surface governance chains and approval authorities
+# from the rule pack — a distinct response structure from technical
+# compliance queries.
+#
+# False-positive risk: "accept" could match acceptance testing contexts;
+# mitigated by checking for governance-context co-signals.
+# False-negative risk: informal governance terms ("green-light", "thumbs
+# up") are not captured (nor should they be in formal standards).
+# ---------------------------------------------------------------------------
 _REVIEW_GOVERNANCE_PATTERN = re.compile(
     r"\b(?:approval|approve|accept|sign-?off|concurrence|waiver|authorize|authorized)\b",
     re.IGNORECASE,
 )
-_PROHIBITED_DECISION_LANGUAGE_PATTERN = re.compile(
-    r"\b(?:approved?|approval|certif(?:y|ied|ication)|waiv(?:e|er|ed)|sign-?off|accepted?|greenlight(?:ed)?)\b",
-    re.IGNORECASE,
-)
+
+# ---------------------------------------------------------------------------
+# Prohibited decision language: catches LLM output (or user-echo) that
+# would imply the Oracle is making or endorsing an engineering decision.
+#
+# WHY: Safety-critical gate.  The Oracle must never appear to approve,
+# certify, waive, or accept anything.  This pattern is used on the OUTPUT
+# side (in the grader) to catch and reject responses that contain decision
+# language.  Canonical definition lives in chat_grader.py; imported here
+# to avoid drift between the two copies.
+#
+# Previously duplicated inline — now uses the canonical import from
+# oracle.chat_grader.PROHIBITED_DECISION_LANGUAGE_PATTERN.
+# ---------------------------------------------------------------------------
+_PROHIBITED_DECISION_LANGUAGE_PATTERN = PROHIBITED_DECISION_LANGUAGE_PATTERN
 
 
 def _normalize_space(value: str | None) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
+# ---------------------------------------------------------------------------
+# Minimal suffix-stripping stemmer for query-to-rule keyword matching.
+#
+# WHY these specific rules (and not a full stemmer like Porter/Snowball):
+#   1. Domain vocabulary is narrow and predictable — aerospace/compliance
+#      terms rarely need aggressive stemming.
+#   2. Full stemmers introduce unpredictable mutations that break exact
+#      matching (e.g. Porter stems "processing" -> "process" but also
+#      "universe" -> "univers", "policy" -> "polici").
+#   3. These five suffix rules cover the most common English inflections
+#      in standards language while preserving root readability:
+#        -ies -> -y   : "boundaries" -> "boundary", "properties" -> "property"
+#        -ing -> stem  : "testing" -> "test", "welding" -> "weld"
+#        -ed  -> stem  : "required" -> "requir" (close enough for matching)
+#        -es  -> stem  : "processes" -> "process", "stresses" -> "stress"
+#        -s   -> stem  : "materials" -> "material", "requirements" -> "requirement"
+#
+# Length guards (len > 3/4/5) prevent over-stemming short words:
+#   "is" -> "is" (not "i"), "bed" -> "bed" (not "b"), "sing" -> "sing"
+#
+# Known failure modes:
+#   - Double-suffix words: "classified" -> "classifi" (not "classify")
+#   - Irregular verbs: "ran", "built", "met" are not stemmed at all
+#   - -tion/-sion words: "inspection" -> "inspection" (no rule fires,
+#     which is actually correct — the noun IS the root form)
+#   - "dies" (len 4) won't trigger -ies rule due to length guard
+# ---------------------------------------------------------------------------
 def _normalize_token(value: str) -> str:
     token = value.lower().strip("._-")
     if token.endswith("ies") and len(token) > 4:

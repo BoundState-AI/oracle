@@ -1,5 +1,11 @@
 """
-Shared constants and utilities for TOCR compliance engines.
+Module: Shared Engine Constants
+Purpose: Single source of truth for constants and utilities shared across TOCR engines.
+
+BoundState AI 2026
+Classification: BoundState Proprietary
+
+__safety_critical__: bool = True
 
 Why this module exists: rule_engine.py and scan_engine.py both compute
 urgency signals, cost-overlap signals, and rule applicability filtering
@@ -8,6 +14,8 @@ between the diff-based (RuleEngine) and scan-based (ScanEngine) pipelines.
 
 Spec: BS-SPEC-TOCR-001, Section 2 (Signal Computation)
 """
+
+__safety_critical__: bool = True
 
 from __future__ import annotations
 

@@ -17,7 +17,12 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from sentinel.tocr.models.enums import ComplianceSeverity, ComplianceVerdict, ParserConfidence
+from sentinel.tocr.models.enums import (
+    ComplianceSeverity,
+    ComplianceVerdict,
+    ConfidenceLevel,
+    ParserConfidence,
+)
 from sentinel.tocr.models.diff import FieldChange, StructuralDiff
 from sentinel.tocr.models.evidence import TOCRFinding
 from sentinel.tocr.models.remediation import RemediationPlan
@@ -30,7 +35,7 @@ class DisclosureResult(BaseModel):
     change_summary: str = ""
     disclosed: bool = False
     matching_summary_text: str = ""
-    confidence: str = "deterministic"
+    confidence: ConfidenceLevel = ConfidenceLevel.DETERMINISTIC
 
 
 class ComplianceScore(BaseModel):

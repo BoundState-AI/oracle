@@ -2,6 +2,12 @@
 Module: oracle.chat_formatter
 Purpose: Oracle-native response formatter that turns a canonical chat envelope
          into operator-facing prose with grounded citations.
+
+BoundState AI 2026
+Classification: BoundState Proprietary
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+Co-Authored-By: Dr. Joseph Wilde, BoundState AI
 """
 
 from __future__ import annotations

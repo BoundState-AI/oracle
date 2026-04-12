@@ -17,7 +17,7 @@ from difflib import SequenceMatcher
 
 from sentinel.tocr.engine.shared import ENGLISH_STOPWORDS
 from sentinel.tocr.models.diff import FieldChange, StructuralDiff
-from sentinel.tocr.models.enums import ChangeClassification
+from sentinel.tocr.models.enums import ChangeClassification, ConfidenceLevel
 from sentinel.tocr.models.report import DisclosureResult
 
 
@@ -132,7 +132,7 @@ class DisclosureEngine:
                 change_summary=self._summarize_change(change),
                 disclosed=False,
                 matching_summary_text="",
-                confidence="deterministic",
+                confidence=ConfidenceLevel.DETERMINISTIC,
             )
 
         # Strategy 1: Check if field-specific keywords appear in summary
@@ -146,7 +146,14 @@ class DisclosureEngine:
 
         disclosed = keyword_match or similarity_match or subtask_match
 
-        confidence = "deterministic" if subtask_match else ("high" if similarity_match else "medium")
+        # Why confidence ranking: subtask ID match is deterministic (exact string),
+        # similarity match is high (SequenceMatcher threshold), keyword match is medium
+        # (heuristic word overlap).
+        confidence = (
+            ConfidenceLevel.DETERMINISTIC if subtask_match
+            else ConfidenceLevel.HIGH if similarity_match
+            else ConfidenceLevel.MEDIUM
+        )
 
         return DisclosureResult(
             field_path=change.field_path,

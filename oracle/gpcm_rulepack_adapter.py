@@ -1,12 +1,23 @@
 #!/usr/bin/env python3
 """
-Adapt shall-extractor JSON into a GPCM-style requirement rule pack.
+Module: oracle.gpcm_rulepack_adapter
+Purpose: Enriches shall-extractor output into GPCM-style compliance rule packs.
 
 The adapter keeps the core extractor fields, enriches them from the source
 PDF, strips repeated boilerplate, and emits a self-describing rule pack JSON.
+
+__safety_critical__: bool = True — enriches compliance packs used in review decisions
+
+BoundState AI 2026
+Classification: BoundState Proprietary
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+Co-Authored-By: Dr. Joseph Wilde, BoundState AI
 """
 
 from __future__ import annotations
+
+__safety_critical__: bool = True
 
 import argparse
 import base64

@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-SENTINEL-TOCR Standalone Server
-Minimal FastAPI server for TOCR — no MIRA backend dependencies.
+Module: SENTINEL-TOCR Standalone Server
+Purpose: Minimal FastAPI server for TOCR — no MIRA backend dependencies.
+
+BoundState AI 2026
+Classification: BoundState Proprietary
 
 Usage:
     python -m sentinel.tocr.server

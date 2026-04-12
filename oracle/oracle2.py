@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Module: Oracle2
+Module: oracle.oracle2
 Purpose: Multi-oracle review system for specs, plans, and architecture docs.
 
 Flow:
@@ -16,6 +16,8 @@ Convergence:
   - Delta in accepted defects < 10%
   - Same unresolved tradeoff repeats twice
 
+__safety_critical__: bool = True — multi-oracle compliance review engine
+
 BoundState AI 2026
 Classification: BoundState Proprietary
 
@@ -24,6 +26,8 @@ Co-Authored-By: Dr. Joseph Wilde, BoundState AI
 """
 
 from __future__ import annotations
+
+__safety_critical__: bool = True
 
 import argparse
 import json

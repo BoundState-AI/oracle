@@ -2,6 +2,12 @@
 Module: oracle.chat_contract
 Purpose: Canonical Oracle chat envelope shared by retrieval, formatter,
          and grader stages.
+
+BoundState AI 2026
+Classification: BoundState Proprietary
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+Co-Authored-By: Dr. Joseph Wilde, BoundState AI
 """
 
 from __future__ import annotations
