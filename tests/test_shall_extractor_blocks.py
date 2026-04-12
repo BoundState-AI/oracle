@@ -2,6 +2,7 @@
 from oracle.shall_extractor import (
     _clean_tagged_requirement_text,
     _detect_current_section,
+    _extract_justification,
     _extract_mpr_blocks,
     _split_inline_rationale,
 )
@@ -137,3 +138,57 @@ def test_split_inline_rationale_extracts_rationale_tail():
 
     assert lead == "Any discontinuity shall be reported."
     assert rationale == "Reporting supports 90/95 confidence."
+
+
+def test_extract_justification_finds_labeled_basis_before_tagged_requirement():
+    text = """
+Basis: Cadmium is highly toxic in vacuum environments.
+[MPR 77] Cadmium shall not be used in crew or vacuum environments.
+""".strip()
+
+    block = _extract_mpr_blocks(text, page=43)[0]
+    justification = _extract_justification(
+        text,
+        block["tag_start"],
+        block["tag_end"],
+        block["text"],
+    )
+
+    assert justification == "Cadmium is highly toxic in vacuum environments."
+
+
+def test_extract_justification_finds_unlabeled_hazard_sentence_before_requirement():
+    text = """
+Cadmium is highly toxic, can sublime and cause outgassing contamination at elevated temperatures in vacuum.
+[MPR 77] Cadmium shall not be used in crew or vacuum environments.
+""".strip()
+
+    block = _extract_mpr_blocks(text, page=43)[0]
+    justification = _extract_justification(
+        text,
+        block["tag_start"],
+        block["tag_end"],
+        block["text"],
+    )
+
+    assert justification == (
+        "Cadmium is highly toxic, can sublime and cause outgassing contamination "
+        "at elevated temperatures in vacuum."
+    )
+
+
+def test_extract_justification_ignores_nearby_narrative_without_hazard_signal():
+    text = """
+Cadmium hardware is covered in this section for connector materials control.
+[MPR 77] Cadmium shall not be used in crew or vacuum environments.
+""".strip()
+
+    block = _extract_mpr_blocks(text, page=43)[0]
+    justification = _extract_justification(
+        text,
+        block["tag_start"],
+        block["tag_end"],
+        block["text"],
+    )
+
+    assert justification == ""

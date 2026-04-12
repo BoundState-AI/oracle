@@ -133,6 +133,43 @@ RATIONALE_PATTERN = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+# WHY this signal pattern exists:
+#   Some standards place the hazard/mechanism sentence immediately before
+#   the tagged shall statement without an explicit "Rationale:" label.
+#   These tokens bias the extractor toward true engineering reasons rather
+#   than generic narrative prose.
+PRECEDING_RATIONALE_SIGNAL_PATTERN = re.compile(
+    r"\b(?:because|due to|to avoid|to prevent|to reduce|to minimize|to ensure|"
+    r"to protect|hazard|risk|toxic|toxicity|contaminat|outgas|outgassing|"
+    r"sublim|embrittlement|corrosion|flammab|whisker|degrad|damage|failure)\b",
+    re.IGNORECASE,
+)
+
+# WHY these stopwords are excluded:
+#   Overlap between the requirement and the candidate rationale is used as
+#   a guardrail. Generic grammar words would create false overlap and pull
+#   in nearby narrative sentences that are not actual rationale.
+RATIONALE_OVERLAP_STOPWORDS = {
+    "all",
+    "and",
+    "are",
+    "be",
+    "crew",
+    "for",
+    "from",
+    "hardware",
+    "not",
+    "shall",
+    "that",
+    "the",
+    "their",
+    "these",
+    "this",
+    "use",
+    "used",
+    "vacuum",
+}
+
 # ---------------------------------------------------------------------------
 # Domain vocabulary for keyword extraction.
 #
@@ -401,6 +438,7 @@ def _extract_mpr_blocks(text: str, page: int) -> list[dict]:
                 "mpr_id": mpr_id,
                 "text": block,
                 "tag_start": match.start(),
+                "tag_end": match.end(),
                 "page": page,
             }
         )
@@ -438,19 +476,72 @@ def _classify_applicability(text: str, context: str = "") -> list[str]:
     return sorted(tags)
 
 
-def _extract_justification(full_page_text: str, tag_end_pos: int) -> str:
-    """Look for Rationale/Note text following the requirement."""
-    # Search in a window after the requirement
-    search_start = tag_end_pos
-    search_end = min(len(full_page_text), tag_end_pos + 500)
-    window = full_page_text[search_start:search_end]
+def _extract_labeled_rationale(window: str) -> str:
+    """Extract the nearest explicit rationale/note marker from a text window."""
+    matches = list(RATIONALE_PATTERN.finditer(window))
+    if not matches:
+        return ""
+    rationale = re.sub(r"\s+", " ", matches[-1].group(1)).strip()
+    if len(rationale) <= 10:
+        return ""
+    return rationale[:300]
 
-    m = RATIONALE_PATTERN.search(window)
-    if m:
-        rationale = re.sub(r"\s+", " ", m.group(1)).strip()
-        if len(rationale) > 10:
-            return rationale[:300]
+
+def _requirement_overlap_terms(requirement_text: str) -> set[str]:
+    """Return subject terms that must overlap with an unlabeled rationale."""
+    tokens = {
+        token.lower()
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9/-]{2,}", requirement_text)
+    }
+    return {token for token in tokens if token not in RATIONALE_OVERLAP_STOPWORDS}
+
+
+def _extract_preceding_rationale(window: str, requirement_text: str) -> str:
+    """Reuse the nearest prior hazard/mechanism sentence when it is on-topic."""
+    overlap_terms = _requirement_overlap_terms(requirement_text)
+    if not overlap_terms:
+        return ""
+
+    candidates = [
+        re.sub(r"\s+", " ", chunk).strip()
+        for chunk in re.split(r"(?<=[.!?])\s+|\n+", window)
+        if chunk.strip()
+    ]
+
+    for candidate in reversed(candidates[-3:]):
+        lowered = candidate.lower()
+        if len(candidate) < 20:
+            continue
+        if re.search(r"\b(shall|must|required|prohibited|should|may|will)\b", candidate, re.IGNORECASE):
+            continue
+        if not PRECEDING_RATIONALE_SIGNAL_PATTERN.search(candidate):
+            continue
+        if not any(term in lowered for term in overlap_terms):
+            continue
+        return candidate[:300]
     return ""
+
+
+def _extract_justification(
+    full_page_text: str,
+    tag_start_pos: int,
+    tag_end_pos: int,
+    requirement_text: str,
+) -> str:
+    """Look for rationale text around the tagged requirement."""
+    # WHY 500 chars: enough to capture the adjacent note/basis paragraph
+    # while staying inside the local requirement neighborhood on NASA PDFs.
+    forward_window = full_page_text[tag_end_pos:min(len(full_page_text), tag_end_pos + 500)]
+    forward_rationale = _extract_labeled_rationale(forward_window)
+    if forward_rationale:
+        return forward_rationale
+
+    backward_window = full_page_text[max(0, tag_start_pos - 500):tag_start_pos]
+    backward_rationale = _extract_labeled_rationale(backward_window)
+    if backward_rationale:
+        return backward_rationale
+
+    return _extract_preceding_rationale(backward_window, requirement_text)
 
 
 def _split_inline_rationale(text: str) -> tuple[str, str]:
@@ -688,7 +779,10 @@ def _extract_tagged_requirements(
             subject, requirement = _extract_subject_requirement(full_text, keyword)
 
             justification = _extract_justification(
-                text, block["tag_start"] + len(full_text)
+                text,
+                block["tag_start"],
+                block["tag_end"],
+                full_text,
             )
             if inline_rationale:
                 inline_rationale = re.sub(r"\s+", " ", inline_rationale).strip()
