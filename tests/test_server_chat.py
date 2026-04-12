@@ -544,6 +544,58 @@ def test_chat_returns_insufficient_data_for_weak_single_token_overlap(workspace_
     assert body["citations"] == ["NASA-STD-5009C"]
 
 
+def test_chat_stream_insufficient_data_payload_is_json_serializable(workspace_tmp_path, monkeypatch):
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    server._chat_sessions.clear()
+
+    slug = _register_pack(
+        workspace_tmp_path,
+        pack_dir,
+        _chat_multi_rule_pack_payload(
+            standard_id="NASA-STD-5009C",
+            standard_title="NASA Fracture Control Standard",
+            rules=[
+                {
+                    "rule_id": "RULE-001",
+                    "section": "4.1.4.2.2",
+                    "page": 19,
+                    "obligation_type": "mandatory",
+                    "obligation_keyword": "shall",
+                    "statement_text": "The final penetrant inspection can be performed prior to metal finishing operations such as buffing or sanding.",
+                    "subject": "Final penetrant inspection timing",
+                    "requirement": "The final penetrant inspection may occur before certain metal finishing operations.",
+                    "keywords": ["penetrant inspection", "metal finishing operations"],
+                    "applies_to": ["nde_process"],
+                }
+            ],
+        ),
+        "5009c_stream.json",
+    )
+
+    client = TestClient(server.app)
+    with client.stream(
+        "POST",
+        "/oracle/chat/stream",
+        json={
+            "message": "What does the selected standard say about pure tin finishes?",
+            "selected_packs": [slug],
+        },
+    ) as response:
+        payload = b"".join(response.iter_bytes()).decode("utf-8")
+
+    assert response.status_code == 200
+    assert "event: error" not in payload
+    assert "event: done" in payload
+
+    done_payload = payload.split("event: done\ndata: ", 1)[1].split("\n\n", 1)[0]
+    body = json.loads(done_payload)
+    assert body["status"] == "INSUFFICIENT_DATA"
+    assert body["stage_artifacts"]["retrieval"]["pack"]["standard_id"] == "NASA-STD-5009C"
+    assert body["stage_artifacts"]["retrieval"]["pack"]["rule_count"] == 1
+
+
 def test_chat_falls_back_when_summary_validation_fails(workspace_tmp_path, monkeypatch):
     pack_dir = workspace_tmp_path / "packs"
     pack_dir.mkdir(parents=True, exist_ok=True)

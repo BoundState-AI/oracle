@@ -9,7 +9,7 @@ import json
 import logging
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, is_dataclass
 from pathlib import Path
 from typing import Any
 
@@ -748,7 +748,7 @@ def _chat_result(
         "diagnostics": merged_diagnostics,
     }
     if stage_artifacts:
-        result["stage_artifacts"] = stage_artifacts
+        result["stage_artifacts"] = _json_safe_artifact(stage_artifacts)
     return result
 
 
@@ -765,6 +765,37 @@ def _evidence_item(
         standard_id=rule.standard_id,
         score=score,
     )
+
+
+def _serialize_chat_pack(pack: ChatPack) -> dict[str, Any]:
+    return {
+        "pack_slug": pack.pack_slug,
+        "standard_id": pack.standard_id,
+        "standard_title": pack.standard_title,
+        "rule_count": len(pack.rules),
+    }
+
+
+def _json_safe_artifact(value: Any) -> Any:
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, ChatPack):
+        return _serialize_chat_pack(value)
+    if isinstance(value, ChatRule):
+        return _serialize_rule(value)
+    if isinstance(value, dict):
+        return {str(key): _json_safe_artifact(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe_artifact(item) for item in value]
+    if isinstance(value, tuple):
+        if len(value) == 2 and isinstance(value[0], ChatRule):
+            return _serialize_rule(value[0], value[1])
+        return [_json_safe_artifact(item) for item in value]
+    if is_dataclass(value):
+        return _json_safe_artifact(value.__dict__)
+    return str(value)
 
 
 def _emit_envelope(envelope: OracleChatEnvelope) -> dict[str, Any]:
