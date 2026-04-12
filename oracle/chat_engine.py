@@ -651,6 +651,7 @@ class ChatRule:
     statement_text: str
     subject: str
     requirement: str
+    justification: str
     keywords: tuple[str, ...]
     applies_to: tuple[str, ...]
 
@@ -693,6 +694,8 @@ def load_chat_pack(pack_name: str, pack_dir: Path) -> ChatPack:
                     statement_text=text,
                     subject=_normalize_space(requirement.get("subject")),
                     requirement=_normalize_space(requirement.get("requirement")),
+                    justification=_normalize_space(requirement.get("justification"))
+                    or _normalize_space(requirement.get("context")),
                     keywords=tuple(_as_str_list(requirement.get("keywords"))),
                     applies_to=tuple(_as_str_list(requirement.get("applies_to"))),
                 )
@@ -721,6 +724,8 @@ def load_chat_pack(pack_name: str, pack_dir: Path) -> ChatPack:
                         statement_text=text,
                         subject=_normalize_space(item.get("subject")),
                         requirement=_normalize_space(item.get("requirement")),
+                        justification=_normalize_space(item.get("justification"))
+                        or _normalize_space(item.get("context")),
                         keywords=tuple(_as_str_list(item.get("keywords"))),
                         applies_to=tuple(_as_str_list(item.get("applies_to"))),
                     )
@@ -745,6 +750,8 @@ def load_chat_pack(pack_name: str, pack_dir: Path) -> ChatPack:
                     statement_text=text,
                     subject=_normalize_space(item.get("subject")),
                     requirement=_normalize_space(item.get("requirement")),
+                    justification=_normalize_space(item.get("justification"))
+                    or _normalize_space(item.get("context")),
                     keywords=tuple(_as_str_list(item.get("keywords"))),
                     applies_to=tuple(_as_str_list(item.get("applies_to"))),
                 )
@@ -771,6 +778,7 @@ def _rank_rules(raw_query: str, rules: tuple[ChatRule, ...]) -> list[tuple[ChatR
     table_note_match = _TABLE_NOTE_PATTERN.search(raw_query)
     ranked: list[tuple[ChatRule, int]] = []
     yes_no_query = _is_yes_no_query(raw_query)
+    why_query = _is_why_query(raw_query)
     scope_funding_query = _is_scope_funding_query(raw_query)
 
     for rule in rules:
@@ -812,6 +820,10 @@ def _rank_rules(raw_query: str, rules: tuple[ChatRule, ...]) -> list[tuple[ChatR
             score += 2
         if yes_no_query and rule.obligation_type in {"mandatory", "prohibition"}:
             score += 2
+        if why_query and _rule_has_rationale(rule):
+            # WHY +6: for "why" questions, a rationale-bearing rule is materially
+            # more useful than an equivalent bare prohibition.
+            score += 6
         if scope_funding_query:
             applies_to_terms = set(_slug_terms(" ".join(rule.applies_to)))
             rule_terms = set(_tokenize(" ".join([rule.subject, rule.requirement, *rule.keywords])))
@@ -878,7 +890,8 @@ def _summarize_rule(rule: ChatRule) -> str:
             requirement,
             re.IGNORECASE,
         ):
-            return f"{rule.subject} {requirement.rstrip('.')}" + "."
+            normalized_requirement = requirement[0].lower() + requirement[1:] if requirement else requirement
+            return f"{rule.subject} {normalized_requirement.rstrip('.')}" + "."
 
     return requirement.rstrip(".") + "."
 
@@ -905,11 +918,58 @@ def _rule_text(rule: ChatRule) -> str:
         rule.statement_text,
         rule.subject,
         rule.requirement,
+        rule.justification,
         rule.section,
         *rule.keywords,
         *rule.applies_to,
     ]
     return " ".join(_normalize_space(part) for part in searchable_parts if _normalize_space(part)).lower()
+
+
+def _normalized_sentence(text: str) -> str:
+    """Return a normalized sentence with stable trailing punctuation.
+
+    WHY: Oracle merges retrieved requirement text and retrieved rationale into a
+    single operator-facing answer. Stable punctuation keeps the merged output
+    deterministic and avoids awkward double periods.
+    """
+    cleaned = _normalize_space(text)
+    if not cleaned:
+        return ""
+    if cleaned.endswith((".", "!", "?")):
+        return cleaned
+    return f"{cleaned}."
+
+
+def _has_inline_rationale(text: str) -> bool:
+    """True when a rule embeds its rationale directly in the rule sentence.
+
+    WHY: Standards often explain a prohibition inline with clause joiners like
+    "because" or "due to". When that happens, the safest answer is to reuse the
+    exact grounded sentence rather than paraphrase the reason.
+    """
+    lowered = _normalize_space(text).lower()
+    return any(marker in lowered for marker in (" because ", " due to ", " since "))
+
+
+def _rule_rationale(rule: ChatRule) -> str:
+    """Return the grounded technical rationale attached to a rule, if present.
+
+    WHY: "Why" questions must be answered from retrieved evidence, not model
+    memory. Oracle therefore prefers inline causal text first, then the pack's
+    explicit justification field, and otherwise treats the rule as a bare
+    prohibition with no stated rationale.
+    """
+    if _has_inline_rationale(rule.statement_text):
+        return _normalized_sentence(rule.statement_text)
+    if rule.justification:
+        return _normalized_sentence(rule.justification)
+    return ""
+
+
+def _rule_has_rationale(rule: ChatRule) -> bool:
+    """Return True when the rule includes an explicit technical explanation."""
+    return bool(_rule_rationale(rule))
 
 
 def _is_pure_tin_rule(rule: ChatRule) -> bool:
@@ -944,13 +1004,39 @@ def _topic_answer_sentence(query: str, pack: ChatPack, top_matches: list[tuple[C
             f"Lead requirement: {lead_summary}"
         )
     if _is_why_query(query):
-        if ("because" in lead_rule.statement_text.lower()) or ("due to" in lead_rule.statement_text.lower()):
-            lead_summary = _normalize_space(lead_rule.statement_text).rstrip(".") + "."
+        why_rule = next((rule for rule, _score in top_matches if _rule_has_rationale(rule)), lead_rule)
+        why_stance = _rule_stance(why_rule)
+        why_summary = _summarize_rule(why_rule)
+        rationale = _rule_rationale(why_rule)
+
+        if _has_inline_rationale(why_rule.statement_text):
+            if why_stance == "prohibits":
+                return f"No. {rationale}"
+            if why_stance == "allows":
+                return f"Yes, within the cited limits. {rationale}"
+            return f"The cited reason in {pack.standard_id} is: {rationale}"
+
+        if rationale:
+            if why_stance == "prohibits":
+                return f"No. {why_summary} The cited rationale is: {rationale}"
+            if why_stance == "allows":
+                return f"Yes, within the cited limits. {why_summary} The cited rationale is: {rationale}"
+            return f"The cited reason in {pack.standard_id} is: {rationale}"
+
         if stance == "prohibits":
-            return f"No. {lead_summary}"
+            return (
+                f"No. {lead_summary} "
+                "The retrieved clauses prohibit the use, but they do not state the technical rationale."
+            )
         if stance == "allows":
-            return f"Yes, within the cited limits. {lead_summary}"
-        return f"The cited reason in {pack.standard_id} is: {lead_summary}"
+            return (
+                f"Yes, within the cited limits. {lead_summary} "
+                "The retrieved clauses do not include a separate technical rationale."
+            )
+        return (
+            f"The cited reason in {pack.standard_id} is not explicit in the retrieved clauses. "
+            f"Lead requirement: {lead_summary}"
+        )
     if _is_yes_no_query(query):
         if stance == "prohibits":
             return f"No. {lead_summary}"
@@ -1435,6 +1521,7 @@ def _serialize_rule(rule: ChatRule, score: int | None = None) -> dict[str, Any]:
         "obligation_type": rule.obligation_type,
         "statement_text": rule.statement_text,
         "requirement": rule.requirement,
+        "justification": rule.justification,
         "subject": rule.subject,
         "keywords": list(rule.keywords),
         "applies_to": list(rule.applies_to),
@@ -1450,6 +1537,8 @@ def _llm_reasoning_system_prompt() -> str:
         "You are the Oracle reasoning stage. "
         "You reason only over the retrieved rules provided by the caller. "
         "Do not invent requirements. Do not issue approval, waiver, certification, or sign-off decisions. "
+        "If a retrieved rule includes justification or inline rationale, use that for why-questions. "
+        "If the retrieved rules only prohibit something without explaining why, say that explicitly instead of inventing a rationale. "
         "Return strict JSON with keys: direct_answer, bottom_line, why, governing_citations, gaps, follow_ups, per_pack_findings. "
         "governing_citations must only contain exact display_citation strings from the input payload. "
         "why and gaps must be arrays of concise strings. "
@@ -1861,7 +1950,7 @@ def _reason_about_chat_context(query: str, gatekeeper: dict[str, Any], retrieval
     matches = retrieval["matches"]
     top_matches = _dedupe_rules(
         matches,
-        5 if gatekeeper["intent"] == "clause_lookup" or _is_pure_tin_action_query(query) else 3,
+        5 if gatekeeper["intent"] == "clause_lookup" or _is_pure_tin_action_query(query) or _is_why_query(query) else 3,
     )
     return {
         "status": "PASS",
@@ -1897,7 +1986,7 @@ def _build_single_pack_synthesis(
     stage_artifacts: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     pure_tin_action = _is_pure_tin_action_query(query)
-    top_matches = _dedupe_rules(matches, 5 if pure_tin_action else 3)
+    top_matches = _dedupe_rules(matches, 5 if pure_tin_action or _is_why_query(query) else 3)
     citations = [_citation(rule) for rule, _score in top_matches]
     if pure_tin_action and len([rule for rule, _score in top_matches if _is_pure_tin_rule(rule)]) >= 2:
         follow_ups = [

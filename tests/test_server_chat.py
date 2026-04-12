@@ -476,6 +476,138 @@ def test_chat_returns_insufficient_data_when_cadmium_topic_has_no_cadmium_rule(w
     assert "did not find a grounded requirement match" in body["response"]
 
 
+def test_chat_uses_rule_justification_for_why_queries(workspace_tmp_path, monkeypatch):
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    server._chat_sessions.clear()
+
+    slug = _register_pack(
+        workspace_tmp_path,
+        pack_dir,
+        _chat_multi_rule_pack_payload(
+            standard_id="MSFC-STD-3012A",
+            standard_title="EEE Parts Management Requirements",
+            rules=[
+                {
+                    "rule_id": "RULE-001",
+                    "section": "14/",
+                    "page": 50,
+                    "obligation_type": "prohibition",
+                    "obligation_keyword": "must not",
+                    "statement_text": "Cadmium plated parts must not be used in space flight applications.",
+                    "subject": "Cadmium plated parts",
+                    "requirement": "Must not be used in space flight applications.",
+                    "justification": "Cadmium can sublime in vacuum and contaminate nearby surfaces.",
+                    "keywords": ["cadmium plated parts", "space flight applications", "vacuum"],
+                    "applies_to": ["spaceflight hardware"],
+                },
+                {
+                    "rule_id": "RULE-002",
+                    "section": "5.4.5.1",
+                    "page": 32,
+                    "obligation_type": "mandatory",
+                    "obligation_keyword": "shall",
+                    "statement_text": "Cadmium plated parts shall be inspected for verification of sufficient plating and lack of red plague.",
+                    "subject": "Cadmium plated parts",
+                    "requirement": "Be inspected for verification of sufficient plating and lack of red plague.",
+                    "keywords": ["cadmium plated parts", "red plague"],
+                    "applies_to": ["eee parts"],
+                },
+            ],
+        ),
+        "3012a_cadmium_justification.json",
+    )
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/oracle/chat",
+        json={
+            "message": "why can't we use cd on spaceflight parts",
+            "selected_packs": [slug],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "PASS"
+    assert body["response"].startswith("No. Cadmium plated parts must not be used in space flight applications.")
+    assert "The cited rationale is: Cadmium can sublime in vacuum and contaminate nearby surfaces." in body["response"]
+    assert body["citations"][0] == "MSFC-STD-3012A section 14/ (p. 50)"
+    assert body["diagnostics"]["fallback_used"] is False
+
+
+def test_chat_says_when_selected_pack_only_contains_bare_prohibition(workspace_tmp_path, monkeypatch):
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    server._chat_sessions.clear()
+
+    slug = _register_pack(
+        workspace_tmp_path,
+        pack_dir,
+        _chat_multi_rule_pack_payload(
+            standard_id="MSFC-STD-3012A",
+            standard_title="EEE Parts Management Requirements",
+            rules=[
+                {
+                    "rule_id": "RULE-001",
+                    "section": "14/",
+                    "page": 50,
+                    "obligation_type": "prohibition",
+                    "obligation_keyword": "must not",
+                    "statement_text": "Cadmium, zinc, or anodized plated connectors and connector accessories must not be used in space flight applications.",
+                    "subject": "Connector accessory finish restriction",
+                    "requirement": "Cadmium, zinc, or anodized plated connectors and connector accessories must not be used in space flight applications.",
+                    "keywords": ["cadmium plated parts", "connector accessories", "space flight applications"],
+                    "applies_to": ["spaceflight hardware"],
+                },
+                {
+                    "rule_id": "RULE-002",
+                    "section": "7/",
+                    "page": 77,
+                    "obligation_type": "prohibition",
+                    "obligation_keyword": "shall not",
+                    "statement_text": "Cadmium, zinc, or anodized plated connectors and connector accessories shall not be used in space flight.",
+                    "subject": "Connector accessory finish restriction",
+                    "requirement": "Cadmium, zinc, or anodized plated connectors and connector accessories shall not be used in space flight.",
+                    "keywords": ["cadmium plated parts", "connector accessories", "space flight"],
+                    "applies_to": ["spaceflight hardware"],
+                },
+                {
+                    "rule_id": "RULE-003",
+                    "section": "Table VII Note 7",
+                    "page": 77,
+                    "obligation_type": "prohibition",
+                    "obligation_keyword": "shall not",
+                    "statement_text": "Cadmium, zinc, or anodized plated connectors and connector accessories (i.e., backshells, contacts, jam nuts, protective caps, jackscrews, etc.) shall not be used in space flight.",
+                    "subject": "Connector accessory finish restriction",
+                    "requirement": "Cadmium, zinc, or anodized plated connectors and connector accessories shall not be used in space flight.",
+                    "keywords": ["cadmium plated parts", "connector accessories", "backshells"],
+                    "applies_to": ["spaceflight hardware"],
+                },
+            ],
+        ),
+        "3012a_cadmium_bare_prohibition.json",
+    )
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/oracle/chat",
+        json={
+            "message": "why can't we use cd on spaceflight parts",
+            "selected_packs": [slug],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "PASS"
+    assert body["response"].startswith("No.")
+    assert "do not state the technical rationale" in body["response"]
+    assert any(citation == "MSFC-STD-3012A section 14/ (p. 50)" for citation in body["citations"])
+
+
 def test_chat_compare_only_uses_multiple_packs(workspace_tmp_path, monkeypatch):
     pack_dir = workspace_tmp_path / "packs"
     pack_dir.mkdir(parents=True, exist_ok=True)
