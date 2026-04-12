@@ -49,6 +49,42 @@ _QUERY_TERM_EXPANSIONS = {
     "spaceflight": {"space", "flight"},
 }
 
+# WHY these tokens: they indicate mechanism, hazard, or causal engineering
+# rationale rather than a generic section heading. They are used to reject
+# low-signal pack text like "material restrictions for space flight connectors"
+# while keeping real technical reasons such as contamination, sublimation,
+# toxicity, whiskers, embrittlement, or corrosion.
+_RATIONALE_SIGNAL_TOKENS = frozenset(
+    {
+        "because",
+        "due",
+        "since",
+        "toxic",
+        "toxicity",
+        "sublime",
+        "sublimation",
+        "outgassing",
+        "outgas",
+        "contaminate",
+        "contamination",
+        "embrittlement",
+        "whisker",
+        "whiskers",
+        "corrosion",
+        "reactive",
+        "reactivity",
+        "hazard",
+        "risk",
+        "ignite",
+        "ignition",
+        "flammability",
+        "volatile",
+        "vacuum",
+        "red",
+        "plague",
+    }
+)
+
 # ---------------------------------------------------------------------------
 # Stop words: removed during tokenization so they don't pollute keyword
 # matching against rule-pack content.
@@ -694,8 +730,7 @@ def load_chat_pack(pack_name: str, pack_dir: Path) -> ChatPack:
                     statement_text=text,
                     subject=_normalize_space(requirement.get("subject")),
                     requirement=_normalize_space(requirement.get("requirement")),
-                    justification=_normalize_space(requirement.get("justification"))
-                    or _normalize_space(requirement.get("context")),
+                    justification=_normalize_space(requirement.get("justification")),
                     keywords=tuple(_as_str_list(requirement.get("keywords"))),
                     applies_to=tuple(_as_str_list(requirement.get("applies_to"))),
                 )
@@ -724,8 +759,7 @@ def load_chat_pack(pack_name: str, pack_dir: Path) -> ChatPack:
                         statement_text=text,
                         subject=_normalize_space(item.get("subject")),
                         requirement=_normalize_space(item.get("requirement")),
-                        justification=_normalize_space(item.get("justification"))
-                        or _normalize_space(item.get("context")),
+                        justification=_normalize_space(item.get("justification")),
                         keywords=tuple(_as_str_list(item.get("keywords"))),
                         applies_to=tuple(_as_str_list(item.get("applies_to"))),
                     )
@@ -750,8 +784,7 @@ def load_chat_pack(pack_name: str, pack_dir: Path) -> ChatPack:
                     statement_text=text,
                     subject=_normalize_space(item.get("subject")),
                     requirement=_normalize_space(item.get("requirement")),
-                    justification=_normalize_space(item.get("justification"))
-                    or _normalize_space(item.get("context")),
+                    justification=_normalize_space(item.get("justification")),
                     keywords=tuple(_as_str_list(item.get("keywords"))),
                     applies_to=tuple(_as_str_list(item.get("applies_to"))),
                 )
@@ -952,6 +985,38 @@ def _has_inline_rationale(text: str) -> bool:
     return any(marker in lowered for marker in (" because ", " due to ", " since "))
 
 
+def _is_low_signal_rationale(rule: ChatRule, rationale: str) -> bool:
+    """Reject topic labels that are too generic to answer a why-question.
+
+    WHY: Some packs carry section labels or topical headers in nearby fields.
+    Those strings look like rationale at the schema level but they are not
+    technical explanations. If the text adds no mechanism/hazard tokens and is
+    mostly just a restatement of the rule topic, Oracle should suppress it.
+    """
+    rationale_tokens = set(_tokenize(rationale))
+    if not rationale_tokens:
+        return True
+    if rationale_tokens.intersection(_RATIONALE_SIGNAL_TOKENS):
+        return False
+    topic_tokens = set(
+        _tokenize(
+            " ".join(
+                [
+                    rule.subject,
+                    rule.requirement,
+                    rule.statement_text,
+                    *rule.keywords,
+                    *rule.applies_to,
+                ]
+            )
+        )
+    )
+    overlap_count = len(rationale_tokens.intersection(topic_tokens))
+    # WHY 0.75: when three quarters or more of the rationale tokens are already
+    # present in the topic text, the field is usually just a heading or label.
+    return overlap_count / max(len(rationale_tokens), 1) >= 0.75
+
+
 def _rule_rationale(rule: ChatRule) -> str:
     """Return the grounded technical rationale attached to a rule, if present.
 
@@ -963,7 +1028,9 @@ def _rule_rationale(rule: ChatRule) -> str:
     if _has_inline_rationale(rule.statement_text):
         return _normalized_sentence(rule.statement_text)
     if rule.justification:
-        return _normalized_sentence(rule.justification)
+        normalized = _normalized_sentence(rule.justification)
+        if normalized and not _is_low_signal_rationale(rule, normalized):
+            return normalized
     return ""
 
 

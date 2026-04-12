@@ -559,6 +559,7 @@ def test_chat_says_when_selected_pack_only_contains_bare_prohibition(workspace_t
                     "statement_text": "Cadmium, zinc, or anodized plated connectors and connector accessories must not be used in space flight applications.",
                     "subject": "Connector accessory finish restriction",
                     "requirement": "Cadmium, zinc, or anodized plated connectors and connector accessories must not be used in space flight applications.",
+                    "justification": "Material restrictions for space flight connectors.",
                     "keywords": ["cadmium plated parts", "connector accessories", "space flight applications"],
                     "applies_to": ["spaceflight hardware"],
                 },
@@ -605,6 +606,7 @@ def test_chat_says_when_selected_pack_only_contains_bare_prohibition(workspace_t
     assert body["status"] == "PASS"
     assert body["response"].startswith("No.")
     assert "do not state the technical rationale" in body["response"]
+    assert "The cited rationale is:" not in body["response"]
     assert any(citation == "MSFC-STD-3012A section 14/ (p. 50)" for citation in body["citations"])
 
 
