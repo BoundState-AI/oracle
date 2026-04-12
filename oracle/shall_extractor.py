@@ -441,26 +441,23 @@ def _extract_subject_requirement(statement: str, keyword: str) -> tuple[str, str
     return subject, requirement
 
 
-def extract_pass1(pdf_path: Path) -> ExtractionResult:
-    pdf_path = Path(pdf_path)
-    if not pdf_path.exists():
-        raise FileNotFoundError(f"PDF not found: {pdf_path}")
+def _extract_tagged_requirements(
+    doc,
+    stmt_id_start: int = 0,
+) -> tuple[list[ShallStatement], dict[int, list[str]], int | None, int | None, int]:
+    """Phase A: Extract MPR/FCR tag-aware requirements (full block text).
 
-    doc = fitz.open(pdf_path)
-    total_pages = len(doc)
+    Returns (statements, tagged_texts_by_page, first_tagged_page,
+    last_tagged_page, next_stmt_id).
+    """
     statements: list[ShallStatement] = []
-    stmt_id = 0
     seen_mpr_ids: set[str] = set()
     tagged_texts_by_page: dict[int, list[str]] = {}
     first_tagged_page: int | None = None
     last_tagged_page: int | None = None
     carry_base_section = ""
+    stmt_id = stmt_id_start
 
-    logger.info("Pass 1: extracting from %s (%d pages)", pdf_path.name, total_pages)
-
-    # ------------------------------------------------------------------
-    # Phase A: MPR/FCR tag-aware extraction (full block text)
-    # ------------------------------------------------------------------
     for page_idx in range(len(doc)):
         raw_text = doc[page_idx].get_text()
         if not raw_text or len(raw_text.strip()) < 20:
@@ -476,13 +473,10 @@ def extract_pass1(pdf_path: Path) -> ExtractionResult:
             full_text, inline_rationale = _split_inline_rationale(block["text"])
             full_text = _clean_tagged_requirement_text(full_text)
 
-            # Skip change-log / front-matter noise: require obligation keyword
-            # in the block text and minimum meaningful length
             has_obligation = bool(
                 re.search(
                     r"\bshall\b|\bmust\b|\brequired\b|\bprohibited\b",
-                    full_text,
-                    re.IGNORECASE,
+                    full_text, re.IGNORECASE,
                 )
             )
             if not has_obligation or len(full_text) < 30:
@@ -504,12 +498,10 @@ def extract_pass1(pdf_path: Path) -> ExtractionResult:
             if base_section:
                 carry_base_section = base_section
 
-            # Determine obligation keyword from the block text
             kw_match = re.search(
                 r"\b(shall not|shall|must not|must|is required to|is required|"
                 r"required|is prohibited|prohibited)\b",
-                full_text,
-                re.IGNORECASE,
+                full_text, re.IGNORECASE,
             )
             keyword = kw_match.group(0).lower() if kw_match else "shall"
             obligation_type = OBLIGATION_KEYWORDS.get(keyword, "mandatory")
@@ -527,40 +519,39 @@ def extract_pass1(pdf_path: Path) -> ExtractionResult:
             stmt_id += 1
             statements.append(
                 ShallStatement(
-                    id=stmt_id,
-                    page=block["page"],
-                    section=section,
-                    obligation_keyword=keyword,
-                    obligation_type=obligation_type,
-                    statement_text=full_text,
-                    subject=subject,
-                    requirement=requirement,
-                    context="",
-                    mpr_id=mpr_id,
-                    justification=justification,
-                    keywords=keywords,
-                    applies_to=applies_to,
+                    id=stmt_id, page=block["page"], section=section,
+                    obligation_keyword=keyword, obligation_type=obligation_type,
+                    statement_text=full_text, subject=subject, requirement=requirement,
+                    context="", mpr_id=mpr_id, justification=justification,
+                    keywords=keywords, applies_to=applies_to,
                 )
             )
 
-    logger.info("Phase A: %d MPR/FCR tagged requirements", len(statements))
+    return statements, tagged_texts_by_page, first_tagged_page, last_tagged_page, stmt_id
 
-    # ------------------------------------------------------------------
-    # Phase B: Generic obligation extraction (non-tagged shall/must/etc.)
-    # ------------------------------------------------------------------
+
+def _extract_generic_requirements(
+    doc,
+    tagged_texts_by_page: dict[int, list[str]],
+    first_tagged_page: int | None,
+    last_tagged_page: int | None,
+    tagged_standard: bool,
+    stmt_id_start: int = 0,
+) -> tuple[list[ShallStatement], int]:
+    """Phase B: Extract generic obligation statements (non-tagged shall/must/etc.).
+
+    Returns (generic_statements_after_dedup, dedup_removed_count).
+    """
     generic_statements: list[ShallStatement] = []
-    raw_texts: list[str] = []
-    tagged_standard = len(seen_mpr_ids) >= 20
+    stmt_id = stmt_id_start
     generic_carry_section = ""
 
     for page_idx in range(len(doc)):
         raw_text = doc[page_idx].get_text()
         if not raw_text or len(raw_text.strip()) < 20:
-            raw_texts.append("")
             continue
 
         text = _preprocess_page_text(raw_text)
-        raw_texts.append(text)
         page_number = page_idx + 1
 
         if tagged_standard and first_tagged_page is not None and last_tagged_page is not None:
@@ -579,13 +570,10 @@ def extract_pass1(pdf_path: Path) -> ExtractionResult:
             if tagged_standard and keyword not in STRONG_GENERIC_KEYWORDS:
                 continue
 
-            # Skip if this text is already covered by a tagged requirement block.
             if MPR_TAG_PATTERN.search(sentence):
                 continue
             if _statement_is_covered_by_tagged_requirement(
-                sentence,
-                page_number,
-                tagged_texts_by_page,
+                sentence, page_number, tagged_texts_by_page,
             ):
                 continue
 
@@ -602,17 +590,10 @@ def extract_pass1(pdf_path: Path) -> ExtractionResult:
             stmt_id += 1
             generic_statements.append(
                 ShallStatement(
-                    id=stmt_id,
-                    page=page_number,
-                    section=section,
-                    obligation_keyword=keyword,
-                    obligation_type=obligation_type,
-                    statement_text=sentence,
-                    subject=subject,
-                    requirement=requirement,
-                    context=context,
-                    keywords=keywords,
-                    applies_to=applies_to,
+                    id=stmt_id, page=page_number, section=section,
+                    obligation_keyword=keyword, obligation_type=obligation_type,
+                    statement_text=sentence, subject=subject, requirement=requirement,
+                    context=context, keywords=keywords, applies_to=applies_to,
                 )
             )
 
@@ -620,11 +601,7 @@ def extract_pass1(pdf_path: Path) -> ExtractionResult:
         if page_tail_section:
             generic_carry_section = page_tail_section
 
-    doc.close()
-
-    # ------------------------------------------------------------------
-    # Fix 1: Header/footer dedup — remove any text appearing 5+ times
-    # ------------------------------------------------------------------
+    # Header/footer dedup — remove any text appearing 5+ times
     text_counts = Counter(s.statement_text for s in generic_statements)
     boilerplate = {txt for txt, cnt in text_counts.items() if cnt >= 5}
     before_dedup = len(generic_statements)
@@ -634,13 +611,46 @@ def extract_pass1(pdf_path: Path) -> ExtractionResult:
     if boilerplate:
         logger.info(
             "Fix 1: removed %d boilerplate duplicates (%d unique patterns)",
-            dedup_removed,
-            len(boilerplate),
+            dedup_removed, len(boilerplate),
         )
 
-    statements.extend(generic_statements)
+    return generic_statements, dedup_removed
 
-    # Renumber IDs sequentially
+
+def extract_pass1(pdf_path: Path) -> ExtractionResult:
+    """Pass 1: Extract all binding obligations from a PDF.
+
+    Two-phase approach:
+      Phase A: MPR/FCR tag-aware extraction (structured NASA standards)
+      Phase B: Generic obligation extraction (shall/must/required patterns)
+
+    Phase B is scoped to the tagged page range when >= 20 tagged requirements
+    are found, to avoid extracting noise from front/back matter.
+    """
+    pdf_path = Path(pdf_path)
+    if not pdf_path.exists():
+        raise FileNotFoundError(f"PDF not found: {pdf_path}")
+
+    doc = fitz.open(pdf_path)
+    total_pages = len(doc)
+    logger.info("Pass 1: extracting from %s (%d pages)", pdf_path.name, total_pages)
+
+    # Phase A: Tagged requirements
+    tagged_stmts, tagged_texts_by_page, first_tp, last_tp, stmt_id = (
+        _extract_tagged_requirements(doc)
+    )
+    logger.info("Phase A: %d MPR/FCR tagged requirements", len(tagged_stmts))
+
+    # Phase B: Generic requirements
+    tagged_standard = len({s.mpr_id for s in tagged_stmts if s.mpr_id}) >= 20
+    generic_stmts, dedup_removed = _extract_generic_requirements(
+        doc, tagged_texts_by_page, first_tp, last_tp, tagged_standard, stmt_id,
+    )
+
+    doc.close()
+
+    # Merge and renumber
+    statements = tagged_stmts + generic_stmts
     for i, s in enumerate(statements, 1):
         s.id = i
 
@@ -663,10 +673,7 @@ def extract_pass1(pdf_path: Path) -> ExtractionResult:
 
     logger.info(
         "Pass 1 complete: %d statements (%d MPR/FCR, %d generic, %d deduped)",
-        result.total_statements,
-        mpr_count,
-        len(generic_statements),
-        dedup_removed,
+        result.total_statements, mpr_count, len(generic_stmts), dedup_removed,
     )
     return result
 

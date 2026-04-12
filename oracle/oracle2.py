@@ -975,6 +975,129 @@ def _check_convergence(session: OracleSession) -> tuple[bool, str]:
     return True, f"Converged: {len(high)} high, issue overlap {overlap:.0%}"
 
 
+def _run_round(
+    session: OracleSession,
+    round_num: int,
+    output_dir: Path,
+    compliance_context: str | None,
+) -> tuple[ReviewRound, bool]:
+    """Execute a single review round: parallel reviewers → Sonnet → Beth.
+
+    Returns (review_round, converged).  The round is appended to session.rounds
+    and session.canonical_draft is updated if Beth revises.
+
+    Why extracted: run_review was 170 lines with the round loop inlined.
+    Each round is an independent unit of work — extracting it makes the
+    convergence loop in run_review readable and each round independently testable.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    review_round = ReviewRound(round_number=round_num)
+
+    last_valid = _last_valid_round(session)
+    changed_sections = last_valid.coordinator_decisions.get("revised_sections", []) if last_valid else None
+    prior_decisions = last_valid.coordinator_decisions if last_valid else None
+    prior_issues = last_valid.normalized_issues.get("normalized_issues", []) if last_valid else []
+
+    # --- Parallel blind review (Fran, Codex, Grok) ---
+    review_msg = _build_review_message(
+        session.canonical_draft, round_num, changed_sections,
+        compliance_context=compliance_context,
+    )
+
+    required_reviewers = ("fran", "codex", "grok")
+    reviewer_failed = False
+
+    def _call_reviewer(key: str) -> tuple[str, dict]:
+        config = ORACLE_ROSTER[key]
+        try:
+            result = call_oracle(config, review_msg)
+            return config.name, result
+        except Exception as e:
+            LOGGER.error(f"[{config.name}] FAILED after retries: {e}")
+            return config.name, {"oracle_name": config.name, "error": str(e), "findings": []}
+
+    LOGGER.info(f"  Launching {len(required_reviewers)} reviewers in parallel...")
+    with ThreadPoolExecutor(max_workers=len(required_reviewers)) as pool:
+        futures = {pool.submit(_call_reviewer, key): key for key in required_reviewers}
+        for future in as_completed(futures):
+            name, result = future.result()
+            review_round.reviewer_outputs[name] = result
+            if "error" in result and not result.get("findings"):
+                reviewer_failed = True
+
+    for name, output in review_round.reviewer_outputs.items():
+        (output_dir / f"round{round_num}_{name.lower()}.json").write_text(
+            encoding="utf-8", data=json.dumps(output, indent=2)
+        )
+
+    if reviewer_failed:
+        LOGGER.error(f"Round {round_num} INVALID: required reviewer failed.")
+        session.rounds.append(review_round)
+        return review_round, False
+
+    # --- Sonnet normalizes ---
+    referee_msg = _build_referee_message(
+        session.canonical_draft, review_round.reviewer_outputs,
+        round_number=round_num, prior_issues=prior_issues,
+    )
+    try:
+        normalized = call_oracle(ORACLE_ROSTER["sonnet"], referee_msg)
+    except Exception as e:
+        LOGGER.error(f"[Sonnet] FAILED after retries: {e}. Round invalid.")
+        session.rounds.append(review_round)
+        return review_round, False
+
+    review_round.normalized_issues = normalized
+    (output_dir / f"round{round_num}_sonnet_normalized.json").write_text(
+        encoding="utf-8", data=json.dumps(normalized, indent=2)
+    )
+
+    # --- Beth classifies and revises ---
+    coord_msg = _build_coordinator_message(
+        session.canonical_draft, normalized, round_num,
+        prior_decisions=[prior_decisions] if prior_decisions else None,
+    )
+    try:
+        beth_response = call_oracle(ORACLE_ROSTER["beth"], coord_msg)
+    except Exception as e:
+        LOGGER.error(f"[Beth] FAILED after retries: {e}. Round invalid.")
+        session.rounds.append(review_round)
+        return review_round, False
+
+    review_round.coordinator_decisions = beth_response
+
+    revised = beth_response.get("revised_draft")
+    if revised and isinstance(revised, str) and revised.strip():
+        session.canonical_draft = revised.strip()
+        review_round.revised_draft = session.canonical_draft
+        LOGGER.info(f"[Beth] Draft revised ({len(session.canonical_draft)} chars)")
+    else:
+        LOGGER.info("[Beth] No revision to draft this round")
+
+    review_round.valid = True
+
+    (output_dir / f"round{round_num}_beth_decisions.json").write_text(
+        encoding="utf-8", data=json.dumps(beth_response, indent=2)
+    )
+    if review_round.revised_draft:
+        (output_dir / f"round{round_num}_revised_draft.md").write_text(
+            encoding="utf-8", data=review_round.revised_draft
+        )
+
+    session.rounds.append(review_round)
+
+    converged, reason = _check_convergence(session)
+    if converged:
+        session.converged = True
+        session.convergence_reason = reason
+        LOGGER.info(f"\nConverged after round {round_num}: {reason}")
+    else:
+        LOGGER.info(f"\nNot converged: {reason}")
+
+    return review_round, converged
+
+
 def run_review(
     draft: str,
     document_path: str = "",
@@ -982,7 +1105,11 @@ def run_review(
     output_dir: Path | None = None,
     compliance_context: str | None = None,
 ) -> OracleSession:
-    """Run the full multi-oracle review loop."""
+    """Run the full multi-oracle review loop.
+
+    Dispatches up to max_rounds through _run_round(), checking convergence
+    after each.  Saves final_draft.md and session_summary.json on completion.
+    """
     session_id = datetime.now().strftime("%Y%m%d-%H%M%S")
     session = OracleSession(
         session_id=session_id,
@@ -997,126 +1124,11 @@ def run_review(
 
     for round_num in range(1, max_rounds + 1):
         LOGGER.info(f"\n{'='*60}\nRound {round_num}\n{'='*60}")
-
-        review_round = ReviewRound(round_number=round_num)
-
-        # Pull changed_sections and prior_decisions from last VALID round, not last round
-        last_valid = _last_valid_round(session)
-        changed_sections = last_valid.coordinator_decisions.get("revised_sections", []) if last_valid else None
-        prior_decisions = last_valid.coordinator_decisions if last_valid else None
-
-        # Collect prior issue ledger for Sonnet to reuse IDs on recurring issues
-        prior_issues = []
-        if last_valid:
-            prior_issues = last_valid.normalized_issues.get("normalized_issues", [])
-
-        # --- Round N: Blind review (Fran, Codex, Grok) — PARALLEL ---
-        review_msg = _build_review_message(
-            session.canonical_draft, round_num, changed_sections,
-            compliance_context=compliance_context,
-        )
-
-        required_reviewers = ("fran", "codex", "grok")
-        reviewer_failed = False
-
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
-        def _run_reviewer(key: str) -> tuple[str, dict]:
-            config = ORACLE_ROSTER[key]
-            try:
-                result = call_oracle(config, review_msg)
-                return config.name, result
-            except Exception as e:
-                LOGGER.error(f"[{config.name}] FAILED after retries: {e}")
-                return config.name, {
-                    "oracle_name": config.name,
-                    "error": str(e),
-                    "findings": [],
-                }
-
-        LOGGER.info(f"  Launching {len(required_reviewers)} reviewers in parallel...")
-        with ThreadPoolExecutor(max_workers=len(required_reviewers)) as pool:
-            futures = {pool.submit(_run_reviewer, key): key for key in required_reviewers}
-            for future in as_completed(futures):
-                name, result = future.result()
-                review_round.reviewer_outputs[name] = result
-                if "error" in result and not result.get("findings"):
-                    reviewer_failed = True
-
-        # Save reviewer outputs
-        for name, output in review_round.reviewer_outputs.items():
-            path = output_dir / f"round{round_num}_{name.lower()}.json"
-            path.write_text(encoding="utf-8", data=json.dumps(output, indent=2))
-
-        if reviewer_failed:
-            LOGGER.error(f"Round {round_num} INVALID: required reviewer failed.")
-            session.rounds.append(review_round)  # valid=False (default)
-            continue
-
-        # --- Round N.5: Sonnet normalizes (required) ---
-        referee_msg = _build_referee_message(
-            session.canonical_draft, review_round.reviewer_outputs,
-            round_number=round_num, prior_issues=prior_issues,
-        )
-        try:
-            normalized = call_oracle(ORACLE_ROSTER["sonnet"], referee_msg)
-        except Exception as e:
-            LOGGER.error(f"[Sonnet] FAILED after retries: {e}. Round invalid.")
-            session.rounds.append(review_round)
-            continue
-
-        review_round.normalized_issues = normalized
-        (output_dir / f"round{round_num}_sonnet_normalized.json").write_text(encoding="utf-8", data=
-            json.dumps(normalized, indent=2)
-        )
-
-        # --- Beth classifies and revises (required) ---
-        coord_msg = _build_coordinator_message(
-            session.canonical_draft, normalized, round_num,
-            prior_decisions=[prior_decisions] if prior_decisions else None,
-        )
-        try:
-            beth_response = call_oracle(ORACLE_ROSTER["beth"], coord_msg)
-        except Exception as e:
-            LOGGER.error(f"[Beth] FAILED after retries: {e}. Round invalid.")
-            session.rounds.append(review_round)
-            continue
-
-        review_round.coordinator_decisions = beth_response
-
-        # Extract revised draft from Beth's JSON (strict schema)
-        revised = beth_response.get("revised_draft")
-        if revised and isinstance(revised, str) and revised.strip():
-            session.canonical_draft = revised.strip()
-            review_round.revised_draft = session.canonical_draft
-            LOGGER.info(f"[Beth] Draft revised ({len(session.canonical_draft)} chars)")
-        else:
-            LOGGER.info("[Beth] No revision to draft this round")
-
-        # All 5 oracles succeeded — mark round as valid
-        review_round.valid = True
-
-        (output_dir / f"round{round_num}_beth_decisions.json").write_text(encoding="utf-8", data=
-            json.dumps(beth_response, indent=2)
-        )
-        if review_round.revised_draft:
-            (output_dir / f"round{round_num}_revised_draft.md").write_text(encoding="utf-8", data=
-                review_round.revised_draft
-            )
-
-        session.rounds.append(review_round)
-
-        # --- Convergence check ---
-        converged, reason = _check_convergence(session)
+        _, converged = _run_round(session, round_num, output_dir, compliance_context)
         if converged:
-            session.converged = True
-            session.convergence_reason = reason
-            LOGGER.info(f"\nConverged after round {round_num}: {reason}")
             break
-        else:
-            LOGGER.info(f"\nNot converged: {reason}")
 
-    # --- Save final state ---
+    # Save final state
     (output_dir / "final_draft.md").write_text(encoding="utf-8", data=session.canonical_draft)
     summary = {
         "session_id": session.session_id,
