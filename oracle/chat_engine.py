@@ -151,6 +151,11 @@ _TABLE_NOTE_PATTERN = re.compile(
 # "what changed between revisions") will not trigger this pattern.
 # ---------------------------------------------------------------------------
 _COMPARE_PATTERN = re.compile(r"\b(?:compare|comparison|versus|vs\.?)\b", re.IGNORECASE)
+_ACTION_QUERY_PATTERN = re.compile(
+    r"\b(?:what (?:do|should) (?:i|we) do|what to do|what now|how (?:do|should) (?:i|we)|next steps?|do about it|handle it)\b",
+    re.IGNORECASE,
+)
+_PURE_TIN_QUERY_PATTERN = re.compile(r"\bpure\s+(?:tin|sn)\b", re.IGNORECASE)
 
 # ---------------------------------------------------------------------------
 # Approval pattern: detects queries that request the system to make or
@@ -562,6 +567,10 @@ def _is_yes_no_query(query: str) -> bool:
     return bool(_YES_NO_PATTERN.search(query.strip()) or _COMPLIANCE_RISK_PATTERN.search(query))
 
 
+def _is_action_query(query: str) -> bool:
+    return bool(_ACTION_QUERY_PATTERN.search(query))
+
+
 def _is_clause_lookup_query(query: str) -> bool:
     return bool(
         _CLAUSE_LOOKUP_PATTERN.search(query)
@@ -572,6 +581,15 @@ def _is_clause_lookup_query(query: str) -> bool:
 
 def _is_scope_funding_query(query: str) -> bool:
     return bool(_SCOPE_PATTERN.search(query) and _FUNDING_PATTERN.search(query))
+
+
+def _is_pure_tin_query(query: str) -> bool:
+    query_terms = _query_terms(query)
+    return bool(_PURE_TIN_QUERY_PATTERN.search(query) or {"pure", "tin"}.issubset(query_terms))
+
+
+def _is_pure_tin_action_query(query: str) -> bool:
+    return _is_action_query(query) and _is_pure_tin_query(query)
 
 
 def _wants_exact_text(query: str) -> bool:
@@ -818,6 +836,38 @@ def _rule_stance(rule: ChatRule) -> str:
     return "requires"
 
 
+def _rule_text(rule: ChatRule) -> str:
+    searchable_parts = [
+        rule.statement_text,
+        rule.subject,
+        rule.requirement,
+        rule.section,
+        *rule.keywords,
+        *rule.applies_to,
+    ]
+    return " ".join(_normalize_space(part) for part in searchable_parts if _normalize_space(part)).lower()
+
+
+def _is_pure_tin_rule(rule: ChatRule) -> bool:
+    text = _rule_text(rule)
+    return (
+        "pure tin" in text
+        or "tin whisker" in text
+        or ("3% lead" in text and "tin" in text)
+        or ("3 percent lead" in text and "tin" in text)
+    )
+
+
+def _first_matching_rule(
+    matches: list[tuple[ChatRule, int]],
+    predicate: Any,
+) -> tuple[ChatRule, int] | None:
+    for rule, score in matches:
+        if predicate(rule):
+            return rule, score
+    return None
+
+
 def _topic_answer_sentence(query: str, pack: ChatPack, top_matches: list[tuple[ChatRule, int]]) -> str:
     lead_rule = top_matches[0][0]
     lead_summary = _summarize_rule(lead_rule)
@@ -842,12 +892,103 @@ def _topic_answer_sentence(query: str, pack: ChatPack, top_matches: list[tuple[C
     return f"{pack.standard_id} answers this topic with: {lead_summary}"
 
 
+def _render_pure_tin_guidance(
+    *,
+    pack: ChatPack,
+    top_matches: list[tuple[ChatRule, int]],
+) -> str:
+    pure_tin_matches = [(rule, score) for rule, score in top_matches if _is_pure_tin_rule(rule)]
+    citations: list[str] = []
+    seen_citations: set[str] = set()
+
+    def add_citation(rule: ChatRule) -> str:
+        citation = _citation(rule)
+        if citation not in seen_citations:
+            seen_citations.add(citation)
+            citations.append(citation)
+        return citation
+
+    prohibition_match = _first_matching_rule(pure_tin_matches, lambda rule: _rule_stance(rule) == "prohibits")
+    test_match = _first_matching_rule(
+        pure_tin_matches,
+        lambda rule: "tested internally and externally for pure tin" in _rule_text(rule),
+    )
+    lot_test_match = _first_matching_rule(
+        pure_tin_matches,
+        lambda rule: (
+            "tested internally and externally for pure tin" in _rule_text(rule)
+            and "non qpl" in _rule_text(rule)
+        ),
+    )
+    mitigation_match = _first_matching_rule(
+        pure_tin_matches,
+        lambda rule: any(token in _rule_text(rule) for token in ("solder dip", "ipc j-std-001es", "mitigat")),
+    )
+    lead_threshold_match = _first_matching_rule(
+        pure_tin_matches,
+        lambda rule: any(token in _rule_text(rule) for token in ("3% lead", "3 percent lead")),
+    )
+
+    lines = [
+        f"{pack.standard_id} treats pure tin as a hazard-avoidance issue, not a routine use-as-is condition.",
+        "",
+        "What to do:",
+    ]
+
+    if prohibition_match:
+        rule = prohibition_match[0]
+        lines.append(
+            f"- Check whether this part family or finish falls under a cited pure-tin prohibition. If it does, do not use it as-is. ({add_citation(rule)})"
+        )
+    if test_match:
+        rule = test_match[0]
+        lines.append(
+            f"- If pure tin is not already precluded by the governing spec or control document, test internally and externally for pure tin. ({add_citation(rule)})"
+        )
+    if lot_test_match:
+        rule = lot_test_match[0]
+        lines.append(
+            f"- For non-QPL/QML/QPD lots, the DPA samples also need internal and external pure-tin testing. ({add_citation(rule)})"
+        )
+    if mitigation_match:
+        rule = mitigation_match[0]
+        lines.append(
+            f"- If the finish fails the cited 3% lead threshold, follow the pack's mitigation path before use; the preferred path is solder dip, with the cited workmanship mitigation as the fallback. ({add_citation(rule)})"
+        )
+    elif lead_threshold_match:
+        rule = lead_threshold_match[0]
+        lines.append(
+            f"- Confirm whether the finish meets the cited 3% lead threshold before treating it as usable. ({add_citation(rule)})"
+        )
+
+    if not citations:
+        for rule, _score in pure_tin_matches:
+            add_citation(rule)
+
+    lines.extend(
+        [
+            "",
+            "Bottom line:",
+            "Do not treat pure Sn as automatically usable. Use the cited clauses to determine whether the finish is prohibited outright, requires pure-tin testing, or needs documented mitigation before use.",
+            "",
+            "Citations:",
+        ]
+    )
+    for citation in citations:
+        lines.append(f"- {citation}")
+    return "\n".join(lines).strip()
+
+
 def _render_grounded_pack_answer(
     *,
     query: str,
     pack: ChatPack,
     top_matches: list[tuple[ChatRule, int]],
 ) -> str:
+    pure_tin_matches = [(rule, score) for rule, score in top_matches if _is_pure_tin_rule(rule)]
+    if _is_pure_tin_action_query(query) and len(pure_tin_matches) >= 2:
+        return _render_pure_tin_guidance(pack=pack, top_matches=top_matches)
+
     citations = [_citation(rule) for rule, _score in top_matches]
     lines = [_topic_answer_sentence(query, pack, top_matches), ""]
 
@@ -1684,7 +1825,10 @@ def _reason_about_chat_context(query: str, gatekeeper: dict[str, Any], retrieval
 
     pack = retrieval["pack"]
     matches = retrieval["matches"]
-    top_matches = _dedupe_rules(matches, 5 if gatekeeper["intent"] == "clause_lookup" else 3)
+    top_matches = _dedupe_rules(
+        matches,
+        5 if gatekeeper["intent"] == "clause_lookup" or _is_pure_tin_action_query(query) else 3,
+    )
     return {
         "status": "PASS",
         "answer_type": "lookup" if gatekeeper["intent"] == "clause_lookup" else gatekeeper["intent"],
@@ -1718,12 +1862,19 @@ def _build_single_pack_synthesis(
     diagnostics: dict[str, Any] | None = None,
     stage_artifacts: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    top_matches = _dedupe_rules(matches, 3)
+    pure_tin_action = _is_pure_tin_action_query(query)
+    top_matches = _dedupe_rules(matches, 5 if pure_tin_action else 3)
     citations = [_citation(rule) for rule, _score in top_matches]
-    follow_ups = [
-        f"Show me the exact clause text for {citations[0]}.",
-        f"What would make this compliant under {pack.standard_id}?",
-    ]
+    if pure_tin_action and len([rule for rule, _score in top_matches if _is_pure_tin_rule(rule)]) >= 2:
+        follow_ups = [
+            f"Show me the pure tin avoidance clause in {pack.standard_id}.",
+            f"List the test and mitigation steps for pure tin under {pack.standard_id}.",
+        ]
+    else:
+        follow_ups = [
+            f"Show me the exact clause text for {citations[0]}.",
+            f"What would make this compliant under {pack.standard_id}?",
+        ]
     return _emit_envelope(
         OracleChatEnvelope(
             status="PASS",

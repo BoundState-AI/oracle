@@ -10,6 +10,7 @@ Classification: BoundState Proprietary
 Spec: BS-SPEC-TOCR-001-REV1, Section 4.1
 """
 
+__safety_critical__: bool = True
 __version__ = "1.0.0"
 
 import difflib

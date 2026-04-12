@@ -1,3 +1,4 @@
+"""Tests for server review-mode round budgets — defaults, env overrides, and user-round clamping."""
 from __future__ import annotations
 
 from server import UI_MAX_ROUNDS_CEILING, _clamp_user_rounds, _max_rounds_for_mode

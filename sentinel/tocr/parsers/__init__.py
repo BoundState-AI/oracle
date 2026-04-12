@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""TOCR document parsers."""
+"""
+Module: TOCR Parsers
+Purpose: TOCR document parsers.
+
+BoundState AI 2026
+Classification: BoundState Proprietary
+"""
 
 from sentinel.tocr.parsers.atoms_parser import ATOMSParser
 from sentinel.tocr.parsers.docx_parser import DOCXParser

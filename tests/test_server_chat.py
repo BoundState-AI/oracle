@@ -1,3 +1,4 @@
+"""Tests for the /oracle/chat endpoint — grounded retrieval, multi-pack compare, streaming, and LLM fallback."""
 import json
 from typing import Any
 
@@ -253,6 +254,94 @@ def test_chat_matches_pure_sn_shorthand_to_pure_tin_rule(workspace_tmp_path, mon
     assert body["status"] == "PASS"
     assert "Pure tin finishes shall be prohibited unless mitigation controls are documented." in body["response"]
     assert "MSFC-STD-3012A section 5.4.5 (p. 77)" in body["citations"][0]
+
+
+def test_chat_synthesizes_pure_tin_workflow_from_multiple_3012a_rules(workspace_tmp_path, monkeypatch):
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    server._chat_sessions.clear()
+
+    slug = _register_pack(
+        workspace_tmp_path,
+        pack_dir,
+        _chat_multi_rule_pack_payload(
+            standard_id="MSFC-STD-3012A",
+            standard_title="EEE Parts Management Requirements",
+            rules=[
+                {
+                    "rule_id": "RULE-001",
+                    "section": "Table IV Item 5",
+                    "page": 30,
+                    "obligation_type": "prohibition",
+                    "obligation_keyword": "shall not",
+                    "statement_text": "Pure tin plated parts or hardware are prohibited except where specifically approved.",
+                    "subject": "Pure tin finish avoidance",
+                    "requirement": "Pure tin finish is defined as less than 3% lead by mass and shall not be used as-is where prohibited by the cited hazard-avoidance clause.",
+                    "keywords": ["pure tin", "3% lead", "hazard avoidance"],
+                    "applies_to": ["eee parts"],
+                },
+                {
+                    "rule_id": "RULE-002",
+                    "section": "5.3.2.1",
+                    "page": 28,
+                    "obligation_type": "mandatory",
+                    "obligation_keyword": "shall",
+                    "statement_text": "All DPA samples from non QPL/QML/QPD manufactured EEE part lots shall be tested internally and externally for pure tin.",
+                    "subject": "Lot pure tin screening",
+                    "requirement": "For non QPL/QML/QPD lots, DPA samples shall be tested internally and externally for pure tin.",
+                    "keywords": ["pure tin", "DPA", "non QPL/QML/QPD"],
+                    "applies_to": ["lot screening"],
+                },
+                {
+                    "rule_id": "RULE-003",
+                    "section": "5.4.4.1",
+                    "page": 31,
+                    "obligation_type": "mandatory",
+                    "obligation_keyword": "shall",
+                    "statement_text": "Any EEE part where pure tin finish is not precluded by the military QPL/QML/QPD, or specification control document, shall be tested internally and externally for pure tin.",
+                    "subject": "Pure tin finish avoidance",
+                    "requirement": "If pure tin is not already precluded by the governing spec or control document, the part shall be tested internally and externally for pure tin.",
+                    "keywords": ["pure tin", "tested internally and externally", "specification control document"],
+                    "applies_to": ["eee parts"],
+                },
+                {
+                    "rule_id": "RULE-004",
+                    "section": "5.4.4.1",
+                    "page": 31,
+                    "obligation_type": "mandatory",
+                    "obligation_keyword": "shall",
+                    "statement_text": "If parts fail to meet the 3% lead by mass requirement, the preferred method to mitigate pure tin risk is solder dip; if that is not practical, mitigation shall follow IPC J-STD-001ES.",
+                    "subject": "Pure tin mitigation",
+                    "requirement": "If the finish fails the 3% lead threshold, the preferred pure tin mitigation is solder dip, with IPC J-STD-001ES as the fallback path.",
+                    "keywords": ["pure tin", "3% lead", "solder dip", "IPC J-STD-001ES"],
+                    "applies_to": ["eee parts"],
+                },
+            ],
+        ),
+        "3012a_pure_tin_workflow.json",
+    )
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/oracle/chat",
+        json={
+            "message": "I have pure Sn, what should i do about it?",
+            "selected_packs": [slug],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "PASS"
+    assert "hazard-avoidance issue" in body["response"]
+    assert "test internally and externally for pure tin" in body["response"]
+    assert "solder dip" in body["response"]
+    assert any("MSFC-STD-3012A section 5.4.4.1" in citation for citation in body["citations"])
+    assert body["follow_ups"] == [
+        "Show me the pure tin avoidance clause in MSFC-STD-3012A.",
+        "List the test and mitigation steps for pure tin under MSFC-STD-3012A.",
+    ]
 
 
 def test_chat_compare_only_uses_multiple_packs(workspace_tmp_path, monkeypatch):

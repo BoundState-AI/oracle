@@ -1,3 +1,4 @@
+"""Tests for builtin pack bootstrapping — copying bundled packs into the library on first run."""
 import json
 
 from oracle import cli

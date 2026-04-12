@@ -30,7 +30,7 @@ from sentinel.tocr.models.enums import ContractType, RevisionStatus
 from sentinel.tocr.models.report import ComplianceReport
 from sentinel.tocr.parsers.essca_parser import ESSCAParser
 
-logger = logging.getLogger(__name__)
+LOGGER = logging.getLogger(__name__)
 
 app = FastAPI(title="SENTINEL-TOCR", version="1.0.0")
 
@@ -112,7 +112,7 @@ def _parse_upload(upload: UploadFile):
         try:
             return parser.parse(tmp_path)
         except Exception as exc:
-            logger.error("Failed to parse upload %s: %s", upload.filename, exc)
+            LOGGER.error("Failed to parse upload %s: %s", upload.filename, exc)
             raise HTTPException(
                 status_code=422,
                 detail=f"Could not parse '{upload.filename}': {type(exc).__name__}",
@@ -278,5 +278,5 @@ else:
 
 
 if __name__ == "__main__":
-    logger.info("SENTINEL-TOCR Server starting on http://localhost:8099/tocr")
+    LOGGER.info("SENTINEL-TOCR Server starting on http://localhost:8099/tocr")
     uvicorn.run(app, host="0.0.0.0", port=8099)

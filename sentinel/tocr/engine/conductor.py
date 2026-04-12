@@ -10,6 +10,7 @@ Classification: BoundState Proprietary
 Spec: BS-SPEC-TOCR-001-REV1, Section 4
 """
 
+__safety_critical__: bool = True
 __version__ = "1.0.0"
 
 import copy

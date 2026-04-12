@@ -20,6 +20,13 @@ from dataclasses import dataclass, field
 
 from oracle.chat_contract import OracleChatEnvelope
 
+# WHY this gate exists: ORACLE is an advisory system, not a decision authority.
+# If the output contains approval/certification language, a user might treat
+# the response as an official sign-off rather than a draft recommendation.
+# These specific words were chosen because they carry legal weight in NASA/DoD
+# contracting — "approved", "certified", and "waived" are formal actions that
+# only designated authorities (CO, COR, Safety) can take.
+# False-positive refusals are strongly preferred over false-negative approvals.
 _PROHIBITED_DECISION_LANGUAGE_PATTERN = re.compile(
     r"\b(?:approved?|approval|certif(?:y|ied|ication)|waiv(?:e|er|ed)|sign-?off|accepted?|greenlight(?:ed)?)\b",
     re.IGNORECASE,

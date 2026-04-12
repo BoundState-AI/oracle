@@ -21,6 +21,7 @@ Usage:
     python -m sentinel.tocr.cli review prior.docx proposed.docx -o report.json
 
 BoundState AI 2026
+Classification: BoundState Proprietary
 """
 
 import argparse

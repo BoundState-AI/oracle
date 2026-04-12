@@ -1,3 +1,4 @@
+"""Tests for CLI DOCX fallback — built-in XML reader when pandoc is unavailable."""
 import sys
 import tempfile
 import types

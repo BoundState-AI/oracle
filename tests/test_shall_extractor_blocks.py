@@ -1,3 +1,4 @@
+"""Tests for shall extractor block parsing — MPR/NER tag extraction, section detection, and rationale splitting."""
 from oracle.shall_extractor import (
     _clean_tagged_requirement_text,
     _detect_current_section,

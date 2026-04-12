@@ -22,6 +22,7 @@ __safety_critical__: bool = True
 import argparse
 import base64
 import json
+import logging
 import os
 import re
 from collections import Counter
@@ -32,74 +33,122 @@ from typing import Any
 
 import fitz  # PyMuPDF
 
+LOGGER = logging.getLogger(“oracle.gpcm_adapter”)
 
-TAG_RE = re.compile(r"\[(MPR|FCR|NER)\s+(\d+[a-z]?)\]", re.IGNORECASE)
-TAG_VALUE_RE = re.compile(r"\b(MPR|FCR|NER)\s+(\d+[a-z]?)\b", re.IGNORECASE)
-SECTION_RE = re.compile(r"^\d+(?:\.\d+)*(?:[a-z](?:\(\d+\))?)?$", re.IGNORECASE)
+# WHY: Matches bracketed requirement tags like [MPR 12], [FCR 3a], [NER 7].
+# These tags are the primary identifiers linking PDF text to specific compliance
+# requirements. Removing this breaks all tag-based requirement extraction and
+# cross-referencing between extractor output and source PDF blocks.
+TAG_RE = re.compile(r”\[(MPR|FCR|NER)\s+(\d+[a-z]?)\]”, re.IGNORECASE)
+
+# WHY: Matches unbracketed requirement tags like “MPR 12” or “FCR 3a” in
+# free-flowing text. Used as a fallback when tags appear without brackets
+# (e.g. in table cells or inline references). Removing this causes missed
+# tag normalization for requirements that lack bracket formatting.
+TAG_VALUE_RE = re.compile(r”\b(MPR|FCR|NER)\s+(\d+[a-z]?)\b”, re.IGNORECASE)
+
+# WHY: Matches hierarchical section numbers like “3.2.4” or “4.1.1a(2)”.
+# Used to detect section headers in PDF text and associate requirements with
+# their containing section. Removing this breaks section assignment and causes
+# requirements to lose their structural location in the standard.
+SECTION_RE = re.compile(r”^\d+(?:\.\d+)*(?:[a-z](?:\(\d+\))?)?$”, re.IGNORECASE)
+
+# WHY: Matches obligation keywords (shall, shall not, must, must not, required,
+# may not) that mark a line as an actual compliance requirement rather than
+# informational text. This is the core discriminator between requirements and
+# non-requirement prose. Removing this causes the adapter to emit informational
+# text as requirements, polluting the rule pack with non-actionable entries.
 OBLIGATION_RE = re.compile(
-    r"\b(shall not|shall|must not|must|required|may not)\b", re.IGNORECASE
-)
-RATIONALE_RE = re.compile(r"\[Rationale:\s*(.*?)\]", re.IGNORECASE | re.DOTALL)
-HEADER_PATTERNS = (
-    re.compile(r"^NASA-STD-", re.IGNORECASE),
-    re.compile(r"^APPROVED FOR PUBLIC RELEASE", re.IGNORECASE),
-    re.compile(r"^Controlled by:", re.IGNORECASE),
-    re.compile(r"^\d+\s+of\s+\d+$"),
-    re.compile(r"^Section$", re.IGNORECASE),
-    re.compile(r"^Section Title$", re.IGNORECASE),
-    re.compile(r"^Requirement Statement$", re.IGNORECASE),
-    re.compile(r"^Requirement in this Standard$", re.IGNORECASE),
-    re.compile(r"^Justification$", re.IGNORECASE),
-    re.compile(r"^Applicable\s+\(Yes or No\)$", re.IGNORECASE),
-    re.compile(r"^If No, Enter Rationale$", re.IGNORECASE),
-    re.compile(r"^Description$", re.IGNORECASE),
-)
-META_REQUIREMENT_PATTERNS = (
-    re.compile(r"\bword\s+[\"“]?shall", re.IGNORECASE),
-    re.compile(r"\bdenotes expected outcome\b", re.IGNORECASE),
-    re.compile(r"\bthese requirements use the word\b", re.IGNORECASE),
-    re.compile(r"\brecommended but not required\b", re.IGNORECASE),
-    re.compile(r"\bat the time of publication\b", re.IGNORECASE),
+    r”\b(shall not|shall|must not|must|required|may not)\b”, re.IGNORECASE
 )
 
+# WHY: Matches inline rationale annotations formatted as [Rationale: ...] in
+# NASA standard PDFs. These provide justification text co-located with the
+# requirement. Removing this loses inline rationale extraction, leaving many
+# requirements without justification even when the PDF contains one.
+RATIONALE_RE = re.compile(r”\[Rationale:\s*(.*?)\]”, re.IGNORECASE | re.DOTALL)
+
+# WHY: Tuple of patterns matching recurring page headers, footers, and table
+# column headings from NASA standard PDFs (e.g. “NASA-STD-”, page numbers,
+# “Section Title”, “Requirement Statement”). These lines are noise that
+# appears on every page. Removing this causes boilerplate header/footer text
+# to contaminate requirement extraction and inflate line counts.
+HEADER_PATTERNS = (
+    re.compile(r”^NASA-STD-”, re.IGNORECASE),
+    re.compile(r”^APPROVED FOR PUBLIC RELEASE”, re.IGNORECASE),
+    re.compile(r”^Controlled by:”, re.IGNORECASE),
+    re.compile(r”^\d+\s+of\s+\d+$”),
+    re.compile(r”^Section$”, re.IGNORECASE),
+    re.compile(r”^Section Title$”, re.IGNORECASE),
+    re.compile(r”^Requirement Statement$”, re.IGNORECASE),
+    re.compile(r”^Requirement in this Standard$”, re.IGNORECASE),
+    re.compile(r”^Justification$”, re.IGNORECASE),
+    re.compile(r”^Applicable\s+\(Yes or No\)$”, re.IGNORECASE),
+    re.compile(r”^If No, Enter Rationale$”, re.IGNORECASE),
+    re.compile(r”^Description$”, re.IGNORECASE),
+)
+
+# WHY: Patterns that identify meta-requirements -- sentences that describe HOW
+# requirements are written (e.g. “the word shall denotes...”) rather than actual
+# compliance obligations. These appear in introductory sections of NASA standards.
+# Removing this causes definitional boilerplate to be emitted as requirements,
+# producing false positives in compliance reviews.
+META_REQUIREMENT_PATTERNS = (
+    re.compile(r”\bword\s+[\””]?shall”, re.IGNORECASE),
+    re.compile(r”\bdenotes expected outcome\b”, re.IGNORECASE),
+    re.compile(r”\bthese requirements use the word\b”, re.IGNORECASE),
+    re.compile(r”\brecommended but not required\b”, re.IGNORECASE),
+    re.compile(r”\bat the time of publication\b”, re.IGNORECASE),
+)
+
+# WHY: Domain-specific keyword patterns for aerospace M&P compliance topics.
+# Each requirement is tagged with up to 5 matching keywords for downstream
+# filtering and routing (e.g. filtering hydrogen-related requirements only).
+# Removing this eliminates keyword tagging, breaking topic-based requirement
+# filtering in the GPCM compliance review engine.
 KEYWORD_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    ("materials", re.compile(r"\bmaterials?\b", re.IGNORECASE)),
-    ("processes", re.compile(r"\bprocess(?:es)?\b", re.IGNORECASE)),
-    ("hardware", re.compile(r"\bhardware\b", re.IGNORECASE)),
-    ("spaceflight", re.compile(r"\bspaceflight\b", re.IGNORECASE)),
-    ("testing", re.compile(r"\btest(?:ing|ed|s)?\b", re.IGNORECASE)),
-    ("inspection", re.compile(r"\binspect(?:ion|ed|ions)?\b", re.IGNORECASE)),
-    ("verification", re.compile(r"\bverif(?:y|ies|ication)\b", re.IGNORECASE)),
-    ("compliance", re.compile(r"\bcompli(?:ance|es|ed|y)\b", re.IGNORECASE)),
-    ("corrosion", re.compile(r"\bcorrosi(?:on|ve)\b", re.IGNORECASE)),
-    ("hydrogen", re.compile(r"\bhydrogen\b", re.IGNORECASE)),
-    ("oxygen", re.compile(r"\boxygen\b", re.IGNORECASE)),
-    ("fracture", re.compile(r"\bfracture\b", re.IGNORECASE)),
-    ("welding", re.compile(r"\bweld(?:ing|ed|s)?\b", re.IGNORECASE)),
-    ("bonding", re.compile(r"\bbond(?:ed|ing|s)?\b", re.IGNORECASE)),
-    ("coating", re.compile(r"\bcoatings?\b", re.IGNORECASE)),
-    ("contamination", re.compile(r"\bcontamin(?:ation|ants?)\b", re.IGNORECASE)),
-    ("flammability", re.compile(r"\bflammab(?:ility|le)\b", re.IGNORECASE)),
-    ("embrittlement", re.compile(r"\bembrittlement\b", re.IGNORECASE)),
-    ("MUA", re.compile(r"\bMUAs?\b", re.IGNORECASE)),
-    ("MIUL", re.compile(r"\bMIUL\b", re.IGNORECASE)),
-    ("NDE", re.compile(r"\bNDE\b", re.IGNORECASE)),
-    ("COTS", re.compile(r"\bCOTS\b", re.IGNORECASE)),
-    ("drawing", re.compile(r"\bdrawings?\b", re.IGNORECASE)),
-    ("specification", re.compile(r"\bspecifications?\b", re.IGNORECASE)),
-    ("manufacturing", re.compile(r"\bmanufactur(?:e|ing|ed)\b", re.IGNORECASE)),
-    ("qualification", re.compile(r"\bqualif(?:ication|y|ied)\b", re.IGNORECASE)),
-    ("traceability", re.compile(r"\btraceability\b", re.IGNORECASE)),
+    (“materials”, re.compile(r”\bmaterials?\b”, re.IGNORECASE)),
+    (“processes”, re.compile(r”\bprocess(?:es)?\b”, re.IGNORECASE)),
+    (“hardware”, re.compile(r”\bhardware\b”, re.IGNORECASE)),
+    (“spaceflight”, re.compile(r”\bspaceflight\b”, re.IGNORECASE)),
+    (“testing”, re.compile(r”\btest(?:ing|ed|s)?\b”, re.IGNORECASE)),
+    (“inspection”, re.compile(r”\binspect(?:ion|ed|ions)?\b”, re.IGNORECASE)),
+    (“verification”, re.compile(r”\bverif(?:y|ies|ication)\b”, re.IGNORECASE)),
+    (“compliance”, re.compile(r”\bcompli(?:ance|es|ed|y)\b”, re.IGNORECASE)),
+    (“corrosion”, re.compile(r”\bcorrosi(?:on|ve)\b”, re.IGNORECASE)),
+    (“hydrogen”, re.compile(r”\bhydrogen\b”, re.IGNORECASE)),
+    (“oxygen”, re.compile(r”\boxygen\b”, re.IGNORECASE)),
+    (“fracture”, re.compile(r”\bfracture\b”, re.IGNORECASE)),
+    (“welding”, re.compile(r”\bweld(?:ing|ed|s)?\b”, re.IGNORECASE)),
+    (“bonding”, re.compile(r”\bbond(?:ed|ing|s)?\b”, re.IGNORECASE)),
+    (“coating”, re.compile(r”\bcoatings?\b”, re.IGNORECASE)),
+    (“contamination”, re.compile(r”\bcontamin(?:ation|ants?)\b”, re.IGNORECASE)),
+    (“flammability”, re.compile(r”\bflammab(?:ility|le)\b”, re.IGNORECASE)),
+    (“embrittlement”, re.compile(r”\bembrittlement\b”, re.IGNORECASE)),
+    (“MUA”, re.compile(r”\bMUAs?\b”, re.IGNORECASE)),
+    (“MIUL”, re.compile(r”\bMIUL\b”, re.IGNORECASE)),
+    (“NDE”, re.compile(r”\bNDE\b”, re.IGNORECASE)),
+    (“COTS”, re.compile(r”\bCOTS\b”, re.IGNORECASE)),
+    (“drawing”, re.compile(r”\bdrawings?\b”, re.IGNORECASE)),
+    (“specification”, re.compile(r”\bspecifications?\b”, re.IGNORECASE)),
+    (“manufacturing”, re.compile(r”\bmanufactur(?:e|ing|ed)\b”, re.IGNORECASE)),
+    (“qualification”, re.compile(r”\bqualif(?:ication|y|ied)\b”, re.IGNORECASE)),
+    (“traceability”, re.compile(r”\btraceability\b”, re.IGNORECASE)),
 ]
 
+# WHY: Program applicability classifiers that tag requirements by domain scope
+# (human-rated, mission-critical, oxygen/hydrogen systems, fracture-critical,
+# composite/bonded, metallic). Used to route requirements to the correct
+# compliance review context. Removing this causes all requirements to fall back
+# to “all_programs”, losing program-specific filtering in downstream reviews.
 APPLIES_RULES: list[tuple[str, re.Pattern[str]]] = [
-    ("human_rated", re.compile(r"\bhuman[- ]rated\b", re.IGNORECASE)),
-    ("mission_critical", re.compile(r"\bmission[- ]critical\b", re.IGNORECASE)),
-    ("oxygen_systems", re.compile(r"\boxygen\b", re.IGNORECASE)),
-    ("hydrogen_systems", re.compile(r"\bhydrogen\b", re.IGNORECASE)),
-    ("fracture_critical", re.compile(r"\bfracture\b", re.IGNORECASE)),
-    ("composite_bonded", re.compile(r"\b(composite|bonded)\b", re.IGNORECASE)),
-    ("metallic", re.compile(r"\bmetallic\b", re.IGNORECASE)),
+    (“human_rated”, re.compile(r”\bhuman[- ]rated\b”, re.IGNORECASE)),
+    (“mission_critical”, re.compile(r”\bmission[- ]critical\b”, re.IGNORECASE)),
+    (“oxygen_systems”, re.compile(r”\boxygen\b”, re.IGNORECASE)),
+    (“hydrogen_systems”, re.compile(r”\bhydrogen\b”, re.IGNORECASE)),
+    (“fracture_critical”, re.compile(r”\bfracture\b”, re.IGNORECASE)),
+    (“composite_bonded”, re.compile(r”\b(composite|bonded)\b”, re.IGNORECASE)),
+    (“metallic”, re.compile(r”\bmetallic\b”, re.IGNORECASE)),
 ]
 
 VISION_MODEL = "claude-sonnet-4-5-20250929"
@@ -1392,7 +1441,7 @@ def run_adapter(
         1 for requirement in requirements if repair_continuation_from_justification(requirement)
     )
     if continuation_repairs:
-        print(f"Continuation repaired: {continuation_repairs}")
+        LOGGER.info("Continuation repaired: %d", continuation_repairs)
 
     if use_sonnet_vision:
         requirements, repaired_count = apply_vision_repairs(
@@ -1403,13 +1452,13 @@ def run_adapter(
             dpi=vision_dpi,
         )
         if repaired_count:
-            print(f"Vision repaired: {repaired_count}")
+            LOGGER.info("Vision repaired: %d", repaired_count)
 
         post_vision_continuation_repairs = sum(
             1 for requirement in requirements if repair_continuation_from_justification(requirement)
         )
         if post_vision_continuation_repairs:
-            print(f"Post-vision continuation repaired: {post_vision_continuation_repairs}")
+            LOGGER.info("Post-vision continuation repaired: %d", post_vision_continuation_repairs)
 
         requirements, targeted_repaired_count = apply_targeted_tag_vision_repairs(
             requirements=requirements,
@@ -1419,17 +1468,17 @@ def run_adapter(
             dpi=vision_dpi,
         )
         if targeted_repaired_count:
-            print(f"Targeted tag vision repaired: {targeted_repaired_count}")
+            LOGGER.info("Targeted tag vision repaired: %d", targeted_repaired_count)
 
         post_targeted_continuation_repairs = sum(
             1 for requirement in requirements if repair_continuation_from_justification(requirement)
         )
         if post_targeted_continuation_repairs:
-            print(f"Post-targeted continuation repaired: {post_targeted_continuation_repairs}")
+            LOGGER.info("Post-targeted continuation repaired: %d", post_targeted_continuation_repairs)
 
         local_fallback_repaired = apply_local_6016_shall_fallbacks(requirements, standard_id)
         if local_fallback_repaired:
-            print(f"Local 6016 fallback repaired: {local_fallback_repaired}")
+            LOGGER.info("Local 6016 fallback repaired: %d", local_fallback_repaired)
 
     rule_pack = build_rule_pack(input_json, source_pdf, standard_id, requirements)
     output_json.parent.mkdir(parents=True, exist_ok=True)
@@ -1493,8 +1542,8 @@ def main() -> None:
         vision_dpi=args.vision_dpi,
     )
 
-    print(f"Rule pack:   {output_json}")
-    print(f"Requirements: {rule_pack['total_requirements']}")
+    LOGGER.info("Rule pack:   %s", output_json)
+    LOGGER.info("Requirements: %d", rule_pack["total_requirements"])
 
 
 if __name__ == "__main__":

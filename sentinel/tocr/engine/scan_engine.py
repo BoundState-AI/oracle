@@ -11,6 +11,7 @@ The diff-based pipeline catches what CHANGED. This engine catches what IS WRONG.
 Give it a task order, it tells you compliant or not, and if not, why not.
 """
 
+__safety_critical__: bool = True
 __version__ = "1.0.0"
 
 import hashlib

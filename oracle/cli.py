@@ -705,7 +705,14 @@ def _detect_document_type(
     for i in range(pass1_pages):
         page_texts[i] = doc[i].get_text("text")
 
-    # Pattern definitions
+    # Pattern definitions for 2-pass document type detection (Section 5.3).
+    # WHY 3 separate patterns: each identifies a different regulatory document
+    # family.  The detection heuristic counts matches per page — whichever
+    # pattern dominates determines the extraction route:
+    #   tag_pattern → GPCM route (NASA tagged standards with [MPR N]/[FCR N])
+    #   far_pattern → FAR route (federal acquisition regulations with Part.Section)
+    #   cfr_pattern → Generic route (Code of Federal Regulations references)
+    # If no pattern dominates, the generic Claude extraction route is used.
     tag_pattern = re.compile(r"\[(MPR|FCR)\s+\d+\]", re.IGNORECASE)
     far_pattern = re.compile(r"(?:FAR|DFARS|NFS|GSAM)\s+(?:Part\s+)?\d+\.\d+", re.IGNORECASE)
     cfr_pattern = re.compile(r"(?:\d+\s+CFR|Code of Federal Regulations)", re.IGNORECASE)

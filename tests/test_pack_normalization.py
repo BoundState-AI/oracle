@@ -1,3 +1,4 @@
+"""Tests for rule pack normalization — legacy field coercion for FAR and GPCM pack schemas."""
 from oracle.pack_validator import normalize_pack_structure
 
 
