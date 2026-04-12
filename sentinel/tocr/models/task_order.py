@@ -32,6 +32,10 @@ class SubTask(BaseModel):
     participating_team: list[str] = Field(default_factory=list)
     deliverables: list[str] = Field(default_factory=list)
 
+    # Why extra="allow": Parsers extract fields from diverse document formats
+    # (ATOMS JSON, DOCX, PDF) that may include source-specific metadata the
+    # engine doesn't consume.  raw_fields captures the full extraction; extras
+    # here prevent parser failures when new fields are added to source formats.
     model_config = {"extra": "allow"}
 
 
@@ -45,6 +49,10 @@ class FundingEntry(BaseModel):
     charge_code: Optional[str] = None
     description: str = ""
 
+    # Why extra="allow": Parsers extract fields from diverse document formats
+    # (ATOMS JSON, DOCX, PDF) that may include source-specific metadata the
+    # engine doesn't consume.  raw_fields captures the full extraction; extras
+    # here prevent parser failures when new fields are added to source formats.
     model_config = {"extra": "allow"}
 
 
@@ -56,6 +64,10 @@ class QualityPlan(BaseModel):
     software_scope: bool = False
     safety_critical: bool = False
 
+    # Why extra="allow": Parsers extract fields from diverse document formats
+    # (ATOMS JSON, DOCX, PDF) that may include source-specific metadata the
+    # engine doesn't consume.  raw_fields captures the full extraction; extras
+    # here prevent parser failures when new fields are added to source formats.
     model_config = {"extra": "allow"}
 
 
@@ -100,4 +112,8 @@ class TaskOrder(BaseModel):
     source_format: str = "atoms_json"
     raw_fields: dict = Field(default_factory=dict)
 
+    # Why extra="allow": Parsers extract fields from diverse document formats
+    # (ATOMS JSON, DOCX, PDF) that may include source-specific metadata the
+    # engine doesn't consume.  raw_fields captures the full extraction; extras
+    # here prevent parser failures when new fields are added to source formats.
     model_config = {"extra": "allow"}

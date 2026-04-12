@@ -18,6 +18,12 @@ import re
 from pathlib import Path
 from typing import Optional
 
+from sentinel.tocr.engine.shared import (
+    CONTRACT_STOPWORDS,
+    URGENCY_INDICATORS,
+    filter_applicable_rules,
+    trigger_matches,
+)
 from sentinel.tocr.models.config import ContractConfig
 from sentinel.tocr.models.diff import FieldChange, StructuralDiff
 from sentinel.tocr.models.enums import (
@@ -316,20 +322,8 @@ class ChangeContext:
 
         # FAR 16.505(b)(4) substance check: does the justification explain
         # WHY this is urgent, not just WHAT the change is?
-        _URGENCY_INDICATORS = [
-            "urgent", "urgency", "immediate", "immediately", "critical path",
-            "safety", "safety concern", "hazard", "risk to",
-            "cannot wait", "cannot delay", "time-sensitive", "time sensitive",
-            "deadline", "window", "launch window", "test window",
-            "hardware at risk", "schedule impact", "schedule pressure",
-            "mission impact", "mission critical", "flight hardware",
-            "delay would", "delay will", "if delayed", "cannot be delayed",
-            "normal procedures cannot", "normal process cannot",
-            "standard process would", "standard review would",
-            "unacceptable delay", "unacceptable risk",
-            "life safety", "crew safety", "loss of",
-        ]
-        has_urgency = any(phrase in just_lower for phrase in _URGENCY_INDICATORS)
+        # See engine/shared.py for indicator list provenance.
+        has_urgency = any(phrase in just_lower for phrase in URGENCY_INDICATORS)
 
         if not has_urgency:
             self.signals.add("emergency_justification_no_urgency")
@@ -381,21 +375,6 @@ class ChangeContext:
         if len(self.proposed.sub_tasks) < 2:
             return
 
-        # Expanded stopwords: English + common contract/ESSCA boilerplate
-        _STOPWORDS = {
-            # English
-            "the", "a", "an", "and", "or", "for", "of", "in", "to", "is",
-            "with", "be", "are", "was", "were", "will", "shall", "by", "at",
-            "on", "as", "it", "this", "that", "from", "not", "but", "all",
-            "has", "have", "had", "may", "can", "its", "per", "any", "each",
-            # Common ESSCA/NASA contract boilerplate
-            "contractor", "provide", "services", "support", "activities",
-            "include", "following", "materials", "evaluation", "assessment",
-            "required", "engineering", "effort", "task", "work", "perform",
-            "shall", "including", "necessary", "processes", "laboratory",
-            "office", "design", "analysis", "test", "testing", "development",
-        }
-
         for st in self.proposed.sub_tasks:
             if not st.description:
                 continue
@@ -406,7 +385,7 @@ class ChangeContext:
                 if not other_st.description:
                     continue
                 other_words = set(other_st.description.lower().split())
-                overlap = (set(desc_lower.split()) & other_words) - _STOPWORDS
+                overlap = (set(desc_lower.split()) & other_words) - CONTRACT_STOPWORDS
                 if len(overlap) > self._cost_overlap_threshold:
                     self.signals.add("cost_misallocation_risk")
                     break
@@ -496,69 +475,11 @@ class RuleEngine:
 
     def _filter_applicable(self, config: ContractConfig) -> list[TOCRRule]:
         """Filter rules by applicability against contract config."""
-        applicable = []
-        for rule in self.rules:
-            app = rule.applicability
-
-            if not config.matches_contract_type(app.contract_type):
-                self._suppression_log.append({
-                    "rule_id": rule.rule_id,
-                    "reason": f"Contract type mismatch: {app.contract_type}",
-                })
-                continue
-
-            if app.agency and not any(config.matches_agency(a) for a in app.agency):
-                self._suppression_log.append({
-                    "rule_id": rule.rule_id,
-                    "reason": f"Agency mismatch: {app.agency}",
-                })
-                continue
-
-            if app.local_pack and not any(config.matches_local_pack(p) for p in app.local_pack):
-                self._suppression_log.append({
-                    "rule_id": rule.rule_id,
-                    "reason": f"Local pack mismatch: {app.local_pack}",
-                })
-                continue
-
-            if app.clause_required:
-                if not all(config.has_clause(c) for c in app.clause_required):
-                    self._suppression_log.append({
-                        "rule_id": rule.rule_id,
-                        "reason": f"Missing required clause: {app.clause_required}",
-                    })
-                    continue
-
-            if not config.matches_revision_status(app.revision_status):
-                self._suppression_log.append({
-                    "rule_id": rule.rule_id,
-                    "reason": f"Revision status mismatch: {app.revision_status}",
-                })
-                continue
-
-            applicable.append(rule)
-
-        return applicable
+        return filter_applicable_rules(self.rules, config, self._suppression_log)
 
     def _trigger_matches(self, rule: TOCRRule, ctx: ChangeContext) -> bool:
         """Check if all trigger conditions are met."""
-        trigger = rule.trigger
-
-        # ALL conditions must be met
-        if trigger.all:
-            if not all(sig in ctx.signals for sig in trigger.all):
-                return False
-
-        # ANY condition must be met (if specified)
-        if trigger.any:
-            if not any(sig in ctx.signals for sig in trigger.any):
-                return False
-
-        # If no trigger conditions, rule doesn't fire
-        if not trigger.all and not trigger.any:
-            return False
-
-        return True
+        return trigger_matches(rule, ctx.signals)
 
     def _create_finding(
         self,

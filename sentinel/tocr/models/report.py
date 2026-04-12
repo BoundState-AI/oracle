@@ -120,6 +120,10 @@ class ComplianceReport(BaseModel):
     assumptions: list[str] = Field(default_factory=list)
     input_fingerprint: str = ""
 
+    # Why extra="allow": ComplianceReport is the primary output artifact and may
+    # carry extension fields from LLM-enhanced passes (Sonnet remediation, blind
+    # review metadata) that the base report schema doesn't define.  Forbidding
+    # extras would break the enrichment pipeline.
     model_config = {"extra": "allow"}
 
     def compute_score(self) -> None:

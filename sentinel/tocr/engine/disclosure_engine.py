@@ -15,6 +15,7 @@ __version__ = "1.0.0"
 import re
 from difflib import SequenceMatcher
 
+from sentinel.tocr.engine.shared import ENGLISH_STOPWORDS
 from sentinel.tocr.models.diff import FieldChange, StructuralDiff
 from sentinel.tocr.models.enums import ChangeClassification
 from sentinel.tocr.models.report import DisclosureResult
@@ -176,16 +177,11 @@ class DisclosureEngine:
         if not change_text:
             return False
 
-        # Aggressive stopword list — common English AND common contract words
-        # that appear in almost every scope/summary regardless of content
-        _STOPWORDS = {
-            "the", "a", "an", "and", "or", "for", "of", "in", "to", "is",
-            "be", "are", "was", "were", "will", "shall", "with", "by", "at",
-            "on", "as", "it", "this", "that", "from", "not", "but", "all",
-            "has", "have", "had", "may", "can", "its", "per", "any", "each",
-        }
-        change_words = set(change_text.split()) - _STOPWORDS
-        summary_words = set(normalized_summary.split()) - _STOPWORDS
+        # English-only stopwords (not contract boilerplate) — we want to detect
+        # whether a change summary actually describes THIS change's content words.
+        # See engine/shared.py for the two-tier stopword rationale.
+        change_words = set(change_text.split()) - ENGLISH_STOPWORDS
+        summary_words = set(normalized_summary.split()) - ENGLISH_STOPWORDS
         overlap = change_words & summary_words
 
         # Require 3+ non-stopword content words AND they must comprise at

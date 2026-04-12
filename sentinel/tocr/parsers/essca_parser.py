@@ -80,6 +80,16 @@ class ESSCAParser:
 
         # --- Quality plan ---
         quality_text = self._find_quality_plan(paragraphs, doc)
+        # Compliance heuristics: detect software scope and QMS requirements.
+        # ESSCA uses a broader keyword set than the generic DOCX parser because
+        # ESSCA task orders often describe computational work without using the
+        # word "software" (e.g., "algorithm development", "data pipeline").
+        # Why these keywords:
+        #   - software_scope: "software", "AI", "machine learning", "algorithm",
+        #     "data pipeline" — triggers NASA-STD-8739.8B applicability.
+        #   - qms_required: "QMS", "quality management", "8739", "quality plan" —
+        #     detects explicit QMS references in the quality section.
+        # False positive bias is intentional: better to flag for review than miss.
         software_scope = bool(re.search(
             r"\b(software|AI|machine.?learn|algorithm|data.?pipeline)\b",
             description, re.I
