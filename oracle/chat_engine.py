@@ -86,13 +86,14 @@ _RATIONALE_SIGNAL_TOKENS = frozenset(
     }
 )
 
-# WHY this path: Oracle lives in the product repo, but the approved secondary
-# engineering-rationale corpus is maintained in the shared BoundState docs tree.
+# WHY this path: The secondary rationale corpus is a first-class asset shipped
+# with Oracle.  It contains grounded engineering rationale extracted from
+# NASA-STD-6016C (e.g., WHY cadmium is prohibited — it sublimes in vacuum).
 # Oracle only uses this corpus after a governing pack match already exists, so
-# the cross-repo lookup broadens explanation coverage without changing the
-# primary authority source.
+# the rationale broadens explanation coverage without changing the primary
+# authority source.  ORACLE_SECONDARY_RATIONALE_JSON env var overrides this.
 _DEFAULT_SECONDARY_RATIONALE_JSON = (
-    Path(__file__).resolve().parents[2] / "docs" / "shall_test_v2" / "6016 rev c_shall_statements.json"
+    Path(__file__).resolve().parent / "rationale" / "nasa_std_6016c_rationale.json"
 )
 
 # WHY these terms: they identify connector-specific clauses that should not be
