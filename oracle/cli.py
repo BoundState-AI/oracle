@@ -308,6 +308,8 @@ def _count_rules(pack_data: dict) -> int:
     return 0
 
 
+# _compute_content_hash: reads entire file into memory for small pack JSON files.
+# _compute_file_hash (below): streams in 64 KB chunks for large on-disk files (PDFs).
 def _compute_content_hash(file_path: Path) -> str:
     """Compute SHA-256 hash of a file's contents."""
     h = hashlib.sha256(file_path.read_bytes())
@@ -1619,6 +1621,8 @@ def _render_pack_for_oracle(
 
 def _estimate_tokens(text: str) -> int:
     """Rough token estimate using the 4-chars-per-token heuristic."""
+    # WHY 4: standard GPT tokenizer averages ~4 chars/token for English prose.
+    # Conservative for non-English or code.
     return len(text) // 4
 
 

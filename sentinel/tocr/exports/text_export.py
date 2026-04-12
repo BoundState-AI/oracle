@@ -18,20 +18,8 @@ from typing import Optional
 from sentinel.tocr.models.report import ComplianceReport
 
 
-def export_text(
-    report: ComplianceReport,
-    output_path: Optional[Path] = None,
-) -> str:
-    """
-    Export compliance report as human-readable text.
-
-    Args:
-        report: The ComplianceReport to export.
-        output_path: Optional path to write file.
-
-    Returns:
-        Formatted text report.
-    """
+def _format_header(report: ComplianceReport) -> str:
+    """Format report header: ID, revisions, verdict, score."""
     lines = []
     lines.append("=" * 72)
     lines.append("SENTINEL-TOCR COMPLIANCE REPORT")
@@ -69,7 +57,13 @@ def export_text(
                  f"{report.rules_fired} fired, {report.rules_suppressed} suppressed")
     lines.append("")
 
-    # Findings
+    return "\n".join(lines)
+
+
+def _format_findings(report: ComplianceReport) -> str:
+    """Format finding details."""
+    lines = []
+
     if report.findings:
         lines.append("=" * 72)
         lines.append("FINDINGS")
@@ -91,7 +85,13 @@ def export_text(
     else:
         lines.append("No findings. Revision passes compliance review.")
 
-    # Remediation Plan
+    return "\n".join(lines)
+
+
+def _format_remediation(report: ComplianceReport) -> str:
+    """Format remediation plan steps."""
+    lines = []
+
     if report.remediation_plan and not report.remediation_plan.is_empty:
         plan = report.remediation_plan
         lines.append("")
@@ -129,6 +129,13 @@ def export_text(
                 lines.append(f"      Authority: {', '.join(step.authority_basis)}")
             lines.append("")
 
+    return "\n".join(lines)
+
+
+def _format_footer(report: ComplianceReport) -> str:
+    """Format suppression log, assumptions, and end-of-report marker."""
+    lines = []
+
     # Suppression log
     if report.suppression_log:
         lines.append("")
@@ -150,7 +157,29 @@ def export_text(
     lines.append("End of Report")
     lines.append("=" * 72)
 
-    text = "\n".join(lines)
+    return "\n".join(lines)
+
+
+def export_text(
+    report: ComplianceReport,
+    output_path: Optional[Path] = None,
+) -> str:
+    """
+    Export compliance report as human-readable text.
+
+    Args:
+        report: The ComplianceReport to export.
+        output_path: Optional path to write file.
+
+    Returns:
+        Formatted text report.
+    """
+    text = "\n".join([
+        _format_header(report),
+        _format_findings(report),
+        _format_remediation(report),
+        _format_footer(report),
+    ])
 
     if output_path:
         output_path.parent.mkdir(parents=True, exist_ok=True)

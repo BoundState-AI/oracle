@@ -1,3 +1,8 @@
+/**
+ * RoundsSelector — review round count picker with per-round cost warning.
+ * Surfaces the 4-reviewer cost model so operators make informed choices before long runs.
+ */
+
 "use client";
 
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";

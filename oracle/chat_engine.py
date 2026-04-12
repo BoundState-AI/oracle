@@ -30,6 +30,8 @@ from oracle.cli import load_pack as cli_load_pack
 
 LOGGER = logging.getLogger("oracle.chat")
 
+# WHY: "Sn" is the chemical symbol for tin. Users may search for
+# "Sn compatibility" meaning tin.
 _TOKEN_ALIASES = {
     "sn": "tin",
 }
@@ -151,6 +153,18 @@ _TABLE_NOTE_PATTERN = re.compile(
 # "what changed between revisions") will not trigger this pattern.
 # ---------------------------------------------------------------------------
 _COMPARE_PATTERN = re.compile(r"\b(?:compare|comparison|versus|vs\.?)\b", re.IGNORECASE)
+
+# ---------------------------------------------------------------------------
+# Action-query pattern: detects "what should I do" / "next steps" queries
+# (e.g. "what do I do about this finding", "how should we handle it").
+#
+# WHY: Action queries need prescriptive remediation guidance rather than
+# informational rule lookups.  The router uses this to switch the formatter
+# into step-by-step remediation mode with role-specific actions.
+#
+# False-positive risk: low — phrases are explicit action-seeking language.
+# False-negative risk: vague queries like "help" or "any advice" won't match.
+# ---------------------------------------------------------------------------
 _ACTION_QUERY_PATTERN = re.compile(
     r"\b(?:what (?:do|should) (?:i|we) do|what to do|what now|how (?:do|should) (?:i|we)|next steps?|do about it|handle it)\b",
     re.IGNORECASE,

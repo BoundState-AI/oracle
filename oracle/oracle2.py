@@ -284,10 +284,16 @@ Output JSON:
 # LLM client abstraction
 # ---------------------------------------------------------------------------
 
+# WHY 600s: multi-oracle reviews with 3 parallel calls + normalization +
+# coordination can take 8-10 minutes for large documents.
 PROVIDER_TIMEOUT = int(os.environ.get("ORACLE_TIMEOUT_SECONDS", "600"))
+# WHY 24576: GPT-5.4 reviewer responses include full findings JSON + rationale;
+# 24K tokens accommodates documents with 50+ findings without truncation.
 OPENAI_REVIEWER_MAX_TOKENS = int(
     os.environ.get("ORACLE_OPENAI_REVIEWER_MAX_TOKENS", "24576")
 )
+# WHY "high": reviewers must reason carefully about compliance implications;
+# lower effort risks missed findings on nuanced regulatory language.
 OPENAI_REASONING_EFFORT = os.environ.get("ORACLE_OPENAI_REASONING_EFFORT", "high")
 OPENAI_VERBOSITY = os.environ.get("ORACLE_OPENAI_VERBOSITY", "low")
 

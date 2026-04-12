@@ -66,6 +66,19 @@ class ChangeContext:
 
     def _compute_signals(self) -> None:
         """Compute all trigger signals for this change context."""
+        self._compute_change_classification_signals()
+        self._compute_scope_signals()
+        self._compute_funding_signals()
+        self._compute_deliverable_signals()
+        self._compute_emergency_signals()
+        self._compute_quality_signals()
+        self._compute_skills_signals()
+        self._compute_process_signals()
+        self._compute_cost_signals()
+        self._compute_retroactive_signals()
+
+    def _compute_change_classification_signals(self) -> None:
+        """Compute signals from change materiality, disclosure, classification, and type."""
         c = self.change
 
         # Material change detection
@@ -100,6 +113,10 @@ class ChangeContext:
         if c.field_path.startswith("sub_tasks.") and c.change_type == ChangeType.INSERTION:
             self.signals.add("new_sub_task_added")
 
+    def _compute_scope_signals(self) -> None:
+        """Compute scope-related signals: additions, new domains, work type analysis."""
+        c = self.change
+
         # Scope addition (new scope text)
         if c.classification == ChangeClassification.SCOPE_LANGUAGE and c.change_type == ChangeType.INSERTION:
             self.signals.add("scope_addition_detected")
@@ -122,21 +139,8 @@ class ChangeContext:
         if any(kw in proposed_lower for kw in ["new work type", "new capability", "new scope"]):
             self.signals.add("new_work_type_detected")
 
-        # Funding analysis
-        self._compute_funding_signals()
-
-        # Deliverables analysis
-        self._compute_deliverable_signals()
-
-        # Emergency analysis
-        self._compute_emergency_signals()
-
-        # Quality plan analysis
-        self._compute_quality_signals()
-
-        # Skills analysis
-        self._compute_skills_signals()
-
+    def _compute_process_signals(self) -> None:
+        """Compute ATOMS process signals and draft/unreleased status."""
         # ATOMS process signals
         if self.diff.new_sub_tasks:
             self.signals.add("new_sub_task_added")
@@ -147,10 +151,9 @@ class ChangeContext:
         if self.proposed.revision_status.value == "draft":
             self.signals.add("revision_is_draft")
 
-        # Cost misallocation signals
-        self._compute_cost_signals()
-
-        # Retroactive scope
+    def _compute_retroactive_signals(self) -> None:
+        """Compute retroactive scope language signals."""
+        proposed_lower = self.change.proposed_text.lower()
         if any(kw in proposed_lower for kw in [
             "previously performed", "retroactive", "already completed",
             "work already done", "prior performance",

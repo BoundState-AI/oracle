@@ -1,3 +1,8 @@
+/**
+ * OracleLandingPage — public entry point explaining Oracle's capabilities.
+ * Unauthenticated users see the value proposition and workflow steps before signing in.
+ */
+
 import Link from "next/link";
 import {
   ArrowRight,

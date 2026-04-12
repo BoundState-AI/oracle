@@ -1,3 +1,8 @@
+/**
+ * StatusSpinner — animated orbital spinner with a live log feed.
+ * Shown during long-running Oracle review sessions to maintain progress visibility.
+ */
+
 "use client";
 
 interface StatusSpinnerProps {

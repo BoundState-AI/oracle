@@ -1,3 +1,8 @@
+/**
+ * RootLayout — application shell with ClerkProvider auth and dark-mode-first theme.
+ * Wraps every page with the Inter font, Sonner toast provider, and global styles.
+ */
+
 import type { Metadata } from "next";
 import { ClerkProvider } from "@clerk/nextjs";
 import { Inter } from "next/font/google";

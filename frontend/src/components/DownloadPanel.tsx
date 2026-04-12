@@ -1,3 +1,8 @@
+/**
+ * DownloadPanel — download links for all generated documents and review artifacts.
+ * Renders polished docx/pptx, findings report, metrics JSON, compliance context, and pack snapshot.
+ */
+
 "use client";
 
 import { Button } from "@/components/ui/button";

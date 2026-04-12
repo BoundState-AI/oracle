@@ -71,11 +71,29 @@ class TaskOrderContext:
         self._compute_signals()
 
     def _compute_signals(self) -> None:
-        to = self.task_order
+        """Compute all trigger signals for this task order context."""
+        self._compute_scope_signals()
+        self._compute_subtask_signals()
+        self._compute_funding_signals()
+        self._compute_quality_signals()
+        self._compute_emergency_signals()
+        self._compute_cost_signals()
 
-        # --- Scope analysis ---
+        # --- Draft status ---
+        if self.task_order.revision_status.value == "draft":
+            self.signals.add("revision_is_draft")
+
+        # --- Summary of changes ---
+        if not self.task_order.summary_of_changes.strip():
+            self.signals.add("no_summary_of_changes")
+            self.signal_details["no_summary_of_changes"] = (
+                "Summary of Changes is empty."
+            )
+
+    def _compute_scope_signals(self) -> None:
+        """Compute scope-related signals: software scope, AI/ML detection, scope text analysis."""
+        to = self.task_order
         scope = f"{to.task_order_description} {to.scope_text}"
-        scope_lower = scope.lower()
 
         if scope.strip():
             self.signals.add("has_scope")
@@ -99,7 +117,10 @@ class TaskOrderContext:
                 f"Retroactive language detected: '{match.group()}'"
             )
 
-        # --- Sub-task analysis ---
+    def _compute_subtask_signals(self) -> None:
+        """Compute sub-task signals: presence, labor categories, deliverables."""
+        to = self.task_order
+
         if not to.sub_tasks:
             self.signals.add("no_sub_tasks")
             self.signal_details["no_sub_tasks"] = "Task order has zero sub-tasks."
@@ -171,12 +192,18 @@ class TaskOrderContext:
                     f"{st.sub_task_id} has no funding, no WBS, no charge code. "
                 )
 
-        # --- Funding analysis ---
+    def _compute_funding_signals(self) -> None:
+        """Compute funding table signals: zero funding detection, unfunded scope."""
+        to = self.task_order
+
         if to.total_funding is not None and to.total_funding == 0:
             self.signals.add("zero_total_funding")
             self.signal_details["zero_total_funding"] = "Total funding is $0."
 
-        # --- QMS analysis ---
+    def _compute_quality_signals(self) -> None:
+        """Compute quality signals: QMS requirements, software without QMS."""
+        to = self.task_order
+
         if "software_scope_present" in self.signals:
             qp = to.quality_plan
             if not qp or not qp.qms_required:
@@ -185,7 +212,10 @@ class TaskOrderContext:
                     "Software scope present but no QMS plan (NASA-STD-8739.8B required)."
                 )
 
-        # --- Emergency analysis ---
+    def _compute_emergency_signals(self) -> None:
+        """Compute emergency signals: designation, justification substance."""
+        to = self.task_order
+
         if to.emergency_designation:
             self.signals.add("emergency_designated")
             just_text = to.emergency_justification.strip()
@@ -214,19 +244,9 @@ class TaskOrderContext:
                         f"(3) what harm results from delay."
                     )
 
-        # --- Draft status ---
-        if to.revision_status.value == "draft":
-            self.signals.add("revision_is_draft")
-
-        # --- Cost misallocation ---
+    def _compute_cost_signals(self) -> None:
+        """Compute cost misallocation overlap detection."""
         self._check_cost_misallocation()
-
-        # --- Summary of changes ---
-        if not to.summary_of_changes.strip():
-            self.signals.add("no_summary_of_changes")
-            self.signal_details["no_summary_of_changes"] = (
-                "Summary of Changes is empty."
-            )
 
     def _check_cost_misallocation(self) -> None:
         """Check for cross-sub-task cost misallocation risk.

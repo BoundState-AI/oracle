@@ -79,28 +79,11 @@ class DOCXParser:
         sub_tasks = self._extract_sub_tasks(tables_data)
         funding_table = self._extract_funding(tables_data)
 
-        # Compliance heuristics: detect software scope and QMS requirements.
-        # Why these keywords:
-        #   - software_scope: triggers NASA-STD-8739.8B applicability checks.
-        #     "software", "AI", "machine learning" are the three categories that
-        #     invoke SWE requirements under ESSCA. False negatives are acceptable
-        #     (engine errs toward "not software" — conservative for the contractor).
-        #   - qms_required: "QMS" and "quality management" are the explicit terms;
-        #     "8739" catches references to NASA-STD-8739.x family without the full
-        #     standard title.  False positives are acceptable here (engine errs
-        #     toward "QMS required" — conservative for compliance).
+        quality_plan = self._detect_quality_plan(description, quality_text)
+
         # Known limitation: "non-emergency" would match the emergency regex. This
         # is acceptable because emergency designation is typically in a dedicated
         # field, not negated inline.
-        software_scope = bool(re.search(r"\b(software|AI|machine learning)\b", description, re.I))
-        qms_required = bool(re.search(r"\b(QMS|quality management|8739)\b", quality_text, re.I))
-
-        quality_plan = QualityPlan(
-            text=quality_text,
-            qms_required=qms_required,
-            software_scope=software_scope,
-        ) if quality_text else None
-
         emergency = bool(re.search(r"\bemergency\b", emergency_text, re.I))
 
         return TaskOrder(
@@ -127,6 +110,32 @@ class DOCXParser:
                 ParserConfidence.LOW
             ),
             source_format="docx",
+        )
+
+    def _detect_quality_plan(self, description: str, quality_text: str) -> Optional[QualityPlan]:
+        """Detect quality plan from description and quality section text.
+
+        Compliance heuristics: detect software scope and QMS requirements.
+        Why these keywords:
+          - software_scope: triggers NASA-STD-8739.8B applicability checks.
+            "software", "AI", "machine learning" are the three categories that
+            invoke SWE requirements under ESSCA. False negatives are acceptable
+            (engine errs toward "not software" — conservative for the contractor).
+          - qms_required: "QMS" and "quality management" are the explicit terms;
+            "8739" catches references to NASA-STD-8739.x family without the full
+            standard title.  False positives are acceptable here (engine errs
+            toward "QMS required" — conservative for compliance).
+        """
+        if not quality_text:
+            return None
+
+        software_scope = bool(re.search(r"\b(software|AI|machine learning)\b", description, re.I))
+        qms_required = bool(re.search(r"\b(QMS|quality management|8739)\b", quality_text, re.I))
+
+        return QualityPlan(
+            text=quality_text,
+            qms_required=qms_required,
+            software_scope=software_scope,
         )
 
     def _extract_tables(self, doc) -> list[list[list[str]]]:

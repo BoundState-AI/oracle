@@ -31,7 +31,7 @@ from typing import Any, Callable
 from fastapi import APIRouter, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from oracle.cli import (
     _load_manifest,
@@ -858,11 +858,15 @@ def _clean_log_message(msg: str) -> str | None:
 
 
 class OracleChatMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     role: str
     content: str
 
 
 class OracleChatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     message: str
     session_id: str | None = None
     history: list[OracleChatMessage] = Field(default_factory=list)
@@ -980,6 +984,8 @@ async def oracle_chat_stream(request: Request, body: OracleChatRequest):
 
 
 class PromotePackRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     reviewer: str
     notes: str | None = None
     allow_partial_promotion: bool = False
@@ -1122,6 +1128,8 @@ async def delete_pack(request: Request, name: str):
 
 class GenerateRequest(BaseModel):
     """Request body for the generate endpoint."""
+
+    model_config = ConfigDict(extra="forbid")
 
     session_id: str
     approved: bool

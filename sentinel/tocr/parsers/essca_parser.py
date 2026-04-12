@@ -80,30 +80,7 @@ class ESSCAParser:
 
         # --- Quality plan ---
         quality_text = self._find_quality_plan(paragraphs, doc)
-        # Compliance heuristics: detect software scope and QMS requirements.
-        # ESSCA uses a broader keyword set than the generic DOCX parser because
-        # ESSCA task orders often describe computational work without using the
-        # word "software" (e.g., "algorithm development", "data pipeline").
-        # Why these keywords:
-        #   - software_scope: "software", "AI", "machine learning", "algorithm",
-        #     "data pipeline" — triggers NASA-STD-8739.8B applicability.
-        #   - qms_required: "QMS", "quality management", "8739", "quality plan" —
-        #     detects explicit QMS references in the quality section.
-        # False positive bias is intentional: better to flag for review than miss.
-        software_scope = bool(re.search(
-            r"\b(software|AI|machine.?learn|algorithm|data.?pipeline)\b",
-            description, re.I
-        ))
-        qms_required = bool(re.search(
-            r"\b(QMS|quality.?management|8739|quality.?plan)\b",
-            quality_text, re.I
-        )) if quality_text else False
-
-        quality_plan = QualityPlan(
-            text=quality_text,
-            qms_required=qms_required,
-            software_scope=software_scope,
-        ) if quality_text else None
+        quality_plan = self._detect_quality_plan(description, quality_text)
 
         # --- Revision status ---
         rev_status = RevisionStatus.RELEASED
@@ -323,44 +300,9 @@ class ESSCAParser:
 
             # Detect section headers within sub-task
             text_lower = text.lower()
-            if "description/objectives" in text_lower and "nasa" not in text_lower:
-                current_section = "description"
-                continue
-            elif text_lower == "skills required":
-                current_section = "skills"
-                continue
-            elif text_lower == "technical approach":
-                current_section = "technical"
-                continue
-            elif "participating team" in text_lower:
-                current_section = "team"
-                continue
-            elif "deliverables" in text_lower and "nasa" not in text_lower and "essca" not in text_lower:
-                current_section = "deliverables"
-                continue
-            elif text_lower.startswith("sub-task description"):
-                current_section = "description"
-                continue
-            elif text_lower.startswith("discussion of skills"):
-                current_section = "skills_discussion"
-                continue
-            elif text_lower.startswith("deliverables and milestones"):
-                if "nasa" in text_lower:
-                    current_section = "deliverables_nasa"
-                else:
-                    current_section = "deliverables"
-                continue
-            elif text_lower.startswith("travel and risk"):
-                current_section = "travel"
-                continue
-            elif text_lower.startswith("gfe"):
-                current_section = "gfe"
-                continue
-            elif text_lower.startswith("additional comments"):
-                current_section = "comments"
-                continue
-            elif text_lower.startswith("technical approach (essca)"):
-                current_section = "technical_essca"
+            classified = self._classify_section(text_lower)
+            if classified:
+                current_section = classified
                 continue
 
             # Detect metadata fields in header
@@ -381,6 +323,75 @@ class ESSCAParser:
             sub_tasks.append(st)
 
         return sub_tasks
+
+    def _detect_quality_plan(self, description: str, quality_text: str) -> Optional[QualityPlan]:
+        """Detect quality plan from description and quality section text.
+
+        Compliance heuristics: detect software scope and QMS requirements.
+        ESSCA uses a broader keyword set than the generic DOCX parser because
+        ESSCA task orders often describe computational work without using the
+        word "software" (e.g., "algorithm development", "data pipeline").
+        Why these keywords:
+          - software_scope: "software", "AI", "machine learning", "algorithm",
+            "data pipeline" — triggers NASA-STD-8739.8B applicability.
+          - qms_required: "QMS", "quality management", "8739", "quality plan" —
+            detects explicit QMS references in the quality section.
+        False positive bias is intentional: better to flag for review than miss.
+        """
+        if not quality_text:
+            return None
+
+        software_scope = bool(re.search(
+            r"\b(software|AI|machine.?learn|algorithm|data.?pipeline)\b",
+            description, re.I
+        ))
+        qms_required = bool(re.search(
+            r"\b(QMS|quality.?management|8739|quality.?plan)\b",
+            quality_text, re.I
+        ))
+
+        return QualityPlan(
+            text=quality_text,
+            qms_required=qms_required,
+            software_scope=software_scope,
+        )
+
+    def _classify_section(self, text_lower: str) -> str:
+        """Classify a paragraph's text as a section header category.
+
+        Args:
+            text_lower: Lowercased paragraph text.
+
+        Returns:
+            Section category string, or empty string if not a section header.
+        """
+        if "description/objectives" in text_lower and "nasa" not in text_lower:
+            return "description"
+        if text_lower == "skills required":
+            return "skills"
+        if text_lower == "technical approach":
+            return "technical"
+        if "participating team" in text_lower:
+            return "team"
+        if "deliverables" in text_lower and "nasa" not in text_lower and "essca" not in text_lower:
+            return "deliverables"
+        if text_lower.startswith("sub-task description"):
+            return "description"
+        if text_lower.startswith("discussion of skills"):
+            return "skills_discussion"
+        if text_lower.startswith("deliverables and milestones"):
+            if "nasa" in text_lower:
+                return "deliverables_nasa"
+            return "deliverables"
+        if text_lower.startswith("travel and risk"):
+            return "travel"
+        if text_lower.startswith("gfe"):
+            return "gfe"
+        if text_lower.startswith("additional comments"):
+            return "comments"
+        if text_lower.startswith("technical approach (essca)"):
+            return "technical_essca"
+        return ""
 
     def _build_sub_task(
         self,

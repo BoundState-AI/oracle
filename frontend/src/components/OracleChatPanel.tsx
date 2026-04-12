@@ -1,3 +1,10 @@
+/**
+ * OracleChatPanel — real-time chat interface over authority packs.
+ * Two modes: authority-grounded (cites governing clauses from selected packs)
+ * and review-only (critiques draft requirements without external authority).
+ * Streams responses via SSE with meta/text/done/error event dispatch.
+ */
+
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -15,16 +22,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
-
-type PackSummary = {
-  name: string;
-  slug: string;
-  schema: string;
-  status: string;
-  standard_id: string;
-  description?: string;
-  rule_count: number;
-};
+import type { PackSummary } from "@/components/ReviewTab";
 
 type ChatMessage = {
   id: string;

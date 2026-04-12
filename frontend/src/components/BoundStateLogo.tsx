@@ -1,3 +1,8 @@
+/**
+ * BoundStateLogo — brand logo with variant (full/icon/wordmark) and size (sm/md/lg) system.
+ * The "full" variant links to boundstate.ai; icon and wordmark are static display elements.
+ */
+
 "use client";
 
 interface BoundStateLogoProps {

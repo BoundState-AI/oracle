@@ -1,3 +1,8 @@
+/**
+ * CritiquePanel — displays Oracle review findings with severity metrics.
+ * Renders the markdown critique and an optional metrics grid (defects, convergence, rounds).
+ */
+
 "use client";
 
 import ReactMarkdown from "react-markdown";

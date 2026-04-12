@@ -317,7 +317,7 @@ export function OracleWorkspace() {
 
       <main className="flex-1">
         <div className="mx-auto max-w-6xl px-4 py-8">
-          <div style={{ animation: "fade-in 0.3s ease-out" }}>
+          <div className="animate-fade-in">
             {activeTab === "review" && (
               <ReviewTab
                 file={file}

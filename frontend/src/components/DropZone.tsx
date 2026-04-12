@@ -1,3 +1,8 @@
+/**
+ * DropZone — file upload with drag-and-drop, click-to-browse, and client-side validation.
+ * Accepts .docx and .pptx only, enforces a 20 MB size limit, and shows inline errors.
+ */
+
 "use client";
 
 import { useCallback, useState, useRef } from "react";

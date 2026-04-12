@@ -31,6 +31,8 @@ from sentinel.tocr.models.remediation import RemediationPlan
 class DisclosureResult(BaseModel):
     """Disclosure audit result for a single change."""
 
+    model_config = {"extra": "forbid"}
+
     field_path: str
     change_summary: str = ""
     disclosed: bool = False
@@ -65,8 +67,13 @@ class ComplianceScore(BaseModel):
         score = 100 - (critical * 20 + high * 10 + medium * 5 + low * 1)
         score = max(0, score)
 
+        # WHY 50: scores below 50 indicate severe non-compliance (e.g., 3+
+        # critical findings); any critical finding is also auto-FATAL regardless
+        # of score because critical = contract breach risk.
         if score < 50 or critical > 0:
             verdict = ComplianceVerdict.FATAL
+        # WHY 90: scores 50-89 or any HIGH finding indicate material issues
+        # that require CO attention but aren't contract-stopping.
         elif score < 90 or high > 0:
             verdict = ComplianceVerdict.FLAGGED
         else:

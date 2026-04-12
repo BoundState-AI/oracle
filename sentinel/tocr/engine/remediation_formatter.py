@@ -12,6 +12,8 @@ Version: 1.0.0
 Classification: BoundState Proprietary
 """
 
+__safety_critical__: bool = True
+
 __version__ = "1.0.0"
 
 import asyncio
