@@ -344,6 +344,138 @@ def test_chat_synthesizes_pure_tin_workflow_from_multiple_3012a_rules(workspace_
     ]
 
 
+def test_chat_expands_cd_alias_and_prefers_spaceflight_prohibition_reason(workspace_tmp_path, monkeypatch):
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    server._chat_sessions.clear()
+
+    slug = _register_pack(
+        workspace_tmp_path,
+        pack_dir,
+        _chat_multi_rule_pack_payload(
+            standard_id="MSFC-STD-3012A",
+            standard_title="EEE Parts Management Requirements",
+            rules=[
+                {
+                    "rule_id": "RULE-001",
+                    "section": "29/",
+                    "page": 79,
+                    "obligation_type": "prohibition",
+                    "obligation_keyword": "shall not",
+                    "statement_text": "Cadmium plated parts shall not be used where prohibited by the finish control table.",
+                    "subject": "Cadmium plated parts",
+                    "requirement": "Not be used.",
+                    "keywords": ["cadmium plated parts", "finish control"],
+                    "applies_to": ["eee parts"],
+                },
+                {
+                    "rule_id": "RULE-002",
+                    "section": "5.4.5.1",
+                    "page": 32,
+                    "obligation_type": "mandatory",
+                    "obligation_keyword": "shall",
+                    "statement_text": "Cadmium plated parts shall be inspected for verification of sufficient plating and lack of red plague.",
+                    "subject": "Cadmium plated parts",
+                    "requirement": "Be inspected for verification of sufficient plating and lack of red plague.",
+                    "keywords": ["cadmium plated parts", "red plague"],
+                    "applies_to": ["eee parts"],
+                },
+                {
+                    "rule_id": "RULE-003",
+                    "section": "14/",
+                    "page": 50,
+                    "obligation_type": "prohibition",
+                    "obligation_keyword": "must not",
+                    "statement_text": "Cadmium plated parts must not be used in space flight applications because cadmium can contaminate nearby surfaces in vacuum.",
+                    "subject": "Cadmium plated parts",
+                    "requirement": "Must not be used in space flight applications.",
+                    "keywords": ["cadmium plated parts", "space flight applications", "vacuum"],
+                    "applies_to": ["spaceflight hardware"],
+                },
+            ],
+        ),
+        "3012a_cadmium_spaceflight.json",
+    )
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/oracle/chat",
+        json={
+            "message": "why can't i use cadmium plated parts for spaceflight",
+            "selected_packs": [slug],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "PASS"
+    assert body["response"].startswith(
+        "No. Cadmium plated parts must not be used in space flight applications because cadmium can contaminate nearby surfaces in vacuum."
+    )
+    assert body["citations"][0] == "MSFC-STD-3012A section 14/ (p. 50)"
+    assert "shall be inspected for verification" in body["response"]
+    assert "Citations:" not in body["response"]
+    assert "Next moves:" not in body["response"]
+
+
+def test_chat_returns_insufficient_data_when_cadmium_topic_has_no_cadmium_rule(workspace_tmp_path, monkeypatch):
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    server._chat_sessions.clear()
+
+    slug = _register_pack(
+        workspace_tmp_path,
+        pack_dir,
+        _chat_multi_rule_pack_payload(
+            standard_id="MSFC-STD-3012A",
+            standard_title="EEE Parts Management Requirements",
+            rules=[
+                {
+                    "rule_id": "RULE-001",
+                    "section": "6/",
+                    "page": 48,
+                    "obligation_type": "prohibition",
+                    "obligation_keyword": "shall not",
+                    "statement_text": "Termination Style W or Y shall not be used.",
+                    "subject": "Termination style restriction",
+                    "requirement": "Termination Style W or Y shall not be used.",
+                    "keywords": ["termination style", "style w", "style y"],
+                    "applies_to": ["eee parts"],
+                },
+                {
+                    "rule_id": "RULE-002",
+                    "section": "5.4.5.1",
+                    "page": 32,
+                    "obligation_type": "mandatory",
+                    "obligation_keyword": "shall",
+                    "statement_text": "Connector plating shall be inspected for verification of sufficient plating and lack of red plague.",
+                    "subject": "Connector plating inspection",
+                    "requirement": "Connector plating shall be inspected for sufficient plating and lack of red plague.",
+                    "keywords": ["connector plating", "red plague"],
+                    "applies_to": ["connectors"],
+                },
+            ],
+        ),
+        "3012a_no_cadmium.json",
+    )
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/oracle/chat",
+        json={
+            "message": "why can't i use Cd plated parts for spaceflight",
+            "selected_packs": [slug],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "INSUFFICIENT_DATA"
+    assert "did not find a grounded requirement match" in body["response"]
+
+
 def test_chat_compare_only_uses_multiple_packs(workspace_tmp_path, monkeypatch):
     pack_dir = workspace_tmp_path / "packs"
     pack_dir.mkdir(parents=True, exist_ok=True)
@@ -608,6 +740,8 @@ def test_chat_uses_llm_summary_when_available(workspace_tmp_path, monkeypatch):
     assert body["status"] == "PASS"
     assert body["response"].startswith("No.")
     assert body["citations"] == ["NASA-STD-5009C section Table V Note 6 (p. 42)"]
+    assert "Citations:" not in body["response"]
+    assert "Next moves:" not in body["response"]
     assert body["stage_artifacts"]["summary"]["llm_model"] == "summarizer"
 
 

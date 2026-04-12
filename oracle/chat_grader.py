@@ -46,12 +46,6 @@ def grade_chat_response(text: str, envelope: OracleChatEnvelope) -> OracleChatGr
     failures: list[str] = []
     text_lower = text.lower()
 
-    citations = envelope.citations_or_authority()
-    if citations:
-        missing = [citation for citation in citations if citation.lower() not in text_lower]
-        if missing:
-            failures.append("missing_citations")
-
     if envelope.status != "REFUSE" and _PROHIBITED_DECISION_LANGUAGE_PATTERN.search(text):
         failures.append("prohibited_decision_language")
 

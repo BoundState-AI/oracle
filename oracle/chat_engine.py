@@ -34,6 +34,19 @@ LOGGER = logging.getLogger("oracle.chat")
 # "Sn compatibility" meaning tin.
 _TOKEN_ALIASES = {
     "sn": "tin",
+    "cd": "cadmium",
+}
+
+_MATERIAL_QUERY_TERMS = frozenset(
+    {
+        "tin",
+        "cadmium",
+        "lead",
+        "zinc",
+    }
+)
+_QUERY_TERM_EXPANSIONS = {
+    "spaceflight": {"space", "flight"},
 }
 
 # ---------------------------------------------------------------------------
@@ -98,6 +111,7 @@ _STOP_WORDS = {
     "what",
     "which",
     "with",
+    "why",
     "finish",
     "finishes",
 }
@@ -167,6 +181,10 @@ _COMPARE_PATTERN = re.compile(r"\b(?:compare|comparison|versus|vs\.?)\b", re.IGN
 # ---------------------------------------------------------------------------
 _ACTION_QUERY_PATTERN = re.compile(
     r"\b(?:what (?:do|should) (?:i|we) do|what to do|what now|how (?:do|should) (?:i|we)|next steps?|do about it|handle it)\b",
+    re.IGNORECASE,
+)
+_WHY_QUERY_PATTERN = re.compile(
+    r"\b(?:why|how come|what(?:'s| is) the reason)\b",
     re.IGNORECASE,
 )
 _PURE_TIN_QUERY_PATTERN = re.compile(r"\bpure\s+(?:tin|sn)\b", re.IGNORECASE)
@@ -534,6 +552,8 @@ def _slug_terms(value: str) -> tuple[str, ...]:
 
 def _query_terms(raw_query: str) -> set[str]:
     terms = set(_tokenize(raw_query))
+    for term in list(terms):
+        terms.update(_QUERY_TERM_EXPANSIONS.get(term, set()))
     if _FUNDING_PATTERN.search(raw_query):
         terms.update({"fund", "funding", "cost", "budget", "cwbs", "psid"})
     if _SCOPE_PATTERN.search(raw_query):
@@ -541,6 +561,10 @@ def _query_terms(raw_query: str) -> set[str]:
     if _COMPLIANCE_RISK_PATTERN.search(raw_query):
         terms.update({"violate", "prohibit", "mandatory", "must", "required"})
     return terms
+
+
+def _query_material_terms(raw_query: str) -> set[str]:
+    return {term for term in _query_terms(raw_query) if term in _MATERIAL_QUERY_TERMS}
 
 
 def _phrase_score(query_terms: set[str], phrase: str) -> int:
@@ -583,6 +607,10 @@ def _is_yes_no_query(query: str) -> bool:
 
 def _is_action_query(query: str) -> bool:
     return bool(_ACTION_QUERY_PATTERN.search(query))
+
+
+def _is_why_query(query: str) -> bool:
+    return bool(_WHY_QUERY_PATTERN.search(query))
 
 
 def _is_clause_lookup_query(query: str) -> bool:
@@ -738,6 +766,7 @@ def _citation(rule: ChatRule) -> str:
 
 def _rank_rules(raw_query: str, rules: tuple[ChatRule, ...]) -> list[tuple[ChatRule, int]]:
     query_tokens = _query_terms(raw_query)
+    material_terms = _query_material_terms(raw_query)
     section_match = _SECTION_PATTERN.search(raw_query)
     table_note_match = _TABLE_NOTE_PATTERN.search(raw_query)
     ranked: list[tuple[ChatRule, int]] = []
@@ -753,7 +782,10 @@ def _rank_rules(raw_query: str, rules: tuple[ChatRule, ...]) -> list[tuple[ChatR
             *rule.keywords,
             *rule.applies_to,
         ]
-        haystack_tokens = query_tokens.intersection(set(_tokenize(" ".join(searchable_parts))))
+        rule_tokens = set(_tokenize(" ".join(searchable_parts)))
+        if material_terms and not material_terms.intersection(rule_tokens):
+            continue
+        haystack_tokens = query_tokens.intersection(rule_tokens)
         score = len(haystack_tokens) * 3
         score += _phrase_score(query_tokens, rule.subject)
         score += _phrase_score(query_tokens, rule.requirement)
@@ -828,9 +860,27 @@ def _dedupe_rules(matches: list[tuple[ChatRule, int]], limit: int) -> list[tuple
 
 
 def _summarize_rule(rule: ChatRule) -> str:
-    if rule.requirement:
-        return rule.requirement.rstrip(".") + "."
-    return rule.statement_text.rstrip(".") + "."
+    requirement = _normalize_space(rule.requirement)
+    statement = _normalize_space(rule.statement_text)
+    if not requirement:
+        return statement.rstrip(".") + "."
+
+    requirement_tokens = _tokenize(requirement)
+    if len(requirement_tokens) < 4 or re.match(r"^(?:not\s+be|be)\b", requirement, re.IGNORECASE):
+        if statement:
+            return statement.rstrip(".") + "."
+
+    if statement and rule.subject and rule.subject.lower() not in requirement.lower():
+        if "because" in statement.lower() or "due to" in statement.lower():
+            return statement.rstrip(".") + "."
+        if re.match(
+            r"^(?:shall|must|should|may|can|cannot|must not|shall not)\b",
+            requirement,
+            re.IGNORECASE,
+        ):
+            return f"{rule.subject} {requirement.rstrip('.')}" + "."
+
+    return requirement.rstrip(".") + "."
 
 
 def _rule_topic(rule: ChatRule) -> str:
@@ -893,6 +943,14 @@ def _topic_answer_sentence(query: str, pack: ChatPack, top_matches: list[tuple[C
             f"{pack.standard_id} routes this kind of scope-and-funding change into formal change control. "
             f"Lead requirement: {lead_summary}"
         )
+    if _is_why_query(query):
+        if ("because" in lead_rule.statement_text.lower()) or ("due to" in lead_rule.statement_text.lower()):
+            lead_summary = _normalize_space(lead_rule.statement_text).rstrip(".") + "."
+        if stance == "prohibits":
+            return f"No. {lead_summary}"
+        if stance == "allows":
+            return f"Yes, within the cited limits. {lead_summary}"
+        return f"The cited reason in {pack.standard_id} is: {lead_summary}"
     if _is_yes_no_query(query):
         if stance == "prohibits":
             return f"No. {lead_summary}"
@@ -912,15 +970,6 @@ def _render_pure_tin_guidance(
     top_matches: list[tuple[ChatRule, int]],
 ) -> str:
     pure_tin_matches = [(rule, score) for rule, score in top_matches if _is_pure_tin_rule(rule)]
-    citations: list[str] = []
-    seen_citations: set[str] = set()
-
-    def add_citation(rule: ChatRule) -> str:
-        citation = _citation(rule)
-        if citation not in seen_citations:
-            seen_citations.add(citation)
-            citations.append(citation)
-        return citation
 
     prohibition_match = _first_matching_rule(pure_tin_matches, lambda rule: _rule_stance(rule) == "prohibits")
     test_match = _first_matching_rule(
@@ -946,50 +995,36 @@ def _render_pure_tin_guidance(
     lines = [
         f"{pack.standard_id} treats pure tin as a hazard-avoidance issue, not a routine use-as-is condition.",
         "",
-        "What to do:",
+        "What to do next:",
     ]
 
     if prohibition_match:
-        rule = prohibition_match[0]
         lines.append(
-            f"- Check whether this part family or finish falls under a cited pure-tin prohibition. If it does, do not use it as-is. ({add_citation(rule)})"
+            "- Check whether this part family or finish falls under the pack's pure-tin prohibition. If it does, do not use it as-is."
         )
     if test_match:
-        rule = test_match[0]
         lines.append(
-            f"- If pure tin is not already precluded by the governing spec or control document, test internally and externally for pure tin. ({add_citation(rule)})"
+            "- If pure tin is not already precluded by the governing spec or control document, test internally and externally for pure tin."
         )
     if lot_test_match:
-        rule = lot_test_match[0]
         lines.append(
-            f"- For non-QPL/QML/QPD lots, the DPA samples also need internal and external pure-tin testing. ({add_citation(rule)})"
+            "- For non-QPL/QML/QPD lots, the DPA samples also need internal and external pure-tin testing."
         )
     if mitigation_match:
-        rule = mitigation_match[0]
         lines.append(
-            f"- If the finish fails the cited 3% lead threshold, follow the pack's mitigation path before use; the preferred path is solder dip, with the cited workmanship mitigation as the fallback. ({add_citation(rule)})"
+            "- If the finish fails the cited 3% lead threshold, follow the pack's mitigation path before use; the preferred path is solder dip, with the cited workmanship mitigation as the fallback."
         )
     elif lead_threshold_match:
-        rule = lead_threshold_match[0]
         lines.append(
-            f"- Confirm whether the finish meets the cited 3% lead threshold before treating it as usable. ({add_citation(rule)})"
+            "- Confirm whether the finish meets the cited 3% lead threshold before treating it as usable."
         )
-
-    if not citations:
-        for rule, _score in pure_tin_matches:
-            add_citation(rule)
 
     lines.extend(
         [
             "",
-            "Bottom line:",
             "Do not treat pure Sn as automatically usable. Use the cited clauses to determine whether the finish is prohibited outright, requires pure-tin testing, or needs documented mitigation before use.",
-            "",
-            "Citations:",
         ]
     )
-    for citation in citations:
-        lines.append(f"- {citation}")
     return "\n".join(lines).strip()
 
 
@@ -1003,37 +1038,26 @@ def _render_grounded_pack_answer(
     if _is_pure_tin_action_query(query) and len(pure_tin_matches) >= 2:
         return _render_pure_tin_guidance(pack=pack, top_matches=top_matches)
 
-    citations = [_citation(rule) for rule, _score in top_matches]
-    lines = [_topic_answer_sentence(query, pack, top_matches), ""]
-
-    lines.append("Why:")
-    for rule, _score in top_matches[:3]:
+    lines = [_topic_answer_sentence(query, pack, top_matches)]
+    related_summaries: list[str] = []
+    lead_summary = _summarize_rule(top_matches[0][0])
+    for rule, _score in top_matches[1:3]:
         summary = _summarize_rule(rule)
-        topic = _normalize_space(rule.subject)
-        detail = f"- {summary} ({_citation(rule)})"
-        if topic and topic.lower() not in summary.lower():
-            detail += f" Topic: {topic}."
-        lines.append(detail)
+        if summary != lead_summary and summary not in related_summaries:
+            related_summaries.append(summary)
 
-    lines.append("")
-    lines.append("Bottom line:")
+    if related_summaries:
+        lines.append("")
+        if len(related_summaries) == 1:
+            lines.append("Also relevant here:")
+        else:
+            lines.append("Two related clauses also matter here:")
+        for summary in related_summaries:
+            lines.append(f"- {summary}")
+
     if _is_scope_funding_query(query):
-        lines.append(
-            "Do not treat this as an informal scope insert. The cited clauses point you to formal TOCR/change-control handling with cost and funding data."
-        )
-    elif _is_yes_no_query(query):
-        lines.append(
-            "Use the cited clauses as the governing basis for the answer. If your facts differ from the matched topic, narrow the question by clause or section."
-        )
-    else:
-        lines.append(
-            "This is the grounded answer from the selected pack, not a final approval or waiver decision."
-        )
-
-    lines.append("")
-    lines.append("Citations:")
-    for citation in citations:
-        lines.append(f"- {citation}")
+        lines.append("")
+        lines.append("That points you into formal TOCR/change-control handling rather than an informal scope insert.")
     return "\n".join(lines).strip()
 
 
@@ -1057,10 +1081,6 @@ def _render_compare_answer(
         for rule, _score in matches[:2]:
             lines.append(f"- {_summarize_rule(rule)} ({_citation(rule)})")
         lines.append("")
-
-    lines.append(
-        "Use this to compare governing clauses. Oracle still does not issue final sign-off, certification, or waiver decisions."
-    )
     return "\n".join(lines).strip()
 
 
