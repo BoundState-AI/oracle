@@ -219,6 +219,42 @@ def test_chat_returns_grounded_clause_for_selected_pack(workspace_tmp_path, monk
     assert body["selected_packs"] == [slug]
 
 
+def test_chat_matches_pure_sn_shorthand_to_pure_tin_rule(workspace_tmp_path, monkeypatch):
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    server._chat_sessions.clear()
+
+    slug = _register_pack(
+        workspace_tmp_path,
+        pack_dir,
+        _chat_pack_payload(
+            standard_id="MSFC-STD-3012A",
+            standard_title="EEE Parts Management Requirements",
+            statement_text="Pure tin finishes shall be prohibited unless mitigation controls are documented.",
+            section="5.4.5",
+            page=77,
+            keywords=["pure tin", "mitigation controls"],
+        ),
+        "3012a_pure_tin.json",
+    )
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/oracle/chat",
+        json={
+            "message": "I have a part w pure Sn, what should i do",
+            "selected_packs": [slug],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "PASS"
+    assert "Pure tin finishes shall be prohibited unless mitigation controls are documented." in body["response"]
+    assert "MSFC-STD-3012A section 5.4.5 (p. 77)" in body["citations"][0]
+
+
 def test_chat_compare_only_uses_multiple_packs(workspace_tmp_path, monkeypatch):
     pack_dir = workspace_tmp_path / "packs"
     pack_dir.mkdir(parents=True, exist_ok=True)

@@ -20,6 +20,10 @@ from oracle.cli import load_pack as cli_load_pack
 
 LOGGER = logging.getLogger("oracle.chat")
 
+_TOKEN_ALIASES = {
+    "sn": "tin",
+}
+
 _STOP_WORDS = {
     "a",
     "about",
@@ -133,15 +137,16 @@ def _normalize_space(value: str | None) -> str:
 def _normalize_token(value: str) -> str:
     token = value.lower().strip("._-")
     if token.endswith("ies") and len(token) > 4:
-        return token[:-3] + "y"
-    if token.endswith("ing") and len(token) > 5:
-        return token[:-3]
-    if token.endswith("ed") and len(token) > 4:
-        return token[:-2]
-    if token.endswith("es") and len(token) > 4:
-        return token[:-2]
-    if token.endswith("s") and len(token) > 3:
-        return token[:-1]
+        token = token[:-3] + "y"
+    elif token.endswith("ing") and len(token) > 5:
+        token = token[:-3]
+    elif token.endswith("ed") and len(token) > 4:
+        token = token[:-2]
+    elif token.endswith("es") and len(token) > 4:
+        token = token[:-2]
+    elif token.endswith("s") and len(token) > 3:
+        token = token[:-1]
+    token = _TOKEN_ALIASES.get(token, token)
     return token
 
 
