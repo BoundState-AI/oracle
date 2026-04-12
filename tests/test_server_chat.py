@@ -94,6 +94,21 @@ def _register_pack(workspace_tmp_path, pack_dir, payload: dict, filename: str) -
     return register_pack(source, pack_dir)
 
 
+def _write_secondary_rationale_corpus(workspace_tmp_path, statements: list[dict[str, Any]]) -> str:
+    path = workspace_tmp_path / "secondary_rationale.json"
+    path.write_text(
+        json.dumps(
+            {
+                "standard_id": "NASA-STD-6016C",
+                "source_file": "NASA-STD-6016C.pdf",
+                "statements": statements,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return str(path)
+
+
 def test_chat_requires_selected_pack(workspace_tmp_path, monkeypatch):
     pack_dir = workspace_tmp_path / "packs"
     pack_dir.mkdir(parents=True, exist_ok=True)
@@ -348,6 +363,7 @@ def test_chat_expands_cd_alias_and_prefers_spaceflight_prohibition_reason(worksp
     pack_dir = workspace_tmp_path / "packs"
     pack_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    monkeypatch.setenv("ORACLE_SECONDARY_RATIONALE_JSON", "")
     server._chat_sessions.clear()
 
     slug = _register_pack(
@@ -423,6 +439,7 @@ def test_chat_returns_insufficient_data_when_cadmium_topic_has_no_cadmium_rule(w
     pack_dir = workspace_tmp_path / "packs"
     pack_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    monkeypatch.setenv("ORACLE_SECONDARY_RATIONALE_JSON", "")
     server._chat_sessions.clear()
 
     slug = _register_pack(
@@ -480,6 +497,7 @@ def test_chat_uses_rule_justification_for_why_queries(workspace_tmp_path, monkey
     pack_dir = workspace_tmp_path / "packs"
     pack_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    monkeypatch.setenv("ORACLE_SECONDARY_RATIONALE_JSON", "")
     server._chat_sessions.clear()
 
     slug = _register_pack(
@@ -541,6 +559,7 @@ def test_chat_says_when_selected_pack_only_contains_bare_prohibition(workspace_t
     pack_dir = workspace_tmp_path / "packs"
     pack_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    monkeypatch.setenv("ORACLE_SECONDARY_RATIONALE_JSON", "")
     server._chat_sessions.clear()
 
     slug = _register_pack(
@@ -608,6 +627,116 @@ def test_chat_says_when_selected_pack_only_contains_bare_prohibition(workspace_t
     assert "do not state the technical rationale" in body["response"]
     assert "The cited rationale is:" not in body["response"]
     assert any(citation == "MSFC-STD-3012A section 14/ (p. 50)" for citation in body["citations"])
+
+
+def test_chat_adds_secondary_rationale_and_scope_note_for_broad_cadmium_why_query(
+    workspace_tmp_path,
+    monkeypatch,
+):
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    monkeypatch.setenv(
+        "ORACLE_SECONDARY_RATIONALE_JSON",
+        _write_secondary_rationale_corpus(
+            workspace_tmp_path,
+            statements=[
+                {
+                    "statement_text": (
+                        "All cleaning fluids used during titanium processing shall be verified "
+                        "to be compatible before use."
+                    ),
+                    "justification": (
+                        "Mercury, cadmium, silver, and gold can cause liquid-metal-induced "
+                        "embrittlement of titanium alloys."
+                    ),
+                    "section": "4.2.2.3.1",
+                    "page": 41,
+                    "keywords": ["titanium", "cadmium", "processing"],
+                    "applies_to": ["mission_critical"],
+                },
+                {
+                    "statement_text": "Cadmium shall not be used in crew or vacuum environments.",
+                    "justification": (
+                        "Cadmium is highly toxic, can sublime and cause outgassing contamination "
+                        "at elevated temperatures in vacuum, and can cause liquid metal embrittlement."
+                    ),
+                    "section": "4.2.2.6.a",
+                    "page": 43,
+                    "keywords": ["cadmium", "vacuum", "outgassing"],
+                    "applies_to": ["contamination_control"],
+                },
+            ],
+        ),
+    )
+    server._chat_sessions.clear()
+
+    slug = _register_pack(
+        workspace_tmp_path,
+        pack_dir,
+        _chat_multi_rule_pack_payload(
+            standard_id="MSFC-STD-3012A",
+            standard_title="EEE Parts Management Requirements",
+            rules=[
+                {
+                    "rule_id": "RULE-001",
+                    "section": "14/",
+                    "page": 50,
+                    "obligation_type": "prohibition",
+                    "obligation_keyword": "must not",
+                    "statement_text": (
+                        "Cadmium, zinc, or anodized plated connectors and connector accessories "
+                        "must not be used in space flight applications."
+                    ),
+                    "subject": "Connector accessory finish restriction",
+                    "requirement": (
+                        "Cadmium, zinc, or anodized plated connectors and connector accessories "
+                        "must not be used in space flight applications."
+                    ),
+                    "keywords": ["cadmium plated parts", "connector accessories", "space flight applications"],
+                    "applies_to": ["spaceflight hardware"],
+                },
+                {
+                    "rule_id": "RULE-002",
+                    "section": "7/",
+                    "page": 77,
+                    "obligation_type": "prohibition",
+                    "obligation_keyword": "shall not",
+                    "statement_text": (
+                        "Cadmium, zinc, or anodized plated connectors and connector accessories "
+                        "shall not be used in space flight."
+                    ),
+                    "subject": "Connector accessory finish restriction",
+                    "requirement": (
+                        "Cadmium, zinc, or anodized plated connectors and connector accessories "
+                        "shall not be used in space flight."
+                    ),
+                    "keywords": ["cadmium plated parts", "connector accessories", "space flight"],
+                    "applies_to": ["spaceflight hardware"],
+                },
+            ],
+        ),
+        "3012a_cadmium_scope.json",
+    )
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/oracle/chat",
+        json={
+            "message": "why can't we use cd in spaceflight applications",
+            "selected_packs": [slug],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "PASS"
+    assert "do not state the technical rationale" in body["response"]
+    assert "Scope note: The retrieved MSFC-STD-3012A clauses here are specific to connectors" in body["response"]
+    assert "they do not establish a blanket ban on all cadmium uses." in body["response"]
+    assert "Related engineering rationale from NASA-STD-6016C:" in body["response"]
+    assert "Cadmium is highly toxic, can sublime and cause outgassing contamination" in body["response"]
+    assert "NASA-STD-6016C section 4.2.2.6.a (p. 43)" in body["citations"]
 
 
 def test_chat_compare_only_uses_multiple_packs(workspace_tmp_path, monkeypatch):

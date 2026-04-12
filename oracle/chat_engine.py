@@ -20,6 +20,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, is_dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +83,38 @@ _RATIONALE_SIGNAL_TOKENS = frozenset(
         "vacuum",
         "red",
         "plague",
+    }
+)
+
+# WHY this path: Oracle lives in the product repo, but the approved secondary
+# engineering-rationale corpus is maintained in the shared BoundState docs tree.
+# Oracle only uses this corpus after a governing pack match already exists, so
+# the cross-repo lookup broadens explanation coverage without changing the
+# primary authority source.
+_DEFAULT_SECONDARY_RATIONALE_JSON = (
+    Path(__file__).resolve().parents[2] / "docs" / "shall_test_v2" / "6016 rev c_shall_statements.json"
+)
+
+# WHY these terms: they identify connector-specific clauses that should not be
+# presented as blanket material bans when the user asks a broader "can we use
+# cadmium?" question.
+_CONNECTOR_SCOPE_TERMS = frozenset(
+    {
+        "connector",
+        "connectors",
+        "accessory",
+        "accessories",
+        "backshell",
+        "backshells",
+        "contact",
+        "contacts",
+        "jackscrew",
+        "jackscrews",
+        "cap",
+        "caps",
+        "jam",
+        "nut",
+        "nuts",
     }
 )
 
@@ -700,6 +733,18 @@ class ChatPack:
     rules: tuple[ChatRule, ...]
 
 
+@dataclass(frozen=True)
+class SecondaryRationale:
+    standard_id: str
+    standard_title: str
+    section: str
+    page: int | None
+    statement_text: str
+    justification: str
+    keywords: tuple[str, ...]
+    applies_to: tuple[str, ...]
+
+
 def load_chat_pack(pack_name: str, pack_dir: Path) -> ChatPack:
     pack_data, resolved = cli_load_pack(pack_name, pack_dir)
     schema_version = str(pack_data.get("schema_version") or "")
@@ -798,10 +843,81 @@ def load_chat_pack(pack_name: str, pack_dir: Path) -> ChatPack:
     )
 
 
+def _secondary_rationale_corpus_path() -> Path | None:
+    """Return the configured secondary rationale corpus path, if enabled.
+
+    WHY: tests and deployments need an explicit way to disable or override the
+    shared rationale corpus so Oracle behavior stays deterministic per
+    environment. A blank env var means "disable secondary rationale."
+    """
+    configured = os.environ.get("ORACLE_SECONDARY_RATIONALE_JSON")
+    if configured is not None:
+        configured_path = _normalize_space(configured)
+        return Path(configured_path).expanduser() if configured_path else None
+    if _DEFAULT_SECONDARY_RATIONALE_JSON.is_file():
+        return _DEFAULT_SECONDARY_RATIONALE_JSON
+    return None
+
+
+@lru_cache(maxsize=8)
+def _load_secondary_rationale_entries(path_text: str) -> tuple[SecondaryRationale, ...]:
+    path = Path(path_text)
+    if not path.is_file():
+        return ()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        LOGGER.warning("Failed to load secondary rationale corpus from %s: %s", path, exc)
+        return ()
+
+    statements = payload.get("statements", []) if isinstance(payload, dict) else []
+    standard_id = _normalize_space(payload.get("standard_id")) if isinstance(payload, dict) else ""
+    source_file = _normalize_space(payload.get("source_file")) if isinstance(payload, dict) else ""
+    standard_id = standard_id or "NASA-STD-6016C"
+    standard_title = source_file or standard_id
+    entries: list[SecondaryRationale] = []
+
+    for item in statements:
+        if not isinstance(item, dict):
+            continue
+        statement_text = _normalize_space(item.get("statement_text"))
+        justification = _normalize_space(item.get("justification"))
+        if not statement_text:
+            continue
+        if not justification and not _has_inline_rationale(statement_text):
+            continue
+        entries.append(
+            SecondaryRationale(
+                standard_id=standard_id,
+                standard_title=standard_title,
+                section=_normalize_space(item.get("section")),
+                page=_coerce_page(item.get("page")),
+                statement_text=statement_text,
+                justification=justification,
+                keywords=tuple(_as_str_list(item.get("keywords"))),
+                applies_to=tuple(_as_str_list(item.get("applies_to"))),
+            )
+        )
+    return tuple(entries)
+
+
+def _secondary_rationale_entries() -> tuple[SecondaryRationale, ...]:
+    path = _secondary_rationale_corpus_path()
+    if path is None:
+        return ()
+    return _load_secondary_rationale_entries(str(path))
+
+
 def _citation(rule: ChatRule) -> str:
     section = f" section {rule.section}" if rule.section else ""
     page = f" (p. {rule.page})" if rule.page else ""
     return f"{rule.standard_id}{section}{page}"
+
+
+def _secondary_rationale_citation(entry: SecondaryRationale) -> str:
+    section = f" section {entry.section}" if entry.section else ""
+    page = f" (p. {entry.page})" if entry.page else ""
+    return f"{entry.standard_id}{section}{page}"
 
 
 def _rank_rules(raw_query: str, rules: tuple[ChatRule, ...]) -> list[tuple[ChatRule, int]]:
@@ -1039,6 +1155,159 @@ def _rule_has_rationale(rule: ChatRule) -> bool:
     return bool(_rule_rationale(rule))
 
 
+def _secondary_rationale_text(entry: SecondaryRationale) -> str:
+    text = entry.justification or entry.statement_text
+    return _normalized_sentence(text)
+
+
+def _score_secondary_rationale(query: str, lead_rule: ChatRule, entry: SecondaryRationale) -> int:
+    query_terms = _query_terms(query)
+    material_terms = _query_material_terms(query)
+    statement_terms = set(_tokenize(entry.statement_text))
+    anchor_terms = statement_terms.union(set(_tokenize(" ".join([*entry.keywords, *entry.applies_to]))))
+    if material_terms and not material_terms.intersection(anchor_terms):
+        return 0
+
+    focus_terms = query_terms.union(set(_tokenize(" ".join([lead_rule.subject, lead_rule.statement_text]))))
+    full_text = " ".join([entry.statement_text, entry.justification, *entry.keywords, *entry.applies_to])
+    full_terms = set(_tokenize(full_text))
+    score = len(focus_terms.intersection(full_terms)) * 2
+    score += _phrase_score(material_terms or query_terms, entry.statement_text)
+    score += _phrase_score(material_terms or query_terms, entry.justification)
+    if material_terms.intersection(statement_terms):
+        score += 4
+    if any(marker in entry.statement_text.lower() for marker in ("shall not", "must not")):
+        score += 2
+    if set(_tokenize(entry.justification)).intersection(_RATIONALE_SIGNAL_TOKENS):
+        score += 4
+    return score
+
+
+def _retrieve_secondary_rationale(query: str, lead_rule: ChatRule) -> SecondaryRationale | None:
+    best_entry: SecondaryRationale | None = None
+    best_score = 0
+    for entry in _secondary_rationale_entries():
+        score = _score_secondary_rationale(query, lead_rule, entry)
+        if score > best_score:
+            best_entry = entry
+            best_score = score
+    # WHY 8: a single material hit is not enough to cite a cross-standard
+    # rationale. Oracle only uses secondary rationale when the match includes
+    # the material anchor plus additional phrase or signal support.
+    return best_entry if best_score >= 8 else None
+
+
+def _material_scope_label(material_terms: set[str]) -> str:
+    ordered = sorted(material_terms)
+    if not ordered:
+        return "the broader material topic"
+    if len(ordered) == 1:
+        return f"all {ordered[0]} uses"
+    return "all uses of " + ", ".join(ordered[:-1]) + f", and {ordered[-1]}"
+
+
+def _scope_note(query: str, pack: ChatPack, lead_rule: ChatRule) -> str:
+    query_terms = _query_terms(query)
+    if query_terms.intersection(_CONNECTOR_SCOPE_TERMS):
+        return ""
+    rule_terms = set(
+        _tokenize(" ".join([lead_rule.statement_text, lead_rule.subject, *lead_rule.keywords, *lead_rule.applies_to]))
+    )
+    if not rule_terms.intersection(_CONNECTOR_SCOPE_TERMS):
+        return ""
+    material_label = _material_scope_label(_query_material_terms(query))
+    return (
+        f"The retrieved {pack.standard_id} clauses here are specific to connectors and connector accessories; "
+        f"they do not establish a blanket ban on {material_label}."
+    )
+
+
+def _build_why_context(query: str, pack: ChatPack, top_matches: list[tuple[ChatRule, int]]) -> dict[str, Any]:
+    if not _is_why_query(query) or not top_matches:
+        return {}
+
+    lead_rule = top_matches[0][0]
+    context: dict[str, Any] = {}
+    scope_note = _scope_note(query, pack, lead_rule)
+    if scope_note:
+        context["scope_note"] = scope_note
+
+    if any(_rule_has_rationale(rule) for rule, _score in top_matches):
+        return context
+
+    secondary = _retrieve_secondary_rationale(query, lead_rule)
+    if secondary is None:
+        return context
+
+    context["secondary_rationale"] = {
+        "standard_id": secondary.standard_id,
+        "standard_title": secondary.standard_title,
+        "section": secondary.section,
+        "page": secondary.page,
+        "statement_text": secondary.statement_text,
+        "justification": secondary.justification,
+        "display_citation": _secondary_rationale_citation(secondary),
+    }
+    return context
+
+
+def _append_why_context_lines(lines: list[str], why_context: dict[str, Any] | None) -> None:
+    if not why_context:
+        return
+
+    scope_note = _normalize_space(why_context.get("scope_note"))
+    if scope_note:
+        lines.extend(["", f"Scope note: {scope_note}"])
+
+    secondary = why_context.get("secondary_rationale")
+    if not isinstance(secondary, dict):
+        return
+    rationale_text = _secondary_rationale_text(_secondary_rationale_from_context(secondary))
+    standard_id = _normalize_space(secondary.get("standard_id"))
+    if rationale_text and standard_id:
+        lines.extend(["", f"Related engineering rationale from {standard_id}: {rationale_text}"])
+
+
+def _append_why_context_evidence(
+    citations: list[str],
+    evidence: list[OracleEvidenceItem],
+    why_context: dict[str, Any] | None,
+) -> None:
+    if not why_context:
+        return
+    secondary = why_context.get("secondary_rationale")
+    if not isinstance(secondary, dict):
+        return
+
+    citation = _normalize_space(secondary.get("display_citation"))
+    if not citation or citation in citations:
+        return
+
+    citations.append(citation)
+    summary = _secondary_rationale_text(_secondary_rationale_from_context(secondary))
+    evidence.append(
+        OracleEvidenceItem(
+            citation=citation,
+            summary=f"Related engineering rationale: {summary}" if summary else "",
+            statement_text=_normalize_space(secondary.get("statement_text")),
+            standard_id=_normalize_space(secondary.get("standard_id")),
+        )
+    )
+
+
+def _secondary_rationale_from_context(payload: dict[str, Any]) -> SecondaryRationale:
+    return SecondaryRationale(
+        standard_id=_normalize_space(payload.get("standard_id")),
+        standard_title=_normalize_space(payload.get("standard_title")),
+        section=_normalize_space(payload.get("section")),
+        page=_coerce_page(payload.get("page")),
+        statement_text=_normalize_space(payload.get("statement_text")),
+        justification=_normalize_space(payload.get("justification")),
+        keywords=tuple(_as_str_list(payload.get("keywords"))),
+        applies_to=tuple(_as_str_list(payload.get("applies_to"))),
+    )
+
+
 def _is_pure_tin_rule(rule: ChatRule) -> bool:
     text = _rule_text(rule)
     return (
@@ -1186,12 +1455,14 @@ def _render_grounded_pack_answer(
     query: str,
     pack: ChatPack,
     top_matches: list[tuple[ChatRule, int]],
+    why_context: dict[str, Any] | None = None,
 ) -> str:
     pure_tin_matches = [(rule, score) for rule, score in top_matches if _is_pure_tin_rule(rule)]
     if _is_pure_tin_action_query(query) and len(pure_tin_matches) >= 2:
         return _render_pure_tin_guidance(pack=pack, top_matches=top_matches)
 
     lines = [_topic_answer_sentence(query, pack, top_matches)]
+    _append_why_context_lines(lines, why_context)
     related_summaries: list[str] = []
     lead_summary = _summarize_rule(top_matches[0][0])
     for rule, _score in top_matches[1:3]:
@@ -2048,6 +2319,7 @@ def _build_single_pack_synthesis(
     pack: ChatPack,
     matches: list[tuple[ChatRule, int]],
     *,
+    why_context: dict[str, Any] | None = None,
     evidence_assessment: str | None = None,
     diagnostics: dict[str, Any] | None = None,
     stage_artifacts: dict[str, Any] | None = None,
@@ -2055,10 +2327,20 @@ def _build_single_pack_synthesis(
     pure_tin_action = _is_pure_tin_action_query(query)
     top_matches = _dedupe_rules(matches, 5 if pure_tin_action or _is_why_query(query) else 3)
     citations = [_citation(rule) for rule, _score in top_matches]
+    evidence = [_evidence_item(rule=rule, score=score) for rule, score in top_matches]
+    _append_why_context_evidence(citations, evidence, why_context)
     if pure_tin_action and len([rule for rule, _score in top_matches if _is_pure_tin_rule(rule)]) >= 2:
         follow_ups = [
             f"Show me the pure tin avoidance clause in {pack.standard_id}.",
             f"List the test and mitigation steps for pure tin under {pack.standard_id}.",
+        ]
+    elif why_context and _normalize_space((why_context.get("secondary_rationale") or {}).get("display_citation")):
+        follow_ups = [
+            f"Show me the exact clause text for {citations[0]}.",
+            (
+                "Show me the related engineering rationale from "
+                f"{_normalize_space((why_context.get('secondary_rationale') or {}).get('display_citation'))}."
+            ),
         ]
     else:
         follow_ups = [
@@ -2075,12 +2357,13 @@ def _build_single_pack_synthesis(
             review_only=False,
             authority_basis=[pack.standard_id],
             citations=citations,
-            evidence=[_evidence_item(rule=rule, score=score) for rule, score in top_matches],
+            evidence=evidence,
             follow_ups=follow_ups,
             draft_answer_text=_render_grounded_pack_answer(
                 query=query,
                 pack=pack,
                 top_matches=top_matches,
+                why_context=why_context,
             ),
             evidence_assessment=evidence_assessment,
             diagnostics=diagnostics or {},
@@ -2233,7 +2516,7 @@ def _build_llm_guided_answer(
                 if item.get("standard_id") and item.get("finding"):
                     response_lines.append(f"- {item['standard_id']}: {item['finding']}")
 
-    citations = llm_summary["citations"] if llm_summary else llm_reasoning["governing_citations"]
+    citations = list(llm_summary["citations"] if llm_summary else llm_reasoning["governing_citations"])
     follow_ups = (
         llm_summary["follow_ups"]
         if llm_summary and llm_summary.get("follow_ups")
@@ -2241,6 +2524,7 @@ def _build_llm_guided_answer(
     )
     evidence: list[OracleEvidenceItem] = []
     retrieval = (stage_artifacts or {}).get("retrieval", {})
+    why_context = retrieval.get("why_context") if isinstance(retrieval, dict) else None
     match_groups = retrieval.get("matches_by_pack") or []
     for group in match_groups:
         for item in group.get("matches", [])[:2]:
@@ -2254,6 +2538,13 @@ def _build_llm_guided_answer(
                     score=item.get("score"),
                 )
             )
+    _append_why_context_evidence(citations, evidence, why_context)
+
+    draft_answer = "\n".join(line for line in response_lines if line is not None).strip()
+    if why_context:
+        draft_lines = [draft_answer] if draft_answer else []
+        _append_why_context_lines(draft_lines, why_context)
+        draft_answer = "\n".join(draft_lines).strip()
 
     return _emit_envelope(
         OracleChatEnvelope(
@@ -2267,7 +2558,7 @@ def _build_llm_guided_answer(
             citations=citations,
             evidence=evidence,
             follow_ups=follow_ups,
-            draft_answer_text="\n".join(line for line in response_lines if line is not None).strip(),
+            draft_answer_text=draft_answer,
             evidence_assessment=evidence_assessment,
             diagnostics=diagnostics or {},
             stage_artifacts=stage_artifacts or {},
@@ -2475,6 +2766,9 @@ def answer_query(
 
     pack = reasoning["pack"]
     top_matches = reasoning["top_matches"]
+    why_context = _build_why_context(query, pack, top_matches)
+    if why_context:
+        stage_artifacts["retrieval"]["why_context"] = why_context
     if gatekeeper["intent"] == "clause_lookup":
         return _build_clause_lookup_answer(
             query,
@@ -2500,6 +2794,7 @@ def answer_query(
         query,
         pack,
         top_matches,
+        why_context=why_context,
         evidence_assessment=reasoning.get("evidence_assessment"),
         diagnostics=diagnostics,
         stage_artifacts=stage_artifacts,
