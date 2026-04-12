@@ -52,9 +52,9 @@ LOGGER = logging.getLogger(__name__)
 #   These are the canonical obligation verbs defined by NASA/DoD standards
 #   writing conventions (see NASA-STD-0005, MIL-STD-961E, IEEE 830):
 #
-#   "shall" / "must" / "is required" = MANDATORY — legally binding, must
+#   "shall" / "must" / "is required" / "are required" = MANDATORY — legally binding, must
 #     be verified.  These are the words that create enforceable requirements.
-#   "shall not" / "must not" / "is prohibited" / "may not" = PROHIBITION —
+#   "shall not" / "must not" / "is prohibited" / "are prohibited" / "may not" = PROHIBITION —
 #     explicitly forbidden actions.  Critical for safety: "shall not use
 #     Teflon in LOX service above 350 psi."
 #   "will" = INTENT — declaration of future action by the authoring body,
@@ -66,7 +66,7 @@ LOGGER = logging.getLogger(__name__)
 #   "may" = PERMISSION — explicitly grants latitude.  Without this tag,
 #     engineers may assume a permissive clause is mandatory.
 #
-# The multi-word forms ("shall not", "is required to") are listed before
+# The multi-word forms ("shall not", "are required to") are listed before
 # their single-word substrings so regex alternation matches the longest
 # form first (OBLIGATION_PATTERN uses these in longest-first order).
 #
@@ -82,10 +82,16 @@ OBLIGATION_KEYWORDS = {
     "shall not": "prohibition",
     "must": "mandatory",
     "must not": "prohibition",
+    "are required to": "mandatory",
+    "are required": "mandatory",
     "is required to": "mandatory",
     "is required": "mandatory",
+    "be required to": "mandatory",
+    "be required": "mandatory",
     "required": "mandatory",
+    "are prohibited": "prohibition",
     "is prohibited": "prohibition",
+    "be prohibited": "prohibition",
     "prohibited": "prohibition",
     "will": "intent",
     "should": "recommendation",
@@ -97,8 +103,8 @@ OBLIGATION_KEYWORDS = {
 OBLIGATION_PATTERN = re.compile(
     r"(?:^|(?<=\.\s)|(?<=\n))"
     r"([^.;\n]*?"
-    r"\b(shall not|shall|must not|must|is required to|is required|"
-    r"is prohibited|prohibited|should not|should|may not|may|will)\b"
+    r"\b(shall not|shall|must not|must|are required to|are required|is required to|is required|"
+    r"be required to|be required|are prohibited|is prohibited|be prohibited|prohibited|should not|should|may not|may|will)\b"
     r"[^.;\n]*)"
     r"[.;]?",
     re.IGNORECASE | re.MULTILINE,
@@ -551,9 +557,15 @@ STRONG_GENERIC_KEYWORDS = {
     "shall not",
     "must",
     "must not",
+    "are required to",
+    "are required",
     "is required to",
     "is required",
+    "be required to",
+    "be required",
+    "are prohibited",
     "is prohibited",
+    "be prohibited",
     "prohibited",
 }
 
@@ -667,8 +679,8 @@ def _extract_tagged_requirements(
                 carry_base_section = base_section
 
             kw_match = re.search(
-                r"\b(shall not|shall|must not|must|is required to|is required|"
-                r"required|is prohibited|prohibited)\b",
+                r"\b(shall not|shall|must not|must|are required to|are required|is required to|is required|"
+                r"be required to|be required|required|are prohibited|is prohibited|be prohibited|prohibited)\b",
                 full_text, re.IGNORECASE,
             )
             keyword = kw_match.group(0).lower() if kw_match else "shall"

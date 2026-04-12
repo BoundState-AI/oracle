@@ -426,9 +426,8 @@ def test_chat_expands_cd_alias_and_prefers_spaceflight_prohibition_reason(worksp
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "PASS"
-    assert body["response"].startswith(
-        "No. Cadmium plated parts must not be used in space flight applications because cadmium can contaminate nearby surfaces in vacuum."
-    )
+    assert body["response"].startswith("No.\nIn the selected MSFC-STD-3012A clauses, cadmium plated parts must not be used in space flight applications.")
+    assert "The clause itself gives the reason: cadmium can contaminate nearby surfaces in vacuum." in body["response"]
     assert body["citations"][0] == "MSFC-STD-3012A section 14/ (p. 50)"
     assert "shall be inspected for verification" in body["response"]
     assert "Citations:" not in body["response"]
@@ -549,8 +548,11 @@ def test_chat_uses_rule_justification_for_why_queries(workspace_tmp_path, monkey
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "PASS"
-    assert body["response"].startswith("No. Cadmium plated parts must not be used in space flight applications.")
-    assert "The cited rationale is: Cadmium can sublime in vacuum and contaminate nearby surfaces." in body["response"]
+    assert body["response"].startswith("No.\nIn the selected MSFC-STD-3012A clauses, cadmium plated parts must not be used in space flight applications.")
+    assert (
+        "The selected clause gives the technical reason directly: Cadmium can sublime in vacuum and contaminate nearby surfaces."
+        in body["response"]
+    )
     assert body["citations"][0] == "MSFC-STD-3012A section 14/ (p. 50)"
     assert body["diagnostics"]["fallback_used"] is False
 
@@ -624,7 +626,7 @@ def test_chat_says_when_selected_pack_only_contains_bare_prohibition(workspace_t
     body = response.json()
     assert body["status"] == "PASS"
     assert body["response"].startswith("No.")
-    assert "do not state the technical rationale" in body["response"]
+    assert "The selected MSFC-STD-3012A clauses do not explain why." in body["response"]
     assert "The cited rationale is:" not in body["response"]
     assert any(citation == "MSFC-STD-3012A section 14/ (p. 50)" for citation in body["citations"])
 
@@ -731,10 +733,13 @@ def test_chat_adds_secondary_rationale_and_scope_note_for_broad_cadmium_why_quer
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "PASS"
-    assert "do not state the technical rationale" in body["response"]
-    assert "Scope note: The retrieved MSFC-STD-3012A clauses here are specific to connectors" in body["response"]
+    assert body["response"].startswith(
+        "No.\nIn the selected MSFC-STD-3012A clauses, cadmium, zinc, or anodized plated connectors and connector accessories must not be used in space flight applications."
+    )
+    assert "Those MSFC-STD-3012A clauses are specific to connectors and connector accessories" in body["response"]
     assert "they do not establish a blanket ban on all cadmium uses." in body["response"]
-    assert "Related engineering rationale from NASA-STD-6016C:" in body["response"]
+    assert "The selected MSFC-STD-3012A clauses do not explain why." in body["response"]
+    assert "NASA-STD-6016C gives the technical reason:" in body["response"]
     assert "Cadmium is highly toxic, can sublime and cause outgassing contamination" in body["response"]
     assert "NASA-STD-6016C section 4.2.2.6.a (p. 43)" in body["citations"]
 

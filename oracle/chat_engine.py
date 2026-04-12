@@ -746,6 +746,22 @@ class SecondaryRationale:
     applies_to: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class WhyAnswerPlan:
+    """Structured plan for grounded why-answers before wording.
+
+    WHY: separating answer planning from surface wording keeps Oracle honest.
+    Each sentence slot maps to a specific evidence role: direct answer,
+    governing basis, scope qualifier, and technical reason. That makes the
+    final prose easier to read without relaxing grounding boundaries.
+    """
+
+    direct_answer: str
+    governing_basis: str
+    scope_note: str = ""
+    technical_reason: str = ""
+
+
 def load_chat_pack(pack_name: str, pack_dir: Path) -> ChatPack:
     pack_data, resolved = cli_load_pack(pack_name, pack_dir)
     schema_version = str(pack_data.get("schema_version") or "")
@@ -1218,7 +1234,7 @@ def _scope_note(query: str, pack: ChatPack, lead_rule: ChatRule) -> str:
         return ""
     material_label = _material_scope_label(_query_material_terms(query))
     return (
-        f"The retrieved {pack.standard_id} clauses here are specific to connectors and connector accessories; "
+        f"Those {pack.standard_id} clauses are specific to connectors and connector accessories, so "
         f"they do not establish a blanket ban on {material_label}."
     )
 
@@ -1307,6 +1323,151 @@ def _secondary_rationale_from_context(payload: dict[str, Any]) -> SecondaryRatio
         keywords=tuple(_as_str_list(payload.get("keywords"))),
         applies_to=tuple(_as_str_list(payload.get("applies_to"))),
     )
+
+
+def _sentence_with_prefix(prefix: str, sentence: str) -> str:
+    """Attach a natural-language prefix to a grounded sentence.
+
+    WHY: Oracle frequently needs to say "In the selected clauses..." before a
+    retrieved requirement. Lowercasing the first letter keeps the result reading
+    like prose rather than a pasted heading plus a capitalized fragment.
+    """
+
+    normalized = _normalized_sentence(sentence)
+    if not normalized:
+        return _normalize_space(prefix)
+    leading = normalized[0].lower() + normalized[1:] if normalized[:1].isalpha() else normalized
+    return f"{_normalize_space(prefix)} {leading}"
+
+
+def _split_inline_rationale_sentence(text: str) -> tuple[str, str]:
+    """Split a clause into governing text and inline rationale, if present.
+
+    WHY: when a standard says "must not ... because ...", the best operator
+    answer is two short grounded sentences rather than repeating the whole
+    clause verbatim. This preserves the source meaning while sounding human.
+    """
+
+    normalized = _normalized_sentence(text)
+    lowered = normalized.lower()
+    for marker in (" because ", " due to ", " since "):
+        marker_index = lowered.find(marker)
+        if marker_index == -1:
+            continue
+        governing_text = normalized[:marker_index].rstrip(" ,;:")
+        rationale_text = normalized[marker_index + len(marker) :].strip()
+        return _normalized_sentence(governing_text), _normalized_sentence(rationale_text)
+    return normalized, ""
+
+
+def _secondary_rationale_sentence(secondary: SecondaryRationale) -> str:
+    rationale_text = _secondary_rationale_text(secondary)
+    if not rationale_text:
+        return ""
+    return f"{secondary.standard_id} gives the technical reason: {rationale_text}"
+
+
+def _plan_why_answer(
+    query: str,
+    pack: ChatPack,
+    top_matches: list[tuple[ChatRule, int]],
+    why_context: dict[str, Any] | None,
+) -> WhyAnswerPlan:
+    lead_rule = top_matches[0][0]
+    lead_summary = _normalized_sentence(_summarize_rule(lead_rule))
+    stance = _rule_stance(lead_rule)
+    why_rule = next((rule for rule, _score in top_matches if _rule_has_rationale(rule)), lead_rule)
+    rationale = _rule_rationale(why_rule)
+    scope_note = _normalize_space((why_context or {}).get("scope_note"))
+    secondary_payload = (why_context or {}).get("secondary_rationale")
+    secondary_rationale = (
+        _secondary_rationale_from_context(secondary_payload)
+        if isinstance(secondary_payload, dict)
+        else None
+    )
+
+    direct_answer = (
+        "No."
+        if stance == "prohibits"
+        else "Yes, within the cited limits."
+        if stance == "allows"
+        else f"The selected {pack.standard_id} clauses do not give a simple yes-or-no answer."
+    )
+
+    if _has_inline_rationale(why_rule.statement_text):
+        governing_text, inline_reason = _split_inline_rationale_sentence(why_rule.statement_text)
+        technical_reason = (
+            f"The clause itself gives the reason: {inline_reason}"
+            if inline_reason
+            else "The clause itself gives the reason directly."
+        )
+        return WhyAnswerPlan(
+            direct_answer=direct_answer,
+            governing_basis=_sentence_with_prefix(f"In the selected {pack.standard_id} clauses,", governing_text),
+            scope_note=scope_note,
+            technical_reason=technical_reason,
+        )
+
+    if rationale:
+        return WhyAnswerPlan(
+            direct_answer=direct_answer,
+            governing_basis=_sentence_with_prefix(f"In the selected {pack.standard_id} clauses,", lead_summary),
+            scope_note=scope_note,
+            technical_reason=f"The selected clause gives the technical reason directly: {rationale}",
+        )
+
+    if secondary_rationale is not None:
+        return WhyAnswerPlan(
+            direct_answer=direct_answer,
+            governing_basis=_sentence_with_prefix(f"In the selected {pack.standard_id} clauses,", lead_summary),
+            scope_note=scope_note,
+            technical_reason=(
+                f"The selected {pack.standard_id} clauses do not explain why. "
+                f"{_secondary_rationale_sentence(secondary_rationale)}"
+            ),
+        )
+
+    fallback_reason = (
+        f"The selected {pack.standard_id} clauses do not explain why."
+        if stance in {"prohibits", "allows"}
+        else f"The selected {pack.standard_id} clauses do not state a separate technical reason."
+    )
+    return WhyAnswerPlan(
+        direct_answer=direct_answer,
+        governing_basis=_sentence_with_prefix(f"In the selected {pack.standard_id} clauses,", lead_summary),
+        scope_note=scope_note,
+        technical_reason=fallback_reason,
+    )
+
+
+def _render_why_answer(
+    *,
+    query: str,
+    pack: ChatPack,
+    top_matches: list[tuple[ChatRule, int]],
+    why_context: dict[str, Any] | None,
+) -> str:
+    plan = _plan_why_answer(query, pack, top_matches, why_context)
+    lines = [plan.direct_answer, plan.governing_basis]
+    if plan.scope_note:
+        lines.extend(["", plan.scope_note])
+    if plan.technical_reason:
+        lines.extend(["", plan.technical_reason])
+
+    related_summaries: list[str] = []
+    lead_summary = _summarize_rule(top_matches[0][0])
+    for rule, _score in top_matches[1:3]:
+        summary = _summarize_rule(rule)
+        if summary != lead_summary and summary not in related_summaries:
+            related_summaries.append(summary)
+
+    if related_summaries:
+        lines.append("")
+        lines.append("Also relevant here:")
+        for summary in related_summaries:
+            lines.append(f"- {summary}")
+
+    return "\n".join(lines).strip()
 
 
 def _is_pure_tin_rule(rule: ChatRule) -> bool:
@@ -1461,9 +1622,15 @@ def _render_grounded_pack_answer(
     pure_tin_matches = [(rule, score) for rule, score in top_matches if _is_pure_tin_rule(rule)]
     if _is_pure_tin_action_query(query) and len(pure_tin_matches) >= 2:
         return _render_pure_tin_guidance(pack=pack, top_matches=top_matches)
+    if _is_why_query(query):
+        return _render_why_answer(
+            query=query,
+            pack=pack,
+            top_matches=top_matches,
+            why_context=why_context,
+        )
 
     lines = [_topic_answer_sentence(query, pack, top_matches)]
-    _append_why_context_lines(lines, why_context)
     related_summaries: list[str] = []
     lead_summary = _summarize_rule(top_matches[0][0])
     for rule, _score in top_matches[1:3]:
@@ -1889,6 +2056,8 @@ def _llm_summary_system_prompt() -> str:
     return (
         "You are the Oracle summary stage. "
         "Convert the reasoning payload into concise operator guidance. "
+        "Write like a senior standards engineer explaining the answer to a capable non-expert. "
+        "Use plain language, short sentences, and normal prose instead of machine-report headings unless the caller is explicitly comparing standards. "
         "Lead with the direct answer or bottom line. "
         "Do not invent claims or citations. "
         "Return strict JSON with keys: answer_text, citations, follow_ups. "
