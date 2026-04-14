@@ -303,6 +303,16 @@ OPENAI_REVIEWER_MAX_TOKENS = int(
 BETH_COORDINATOR_MAX_TOKENS = int(
     os.environ.get("ORACLE_BETH_MAX_TOKENS", "64000")
 )
+# WHY 16384 for Sonnet: the referee's output is the union of
+# normalized_issues across every reviewer.  Round-1 reviews routinely
+# normalize 30+ issues with full metadata (rule_id, severity, sources,
+# matched canonical_signature) — easily 12K-15K characters of JSON.
+# 8K (the dataclass default) was leaving Sonnet exposed to truncation
+# on any review larger than ~20 findings.  16K gives 2x headroom; can
+# be tuned via env var if reviews exceed it.
+SONNET_REFEREE_MAX_TOKENS = int(
+    os.environ.get("ORACLE_SONNET_MAX_TOKENS", "16384")
+)
 # WHY "high": reviewers must reason carefully about compliance implications;
 # lower effort risks missed findings on nuanced regulatory language.
 OPENAI_REASONING_EFFORT = os.environ.get("ORACLE_OPENAI_REASONING_EFFORT", "high")
@@ -380,6 +390,7 @@ ORACLE_ROSTER: dict[str, OracleConfig] = {
         provider="anthropic",
         model=os.environ.get("ORACLE_SONNET_MODEL", "claude-sonnet-4-6"),
         system_prompt=SONNET_REFEREE_PROMPT,
+        max_tokens=SONNET_REFEREE_MAX_TOKENS,
     ),
 }
 
@@ -750,19 +761,86 @@ def _parse_json(text: str, oracle_name: str) -> dict:
         return _recover_truncated_json(text, oracle_name)
 
 
-def _recover_truncated_json(text: str, oracle_name: str) -> dict:
-    """Attempt to recover useful data from truncated Beth responses.
+def _recover_array_field(text: str, field_name: str) -> list | None:
+    """Walk a JSON array string and return as many well-formed top-level
+    elements as can be parsed before the first malformed / truncated one.
 
-    Beth's revised_draft field is often so large that the response
-    gets truncated mid-JSON. This extracts what we can:
-    1. Try to find revision_decisions before the truncation
-    2. Extract revised_draft content even if JSON is incomplete
+    Used when an oracle response either truncates mid-array or contains
+    a malformed element partway through.  Each top-level element is an
+    object (`{...}`); we balance braces to find element boundaries, then
+    `json.loads` each candidate independently.  An element that fails
+    to parse stops the walk — earlier well-formed elements are returned.
+
+    Returns None when the named array key is not present in the text.
+    Returns [] when the key is present but no element can be salvaged.
+    """
+    import re
+    match = re.search(rf'"{re.escape(field_name)}"\s*:\s*\[', text)
+    if match is None:
+        return None
+
+    pos = match.end()
+    elements: list = []
+    while pos < len(text):
+        # Skip whitespace and trailing commas between elements
+        while pos < len(text) and text[pos] in ' \t\n\r,':
+            pos += 1
+        if pos >= len(text) or text[pos] == ']':
+            break
+        if text[pos] != '{':
+            # Unexpected character — stop walk
+            break
+        # Find the balanced object starting at pos
+        depth = 0
+        in_string = False
+        escape_next = False
+        end = pos
+        for i in range(pos, len(text)):
+            ch = text[i]
+            if escape_next:
+                escape_next = False
+                continue
+            if ch == '\\':
+                escape_next = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        if depth != 0:
+            # Truncated mid-element — stop, return what we have
+            break
+        try:
+            elements.append(json.loads(text[pos:end]))
+        except json.JSONDecodeError:
+            # Malformed element — stop walk; downstream sees what was parseable
+            break
+        pos = end
+    return elements
+
+
+def _recover_truncated_json(text: str, oracle_name: str) -> dict:
+    """Best-effort partial-content recovery from a malformed JSON response.
+
+    Originally Beth-specific (for revised_draft truncation); now generic
+    so any oracle's expected top-level array (revised_draft,
+    revision_decisions, normalized_issues, findings) can be partially
+    salvaged.  A degraded round with N-1 findings is far less harmful
+    than a failed round with zero.
     """
     import re
 
     result: dict = {"oracle_name": oracle_name}
 
-    # Try to extract revised_draft as a raw string between markers
+    # --- Beth-specific recovery: revised_draft (a string field) ---
     draft_match = re.search(r'"revised_draft"\s*:\s*"', text)
     if draft_match:
         draft_start = draft_match.end()
@@ -777,13 +855,11 @@ def _recover_truncated_json(text: str, oracle_name: str) -> dict:
             pos += 1
         if pos < len(text):
             raw_draft = text[draft_start:pos]
-            # Unescape JSON string escapes
             try:
                 revised = json.loads(f'"{raw_draft}"')
                 result["revised_draft"] = revised
                 LOGGER.info(f"[{oracle_name}] Recovered revised_draft ({len(revised)} chars)")
             except Exception:
-                # Even raw is useful
                 result["revised_draft"] = raw_draft.replace("\\n", "\n").replace('\\"', '"')
                 LOGGER.info(f"[{oracle_name}] Recovered raw revised_draft ({len(raw_draft)} chars)")
         else:
@@ -792,32 +868,41 @@ def _recover_truncated_json(text: str, oracle_name: str) -> dict:
             result["revised_draft"] = raw_draft.replace("\\n", "\n").replace('\\"', '"')
             LOGGER.info(f"[{oracle_name}] Recovered truncated revised_draft ({len(raw_draft)} chars)")
 
-    # Try to extract revision_decisions array
-    decisions_match = re.search(r'"revision_decisions"\s*:\s*\[', text)
-    if decisions_match:
-        bracket_start = decisions_match.end() - 1
-        depth = 0
-        for i in range(bracket_start, len(text)):
-            if text[i] == '[':
-                depth += 1
-            elif text[i] == ']':
-                depth -= 1
-                if depth == 0:
-                    try:
-                        decisions = json.loads(text[bracket_start:i + 1])
-                        result["revision_decisions"] = decisions
-                    except Exception:
-                        pass
-                    break
+    # --- Generic array-field recovery (works for any oracle role) ---
+    # Try every known array key.  Whichever one(s) appear in the text
+    # get partially salvaged; missing keys get default empty lists.
+    for field in (
+        "revision_decisions",       # Beth (coordinator)
+        "revised_sections",         # Beth (coordinator)
+        "open_questions",           # Beth (coordinator)
+        "normalized_issues",        # Sonnet (referee)
+        "findings",                 # Fran / Codex / Grok (reviewers)
+    ):
+        recovered = _recover_array_field(text, field)
+        if recovered is not None:
+            result[field] = recovered
+            if recovered:
+                LOGGER.info(
+                    f"[{oracle_name}] Recovered {len(recovered)} element(s) "
+                    f"for {field!r} from malformed response"
+                )
 
-    # Defaults for missing fields
+    # Defaults for missing Beth-shape fields
     result.setdefault("revision_decisions", [])
     result.setdefault("revised_sections", [])
     result.setdefault("open_questions", [])
 
-    if "revised_draft" not in result:
-        LOGGER.error(f"[{oracle_name}] Could not recover any content from truncated response")
-        result["error"] = "Truncated JSON, no recoverable content"
+    # If nothing of substance was recovered, surface the parse failure
+    # so the retry loop kicks in.
+    has_content = (
+        "revised_draft" in result
+        or any(result.get(f) for f in (
+            "revision_decisions", "normalized_issues", "findings",
+        ))
+    )
+    if not has_content:
+        LOGGER.error(f"[{oracle_name}] Could not recover any content from malformed response")
+        result["error"] = "Malformed JSON, no recoverable content"
         result["raw"] = text[:2000]
 
     return result
