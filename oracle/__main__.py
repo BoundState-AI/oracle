@@ -1,4 +1,10 @@
-"""Allow running ORACLE as `python -m oracle`."""
+"""
+Module: oracle.__main__
+Purpose: Allow running ORACLE as ``python -m oracle``.
+
+BoundState AI 2026
+Classification: BoundState Proprietary
+"""
 
 from oracle.cli import main
 

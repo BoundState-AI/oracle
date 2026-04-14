@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""TOCR compliance engine — standalone scan and revision diff."""
+"""
+Module: TOCR Engine
+Purpose: TOCR compliance engine — standalone scan and revision diff.
+
+BoundState AI 2026
+Classification: BoundState Proprietary
+"""
 
 from sentinel.tocr.engine.diff_engine import DiffEngine
 from sentinel.tocr.engine.disclosure_engine import DisclosureEngine

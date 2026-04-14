@@ -10,6 +10,7 @@ Classification: BoundState Proprietary
 Spec: BS-SPEC-TOCR-001-REV1, Sections 4.3, 5, 9
 """
 
+__safety_critical__: bool = True
 __version__ = "1.0.0"
 
 import hashlib
@@ -18,6 +19,12 @@ import re
 from pathlib import Path
 from typing import Optional
 
+from sentinel.tocr.engine.shared import (
+    CONTRACT_STOPWORDS,
+    URGENCY_INDICATORS,
+    filter_applicable_rules,
+    trigger_matches,
+)
 from sentinel.tocr.models.config import ContractConfig
 from sentinel.tocr.models.diff import FieldChange, StructuralDiff
 from sentinel.tocr.models.enums import (
@@ -59,6 +66,19 @@ class ChangeContext:
 
     def _compute_signals(self) -> None:
         """Compute all trigger signals for this change context."""
+        self._compute_change_classification_signals()
+        self._compute_scope_signals()
+        self._compute_funding_signals()
+        self._compute_deliverable_signals()
+        self._compute_emergency_signals()
+        self._compute_quality_signals()
+        self._compute_skills_signals()
+        self._compute_process_signals()
+        self._compute_cost_signals()
+        self._compute_retroactive_signals()
+
+    def _compute_change_classification_signals(self) -> None:
+        """Compute signals from change materiality, disclosure, classification, and type."""
         c = self.change
 
         # Material change detection
@@ -93,6 +113,10 @@ class ChangeContext:
         if c.field_path.startswith("sub_tasks.") and c.change_type == ChangeType.INSERTION:
             self.signals.add("new_sub_task_added")
 
+    def _compute_scope_signals(self) -> None:
+        """Compute scope-related signals: additions, new domains, work type analysis."""
+        c = self.change
+
         # Scope addition (new scope text)
         if c.classification == ChangeClassification.SCOPE_LANGUAGE and c.change_type == ChangeType.INSERTION:
             self.signals.add("scope_addition_detected")
@@ -115,21 +139,8 @@ class ChangeContext:
         if any(kw in proposed_lower for kw in ["new work type", "new capability", "new scope"]):
             self.signals.add("new_work_type_detected")
 
-        # Funding analysis
-        self._compute_funding_signals()
-
-        # Deliverables analysis
-        self._compute_deliverable_signals()
-
-        # Emergency analysis
-        self._compute_emergency_signals()
-
-        # Quality plan analysis
-        self._compute_quality_signals()
-
-        # Skills analysis
-        self._compute_skills_signals()
-
+    def _compute_process_signals(self) -> None:
+        """Compute ATOMS process signals and draft/unreleased status."""
         # ATOMS process signals
         if self.diff.new_sub_tasks:
             self.signals.add("new_sub_task_added")
@@ -140,10 +151,9 @@ class ChangeContext:
         if self.proposed.revision_status.value == "draft":
             self.signals.add("revision_is_draft")
 
-        # Cost misallocation signals
-        self._compute_cost_signals()
-
-        # Retroactive scope
+    def _compute_retroactive_signals(self) -> None:
+        """Compute retroactive scope language signals."""
+        proposed_lower = self.change.proposed_text.lower()
         if any(kw in proposed_lower for kw in [
             "previously performed", "retroactive", "already completed",
             "work already done", "prior performance",
@@ -316,20 +326,8 @@ class ChangeContext:
 
         # FAR 16.505(b)(4) substance check: does the justification explain
         # WHY this is urgent, not just WHAT the change is?
-        _URGENCY_INDICATORS = [
-            "urgent", "urgency", "immediate", "immediately", "critical path",
-            "safety", "safety concern", "hazard", "risk to",
-            "cannot wait", "cannot delay", "time-sensitive", "time sensitive",
-            "deadline", "window", "launch window", "test window",
-            "hardware at risk", "schedule impact", "schedule pressure",
-            "mission impact", "mission critical", "flight hardware",
-            "delay would", "delay will", "if delayed", "cannot be delayed",
-            "normal procedures cannot", "normal process cannot",
-            "standard process would", "standard review would",
-            "unacceptable delay", "unacceptable risk",
-            "life safety", "crew safety", "loss of",
-        ]
-        has_urgency = any(phrase in just_lower for phrase in _URGENCY_INDICATORS)
+        # See engine/shared.py for indicator list provenance.
+        has_urgency = any(phrase in just_lower for phrase in URGENCY_INDICATORS)
 
         if not has_urgency:
             self.signals.add("emergency_justification_no_urgency")
@@ -381,21 +379,6 @@ class ChangeContext:
         if len(self.proposed.sub_tasks) < 2:
             return
 
-        # Expanded stopwords: English + common contract/ESSCA boilerplate
-        _STOPWORDS = {
-            # English
-            "the", "a", "an", "and", "or", "for", "of", "in", "to", "is",
-            "with", "be", "are", "was", "were", "will", "shall", "by", "at",
-            "on", "as", "it", "this", "that", "from", "not", "but", "all",
-            "has", "have", "had", "may", "can", "its", "per", "any", "each",
-            # Common ESSCA/NASA contract boilerplate
-            "contractor", "provide", "services", "support", "activities",
-            "include", "following", "materials", "evaluation", "assessment",
-            "required", "engineering", "effort", "task", "work", "perform",
-            "shall", "including", "necessary", "processes", "laboratory",
-            "office", "design", "analysis", "test", "testing", "development",
-        }
-
         for st in self.proposed.sub_tasks:
             if not st.description:
                 continue
@@ -406,7 +389,7 @@ class ChangeContext:
                 if not other_st.description:
                     continue
                 other_words = set(other_st.description.lower().split())
-                overlap = (set(desc_lower.split()) & other_words) - _STOPWORDS
+                overlap = (set(desc_lower.split()) & other_words) - CONTRACT_STOPWORDS
                 if len(overlap) > self._cost_overlap_threshold:
                     self.signals.add("cost_misallocation_risk")
                     break
@@ -496,69 +479,11 @@ class RuleEngine:
 
     def _filter_applicable(self, config: ContractConfig) -> list[TOCRRule]:
         """Filter rules by applicability against contract config."""
-        applicable = []
-        for rule in self.rules:
-            app = rule.applicability
-
-            if not config.matches_contract_type(app.contract_type):
-                self._suppression_log.append({
-                    "rule_id": rule.rule_id,
-                    "reason": f"Contract type mismatch: {app.contract_type}",
-                })
-                continue
-
-            if app.agency and not any(config.matches_agency(a) for a in app.agency):
-                self._suppression_log.append({
-                    "rule_id": rule.rule_id,
-                    "reason": f"Agency mismatch: {app.agency}",
-                })
-                continue
-
-            if app.local_pack and not any(config.matches_local_pack(p) for p in app.local_pack):
-                self._suppression_log.append({
-                    "rule_id": rule.rule_id,
-                    "reason": f"Local pack mismatch: {app.local_pack}",
-                })
-                continue
-
-            if app.clause_required:
-                if not all(config.has_clause(c) for c in app.clause_required):
-                    self._suppression_log.append({
-                        "rule_id": rule.rule_id,
-                        "reason": f"Missing required clause: {app.clause_required}",
-                    })
-                    continue
-
-            if not config.matches_revision_status(app.revision_status):
-                self._suppression_log.append({
-                    "rule_id": rule.rule_id,
-                    "reason": f"Revision status mismatch: {app.revision_status}",
-                })
-                continue
-
-            applicable.append(rule)
-
-        return applicable
+        return filter_applicable_rules(self.rules, config, self._suppression_log)
 
     def _trigger_matches(self, rule: TOCRRule, ctx: ChangeContext) -> bool:
         """Check if all trigger conditions are met."""
-        trigger = rule.trigger
-
-        # ALL conditions must be met
-        if trigger.all:
-            if not all(sig in ctx.signals for sig in trigger.all):
-                return False
-
-        # ANY condition must be met (if specified)
-        if trigger.any:
-            if not any(sig in ctx.signals for sig in trigger.any):
-                return False
-
-        # If no trigger conditions, rule doesn't fire
-        if not trigger.all and not trigger.any:
-            return False
-
-        return True
+        return trigger_matches(rule, ctx.signals)
 
     def _create_finding(
         self,

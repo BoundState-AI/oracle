@@ -1,3 +1,8 @@
+/**
+ * ModeSelector — radio group for choosing the review processing mode.
+ * Options: polish-only, review+polish, or full rewrite. Defaults to review+polish.
+ */
+
 "use client";
 
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";

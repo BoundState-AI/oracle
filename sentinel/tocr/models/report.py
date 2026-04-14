@@ -17,7 +17,12 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from sentinel.tocr.models.enums import ComplianceSeverity, ComplianceVerdict, ParserConfidence
+from sentinel.tocr.models.enums import (
+    ComplianceSeverity,
+    ComplianceVerdict,
+    ConfidenceLevel,
+    ParserConfidence,
+)
 from sentinel.tocr.models.diff import FieldChange, StructuralDiff
 from sentinel.tocr.models.evidence import TOCRFinding
 from sentinel.tocr.models.remediation import RemediationPlan
@@ -26,11 +31,13 @@ from sentinel.tocr.models.remediation import RemediationPlan
 class DisclosureResult(BaseModel):
     """Disclosure audit result for a single change."""
 
+    model_config = {"extra": "forbid"}
+
     field_path: str
     change_summary: str = ""
     disclosed: bool = False
     matching_summary_text: str = ""
-    confidence: str = "deterministic"
+    confidence: ConfidenceLevel = ConfidenceLevel.DETERMINISTIC
 
 
 class ComplianceScore(BaseModel):
@@ -60,8 +67,13 @@ class ComplianceScore(BaseModel):
         score = 100 - (critical * 20 + high * 10 + medium * 5 + low * 1)
         score = max(0, score)
 
+        # WHY 50: scores below 50 indicate severe non-compliance (e.g., 3+
+        # critical findings); any critical finding is also auto-FATAL regardless
+        # of score because critical = contract breach risk.
         if score < 50 or critical > 0:
             verdict = ComplianceVerdict.FATAL
+        # WHY 90: scores 50-89 or any HIGH finding indicate material issues
+        # that require CO attention but aren't contract-stopping.
         elif score < 90 or high > 0:
             verdict = ComplianceVerdict.FLAGGED
         else:
@@ -120,6 +132,10 @@ class ComplianceReport(BaseModel):
     assumptions: list[str] = Field(default_factory=list)
     input_fingerprint: str = ""
 
+    # Why extra="allow": ComplianceReport is the primary output artifact and may
+    # carry extension fields from LLM-enhanced passes (Sonnet remediation, blind
+    # review metadata) that the base report schema doesn't define.  Forbidding
+    # extras would break the enrichment pipeline.
     model_config = {"extra": "allow"}
 
     def compute_score(self) -> None:

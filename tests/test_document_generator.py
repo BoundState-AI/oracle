@@ -1,3 +1,4 @@
+"""Tests for markdown-to-block parsing in the document generator."""
 from oracle.document_generator import parse_markdown
 
 

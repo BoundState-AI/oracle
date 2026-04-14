@@ -1,3 +1,4 @@
+"""Tests for server session lifecycle — interrupted detection, completed rehydration, and persisted log messages."""
 import json
 from pathlib import Path
 

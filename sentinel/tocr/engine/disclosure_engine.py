@@ -10,13 +10,15 @@ Classification: BoundState Proprietary
 Spec: BS-SPEC-TOCR-001-REV1, Section 4.2
 """
 
+__safety_critical__: bool = True
 __version__ = "1.0.0"
 
 import re
 from difflib import SequenceMatcher
 
+from sentinel.tocr.engine.shared import ENGLISH_STOPWORDS
 from sentinel.tocr.models.diff import FieldChange, StructuralDiff
-from sentinel.tocr.models.enums import ChangeClassification
+from sentinel.tocr.models.enums import ChangeClassification, ConfidenceLevel
 from sentinel.tocr.models.report import DisclosureResult
 
 
@@ -131,7 +133,7 @@ class DisclosureEngine:
                 change_summary=self._summarize_change(change),
                 disclosed=False,
                 matching_summary_text="",
-                confidence="deterministic",
+                confidence=ConfidenceLevel.DETERMINISTIC,
             )
 
         # Strategy 1: Check if field-specific keywords appear in summary
@@ -145,7 +147,14 @@ class DisclosureEngine:
 
         disclosed = keyword_match or similarity_match or subtask_match
 
-        confidence = "deterministic" if subtask_match else ("high" if similarity_match else "medium")
+        # Why confidence ranking: subtask ID match is deterministic (exact string),
+        # similarity match is high (SequenceMatcher threshold), keyword match is medium
+        # (heuristic word overlap).
+        confidence = (
+            ConfidenceLevel.DETERMINISTIC if subtask_match
+            else ConfidenceLevel.HIGH if similarity_match
+            else ConfidenceLevel.MEDIUM
+        )
 
         return DisclosureResult(
             field_path=change.field_path,
@@ -176,16 +185,11 @@ class DisclosureEngine:
         if not change_text:
             return False
 
-        # Aggressive stopword list — common English AND common contract words
-        # that appear in almost every scope/summary regardless of content
-        _STOPWORDS = {
-            "the", "a", "an", "and", "or", "for", "of", "in", "to", "is",
-            "be", "are", "was", "were", "will", "shall", "with", "by", "at",
-            "on", "as", "it", "this", "that", "from", "not", "but", "all",
-            "has", "have", "had", "may", "can", "its", "per", "any", "each",
-        }
-        change_words = set(change_text.split()) - _STOPWORDS
-        summary_words = set(normalized_summary.split()) - _STOPWORDS
+        # English-only stopwords (not contract boilerplate) — we want to detect
+        # whether a change summary actually describes THIS change's content words.
+        # See engine/shared.py for the two-tier stopword rationale.
+        change_words = set(change_text.split()) - ENGLISH_STOPWORDS
+        summary_words = set(normalized_summary.split()) - ENGLISH_STOPWORDS
         overlap = change_words & summary_words
 
         # Require 3+ non-stopword content words AND they must comprise at

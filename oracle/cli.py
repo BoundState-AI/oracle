@@ -308,6 +308,8 @@ def _count_rules(pack_data: dict) -> int:
     return 0
 
 
+# _compute_content_hash: reads entire file into memory for small pack JSON files.
+# _compute_file_hash (below): streams in 64 KB chunks for large on-disk files (PDFs).
 def _compute_content_hash(file_path: Path) -> str:
     """Compute SHA-256 hash of a file's contents."""
     h = hashlib.sha256(file_path.read_bytes())
@@ -705,7 +707,14 @@ def _detect_document_type(
     for i in range(pass1_pages):
         page_texts[i] = doc[i].get_text("text")
 
-    # Pattern definitions
+    # Pattern definitions for 2-pass document type detection (Section 5.3).
+    # WHY 3 separate patterns: each identifies a different regulatory document
+    # family.  The detection heuristic counts matches per page — whichever
+    # pattern dominates determines the extraction route:
+    #   tag_pattern → GPCM route (NASA tagged standards with [MPR N]/[FCR N])
+    #   far_pattern → FAR route (federal acquisition regulations with Part.Section)
+    #   cfr_pattern → Generic route (Code of Federal Regulations references)
+    # If no pattern dominates, the generic Claude extraction route is used.
     tag_pattern = re.compile(r"\[(MPR|FCR)\s+\d+\]", re.IGNORECASE)
     far_pattern = re.compile(r"(?:FAR|DFARS|NFS|GSAM)\s+(?:Part\s+)?\d+\.\d+", re.IGNORECASE)
     cfr_pattern = re.compile(r"(?:\d+\s+CFR|Code of Federal Regulations)", re.IGNORECASE)
@@ -812,6 +821,7 @@ def _generate_pack_tagged_standard(
     output_dir: Path,
     name: str | None,
     use_vision: bool,
+    detect_implicit: bool = False,
 ) -> Path:
     """Route A: Generate pack from a tagged standard (MPR/FCR) via GPCM pipeline.
 
@@ -831,6 +841,7 @@ def _generate_pack_tagged_standard(
         extractor_max_pages=0,
         adapter_model=os.environ.get("ORACLE_VISION_MODEL", "claude-sonnet-4-6"),
         adapter_dpi=200,
+        detect_implicit=detect_implicit,
     )
     return result["rule_pack"]
 
@@ -840,13 +851,14 @@ def _generate_pack_far_style(
     output_dir: Path,
     name: str | None,
     use_vision: bool,
+    detect_implicit: bool = False,
 ) -> Path:
     """Route B: Generate pack from FAR/DFARS-style regulation.
 
     Uses shall_extractor for extraction, then build_far_rulepack for
     structuring into the tiered Part/Section format.
     """
-    from oracle.shall_extractor import extract_pass1, enrich_with_sonnet, save_results
+    from oracle.shall_extractor import extract_pass1, enrich_with_sonnet, detect_implicit_obligations, save_results
     from oracle.build_far_rulepack import build_rulepack
 
     # Stage 1: Extract shall statements
@@ -856,6 +868,13 @@ def _generate_pack_far_style(
     if use_vision:
         LOGGER.info("Stage 1.5: Sonnet Vision enrichment...")
         result = enrich_with_sonnet(
+            result, pdf_path,
+            api_key=os.environ.get("ANTHROPIC_API_KEY"),
+        )
+
+    if detect_implicit:
+        LOGGER.info("Stage 1c: Detecting implicit obligations...")
+        result = detect_implicit_obligations(
             result, pdf_path,
             api_key=os.environ.get("ANTHROPIC_API_KEY"),
         )
@@ -974,12 +993,337 @@ def _parse_extraction_json(text: str) -> dict | None:
         return None
 
 
+IMPLICIT_GENERIC_PROMPT = """\
+You already extracted explicit obligations (shall/must/required/prohibited) from these pages.
+Now find **implicit obligations** — statements that impose a binding requirement WITHOUT using standard obligation keywords.
+
+Examples of implicit obligations:
+- "Reports are due quarterly" (= shall submit reports quarterly)
+- "The system operates at 5V" (= shall be designed to operate at 5V)
+- "All personnel hold a SECRET clearance" (= shall staff only cleared personnel)
+- "Testing follows MIL-STD-810" (= shall test per MIL-STD-810)
+
+Do NOT extract:
+- Statements already using shall/must/required/prohibited (already captured)
+- Background, definitions, scope descriptions, or recommendations (should/may)
+
+ALREADY EXTRACTED (do not re-extract):
+{already_extracted}
+
+Return STRICT JSON only:
+{{
+  "rules": [
+    {{
+      "obligation_type": "implicit",
+      "obligation_keyword": "(implicit)",
+      "section": "section number if visible",
+      "statement_text": "the exact text from the document",
+      "subject": "who/what must comply",
+      "requirement": "rewritten as an explicit obligation",
+      "context": "why this is binding",
+      "severity": "high|medium|low",
+      "confidence": 0.0-1.0,
+      "keywords": ["keyword1", "keyword2"],
+      "page": page_number
+    }}
+  ]
+}}
+
+Rules:
+- Be conservative. Only extract genuinely binding implicit obligations.
+- Each obligation must be atomic: one requirement per entry.
+- Preserve exact source language in statement_text.
+- If no implicit obligations are found, return {{"rules": []}}.
+- Return valid JSON only. No markdown fences, no commentary.\
+"""
+
+
+def _detect_implicit_generic(
+    pdf_path: Path,
+    existing_rules: list[dict],
+    use_vision: bool,
+    client,
+    rule_counter: int,
+) -> list[dict]:
+    """Run implicit obligation detection for the generic extraction pipeline.
+
+    Returns a list of new rule dicts with obligation_type='implicit'.
+    """
+    import fitz
+
+    doc = fitz.open(pdf_path)
+    total_pages = len(doc)
+
+    # Build summary of already-extracted rules for the prompt
+    already_lines = []
+    for r in existing_rules:
+        kw = r.get("obligation_keyword", "").upper()
+        text = r.get("statement_text", "")[:150]
+        already_lines.append(f"  - [{kw}] {text}")
+    already_text = "\n".join(already_lines[:200])  # cap to avoid prompt overflow
+
+    CHUNK_SIZE = 5
+    implicit_rules: list[dict] = []
+    chunk_start = 0
+
+    while chunk_start < total_pages:
+        chunk_end = min(chunk_start + CHUNK_SIZE, total_pages)
+
+        content: list[dict] = []
+        for page_idx in range(chunk_start, chunk_end):
+            page = doc[page_idx]
+            if use_vision:
+                import base64
+                matrix = fitz.Matrix(150 / 72, 150 / 72)
+                pix = page.get_pixmap(matrix=matrix, alpha=False)
+                img_b64 = base64.b64encode(pix.tobytes("png")).decode("utf-8")
+                content.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": img_b64,
+                    },
+                })
+                content.append({
+                    "type": "text",
+                    "text": f"[Page {page_idx + 1}]",
+                })
+            else:
+                page_text = page.get_text("text")
+                content.append({
+                    "type": "text",
+                    "text": f"--- PAGE {page_idx + 1} ---\n{page_text}",
+                })
+
+        content.append({
+            "type": "text",
+            "text": IMPLICIT_GENERIC_PROMPT.format(already_extracted=already_text),
+        })
+
+        try:
+            response = client.messages.create(
+                model=os.environ.get("ORACLE_VISION_MODEL", "claude-sonnet-4-6"),
+                max_tokens=4096,
+                temperature=0,
+                messages=[{"role": "user", "content": content}],
+            )
+
+            if response.content:
+                raw_text = response.content[0].text
+                parsed = _parse_extraction_json(raw_text)
+
+                if parsed and parsed.get("rules"):
+                    for rule in parsed["rules"]:
+                        stmt_text = rule.get("statement_text", "").strip()
+                        if not stmt_text or len(stmt_text) < 15:
+                            continue
+                        rule_counter += 1
+                        rule["rule_id"] = f"RULE-{rule_counter:04d}"
+                        rule["obligation_type"] = "implicit"
+                        rule["obligation_keyword"] = "(implicit)"
+                        rule.setdefault("page", chunk_start + 1)
+                        rule.setdefault("confidence", 0.5)
+                        implicit_rules.append(rule)
+
+                    LOGGER.info(
+                        f"    Pages {chunk_start+1}–{chunk_end}: "
+                        f"{len(parsed['rules'])} implicit obligations"
+                    )
+
+        except Exception as e:
+            LOGGER.warning(
+                f"    Pages {chunk_start+1}–{chunk_end} implicit detection failed: {e}"
+            )
+
+        chunk_start = chunk_end
+
+    doc.close()
+    return implicit_rules
+
+
+def _extract_chunk(
+    doc,
+    chunk_start: int,
+    chunk_end: int,
+    total_pages: int,
+    use_vision: bool,
+    client,
+) -> tuple[list[dict] | None, str]:
+    """Extract obligations from a single PDF chunk via Claude.
+
+    Returns (rules_list, error_string).  On success error_string is empty.
+    On failure after all retries, rules_list is None.
+
+    Why bounded retry: LLM responses occasionally return malformed JSON
+    or use wrong keys.  Max 2 retries with a repair prompt is enough to
+    recover most cases without burning excessive API credits.
+    """
+    import base64
+    import fitz as _fitz
+
+    LOGGER.info(f"  Processing pages {chunk_start + 1}–{chunk_end} of {total_pages}...")
+
+    content: list[dict] = []
+    for page_idx in range(chunk_start, chunk_end):
+        page = doc[page_idx]
+        if use_vision:
+            matrix = _fitz.Matrix(150 / 72, 150 / 72)
+            pix = page.get_pixmap(matrix=matrix, alpha=False)
+            img_b64 = base64.b64encode(pix.tobytes("png")).decode("utf-8")
+            content.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/png", "data": img_b64},
+            })
+            content.append({"type": "text", "text": f"[Page {page_idx + 1}]"})
+        else:
+            page_text = page.get_text("text")
+            content.append({"type": "text", "text": f"--- PAGE {page_idx + 1} ---\n{page_text}"})
+
+    content.append({"type": "text", "text": GENERIC_EXTRACTION_PROMPT})
+
+    max_retries = 2
+    last_error = ""
+
+    for attempt in range(1, max_retries + 2):
+        try:
+            response = client.messages.create(
+                model=os.environ.get("ORACLE_VISION_MODEL", "claude-sonnet-4-6"),
+                max_tokens=8192,
+                temperature=0,
+                messages=[{"role": "user", "content": content}],
+            )
+
+            if response.content:
+                raw_text = response.content[0].text
+                parsed = _parse_extraction_json(raw_text)
+
+                if parsed is None:
+                    last_error = "JSON parse failure after markdown fence stripping"
+                    if attempt <= max_retries:
+                        LOGGER.warning(f"    Attempt {attempt}: malformed JSON, retrying with repair prompt...")
+                        content.append({
+                            "type": "text",
+                            "text": (
+                                f"Your previous response was malformed:\n{raw_text[:500]}\n\n"
+                                "Return ONLY a valid JSON object with a 'rules' array. "
+                                "No markdown fences, no commentary."
+                            ),
+                        })
+                    continue
+
+                rules = parsed.get("rules")
+                if rules is None:
+                    last_error = f"JSON missing 'rules' key, got keys: {list(parsed.keys())}"
+                    if attempt <= max_retries:
+                        LOGGER.warning(f"    Attempt {attempt}: {last_error}, retrying with repair prompt...")
+                        content.append({
+                            "type": "text",
+                            "text": (
+                                f"Your response was valid JSON but used the wrong key. "
+                                f"You returned: {json.dumps(list(parsed.keys()))}. "
+                                f"Return a JSON object with a 'rules' array. Example: "
+                                f'{{"rules": [{{"rule_id": "...", "statement_text": "..."}}]}}'
+                            ),
+                        })
+                    continue
+
+                LOGGER.info(f"    Found {len(rules)} obligations (attempt {attempt})")
+                return rules, ""
+
+        except Exception as e:
+            last_error = str(e)
+            if attempt <= max_retries:
+                LOGGER.warning(f"    Attempt {attempt} failed: {e}. Retrying...")
+                time.sleep(2 * attempt)
+
+    return None, last_error
+
+
+def _deduplicate_rules(rules: list[dict]) -> list[dict]:
+    """Deduplicate rules using composite key (section + normalized text).
+
+    Why composite key: Section 5.4 specifies that rules with identical text
+    but different sections are preserved (same obligation in different contexts).
+    Only exact section+text duplicates from chunk overlap regions are removed.
+    """
+    seen_keys: set[tuple[str, str]] = set()
+    deduped: list[dict] = []
+    for rule in rules:
+        key = (
+            rule.get("section", "").strip().lower(),
+            re.sub(r"\s+", " ", rule.get("statement_text", "").strip().lower()),
+        )
+        if key not in seen_keys:
+            seen_keys.add(key)
+            deduped.append(rule)
+
+    dupes_removed = len(rules) - len(deduped)
+    if dupes_removed > 0:
+        LOGGER.info(f"  Deduplicated: removed {dupes_removed} duplicate rules (overlap regions)")
+
+    # Re-sequence rule IDs after dedup
+    for i, rule in enumerate(deduped, 1):
+        rule["rule_id"] = f"RULE-{i:04d}"
+
+    return deduped
+
+
+def _assemble_generic_pack(
+    pdf_path: Path,
+    deduped_rules: list[dict],
+    total_pages: int,
+    extracted_pages: list[int],
+    chunk_failures: list[dict],
+    name: str | None,
+    use_vision: bool,
+    force_type: str | None,
+) -> dict:
+    """Build the final generic pack dict from extracted + deduped rules."""
+    source_hash = _compute_file_hash(pdf_path)
+    standard_id = name or pdf_path.stem
+    extraction_status = "partial" if chunk_failures else "complete"
+
+    return {
+        "schema_version": "oracle_generic/v1",
+        "rule_pack_id": f"generic-{_slugify(standard_id)}",
+        "standard_id": standard_id,
+        "standard_title": name or pdf_path.stem,
+        "version": "1.0.0",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "source_document": str(pdf_path),
+        "extraction_method": "claude_vision" if use_vision else "claude_text",
+        "extraction_status": extraction_status,
+        "total_source_pages": total_pages,
+        "extracted_pages": sorted(set(extracted_pages)),
+        "failed_page_ranges": [
+            f"{cf['page_start']}-{cf['page_end']}" for cf in chunk_failures
+        ],
+        "chunk_failures": chunk_failures,
+        "total_rules": len(deduped_rules),
+        "oracle_metadata": {
+            "name": name or standard_id,
+            "slug": _slugify(standard_id),
+            "description": f"Auto-extracted from {pdf_path.name}",
+            "status": "draft",
+            "added_at": datetime.now(timezone.utc).isoformat(),
+            "promoted_at": None,
+            "promoted_by": None,
+            "promotion_notes": None,
+            "source_document_hash": source_hash,
+            "detection_override": force_type,
+        },
+        "rules": deduped_rules,
+    }
+
+
 def _generate_pack_generic(
     pdf_path: Path,
     output_dir: Path,
     name: str | None,
     use_vision: bool,
     force_type: str | None = None,
+    detect_implicit: bool = False,
 ) -> Path:
     """Route C: Generate pack from ANY regulatory document using Claude extraction.
 
@@ -1011,9 +1355,8 @@ def _generate_pack_generic(
     doc = fitz.open(pdf_path)
     total_pages = len(doc)
 
-    # --- Chunking with 1-page overlap (Section 5.4 / 13.3) ---
     CHUNK_SIZE = 5
-    OVERLAP = 1  # 1-page overlap between consecutive chunks
+    OVERLAP = 1  # 1-page overlap between consecutive chunks (Section 5.4 / 13.3)
 
     all_rules: list[dict] = []
     rule_counter = 0
@@ -1023,202 +1366,59 @@ def _generate_pack_generic(
     chunk_start = 0
     while chunk_start < total_pages:
         chunk_end = min(chunk_start + CHUNK_SIZE, total_pages)
-        LOGGER.info(f"  Processing pages {chunk_start + 1}–{chunk_end} of {total_pages}...")
 
-        # Build message content for this chunk
-        content: list[dict] = []
-        for page_idx in range(chunk_start, chunk_end):
-            page = doc[page_idx]
+        rules, error = _extract_chunk(doc, chunk_start, chunk_end, total_pages, use_vision, client)
 
-            if use_vision:
-                # Vision mode: render page as image
-                import base64
-                matrix = fitz.Matrix(150 / 72, 150 / 72)
-                pix = page.get_pixmap(matrix=matrix, alpha=False)
-                img_b64 = base64.b64encode(pix.tobytes("png")).decode("utf-8")
-                content.append({
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "image/png",
-                        "data": img_b64,
-                    },
-                })
-                content.append({
-                    "type": "text",
-                    "text": f"[Page {page_idx + 1}]",
-                })
-            else:
-                # Text mode: extract text
-                page_text = page.get_text("text")
-                content.append({
-                    "type": "text",
-                    "text": f"--- PAGE {page_idx + 1} ---\n{page_text}",
-                })
-
-        content.append({
-            "type": "text",
-            "text": GENERIC_EXTRACTION_PROMPT,
-        })
-
-        # --- Bounded retry: max 2 retries per chunk (Section 5.4) ---
-        chunk_success = False
-        max_retries = 2
-        last_error = ""
-
-        for attempt in range(1, max_retries + 2):  # 1 initial + 2 retries = 3 total
-            try:
-                response = client.messages.create(
-                    model=os.environ.get("ORACLE_VISION_MODEL", "claude-sonnet-4-6"),
-                    max_tokens=8192,
-                    temperature=0,
-                    messages=[{"role": "user", "content": content}],
-                )
-
-                if response.content:
-                    raw_text = response.content[0].text
-                    parsed = _parse_extraction_json(raw_text)
-
-                    if parsed is None:
-                        # JSON parse failure — retry with repair prompt
-                        last_error = "JSON parse failure after markdown fence stripping"
-                        if attempt <= max_retries:
-                            LOGGER.warning(f"    Attempt {attempt}: malformed JSON, retrying with repair prompt...")
-                            content.append({
-                                "type": "text",
-                                "text": (
-                                    f"Your previous response was malformed:\n{raw_text[:500]}\n\n"
-                                    "Return ONLY a valid JSON object with a 'rules' array. "
-                                    "No markdown fences, no commentary."
-                                ),
-                            })
-                        continue
-
-                    rules = parsed.get("rules")
-                    if rules is None:
-                        # Valid JSON but wrong shape (e.g., {"obligations": [...]})
-                        # Append repair prompt so the next attempt gets guidance
-                        last_error = f"JSON missing 'rules' key, got keys: {list(parsed.keys())}"
-                        if attempt <= max_retries:
-                            LOGGER.warning(f"    Attempt {attempt}: {last_error}, retrying with repair prompt...")
-                            content.append({
-                                "type": "text",
-                                "text": (
-                                    f"Your response was valid JSON but used the wrong key. "
-                                    f"You returned: {json.dumps(list(parsed.keys()))}. "
-                                    f"Return a JSON object with a 'rules' array. Example: "
-                                    f'{{"rules": [{{"rule_id": "...", "statement_text": "..."}}]}}'
-                                ),
-                            })
-                        continue
-
-                    # Valid response (even if empty — page may have no obligations)
-                    for rule in rules:
-                        rule_counter += 1
-                        rule["rule_id"] = f"RULE-{rule_counter:04d}"
-                        rule.setdefault("page", chunk_start + 1)
-                    all_rules.extend(rules)
-                    extracted_pages.extend(range(chunk_start + 1, chunk_end + 1))
-                    LOGGER.info(f"    Found {len(rules)} obligations (attempt {attempt})")
-                    chunk_success = True
-                    break
-
-            except Exception as e:
-                last_error = str(e)
-                if attempt <= max_retries:
-                    LOGGER.warning(f"    Attempt {attempt} failed: {e}. Retrying...")
-                    time.sleep(2 * attempt)  # Brief backoff
-
-        if not chunk_success:
+        if rules is not None:
+            for rule in rules:
+                rule_counter += 1
+                rule["rule_id"] = f"RULE-{rule_counter:04d}"
+                rule.setdefault("page", chunk_start + 1)
+            all_rules.extend(rules)
+            extracted_pages.extend(range(chunk_start + 1, chunk_end + 1))
+        else:
             LOGGER.error(
-                f"    Chunk pages {chunk_start+1}–{chunk_end} FAILED after {max_retries+1} attempts: {last_error}"
+                f"    Chunk pages {chunk_start+1}–{chunk_end} FAILED: {error}"
             )
             chunk_failures.append({
                 "page_start": chunk_start + 1,
                 "page_end": chunk_end,
-                "retries_used": max_retries,
-                "final_error": last_error[:500],
+                "retries_used": 2,
+                "final_error": error[:500],
                 "extraction_mode": "vision" if use_vision else "text",
             })
 
-        # Advance with overlap
         chunk_start = chunk_end - OVERLAP if chunk_end < total_pages else chunk_end
 
     doc.close()
 
-    # --- Deduplication using composite key (section + normalized text) ---
-    # Section 5.4: Rules with identical text but different sections are preserved
-    seen_keys: set[tuple[str, str]] = set()
-    deduped_rules: list[dict] = []
-    for rule in all_rules:
-        key = (
-            rule.get("section", "").strip().lower(),
-            re.sub(r"\s+", " ", rule.get("statement_text", "").strip().lower()),
+    # Pass 1c: Implicit obligation detection
+    if detect_implicit:
+        LOGGER.info("Pass 1c: Detecting implicit obligations...")
+        implicit_rules = _detect_implicit_generic(
+            pdf_path, all_rules, use_vision, client, rule_counter,
         )
-        if key not in seen_keys:
-            seen_keys.add(key)
-            deduped_rules.append(rule)
+        rule_counter += len(implicit_rules)
+        all_rules.extend(implicit_rules)
+        extracted_pages.extend(
+            r.get("page", 0) for r in implicit_rules if r.get("page")
+        )
+        LOGGER.info(f"  Found {len(implicit_rules)} implicit obligations")
 
-    dupes_removed = len(all_rules) - len(deduped_rules)
-    if dupes_removed > 0:
-        LOGGER.info(f"  Deduplicated: removed {dupes_removed} duplicate rules (overlap regions)")
+    deduped_rules = _deduplicate_rules(all_rules)
 
-    # Re-sequence rule IDs after dedup
-    for i, rule in enumerate(deduped_rules, 1):
-        rule["rule_id"] = f"RULE-{i:04d}"
+    pack = _assemble_generic_pack(
+        pdf_path, deduped_rules, total_pages, extracted_pages,
+        chunk_failures, name, use_vision, force_type,
+    )
 
-    # --- Build the pack ---
-    # Compute source document hash
-    source_hash = _compute_file_hash(pdf_path)
-
-    # Derive failed page ranges from chunk_failures
-    failed_page_ranges = []
-    for cf in chunk_failures:
-        failed_page_ranges.append(f"{cf['page_start']}-{cf['page_end']}")
-
-    # Deduplicate extracted_pages
-    extracted_pages = sorted(set(extracted_pages))
-
-    standard_id = name or pdf_path.stem
-    extraction_status = "partial" if chunk_failures else "complete"
-
-    pack = {
-        "schema_version": "oracle_generic/v1",
-        "rule_pack_id": f"generic-{_slugify(standard_id)}",
-        "standard_id": standard_id,
-        "standard_title": name or pdf_path.stem,
-        "version": "1.0.0",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "source_document": str(pdf_path),
-        "extraction_method": "claude_vision" if use_vision else "claude_text",
-        "extraction_status": extraction_status,
-        "total_source_pages": total_pages,
-        "extracted_pages": extracted_pages,
-        "failed_page_ranges": failed_page_ranges,
-        "chunk_failures": chunk_failures,
-        "total_rules": len(deduped_rules),
-        "oracle_metadata": {
-            "name": name or standard_id,
-            "slug": _slugify(standard_id),
-            "description": f"Auto-extracted from {pdf_path.name}",
-            "status": "draft",
-            "added_at": datetime.now(timezone.utc).isoformat(),
-            "promoted_at": None,
-            "promoted_by": None,
-            "promotion_notes": None,
-            "source_document_hash": source_hash,
-            "detection_override": force_type,
-        },
-        "rules": deduped_rules,
-    }
-
-    out_path = output_dir / f"{_slugify(standard_id)}_rulepack.json"
+    out_path = output_dir / f"{_slugify(pack['standard_id'])}_rulepack.json"
     out_path.write_text(
         json.dumps(pack, indent=2, ensure_ascii=False), encoding="utf-8"
     )
     LOGGER.info(
         f"Generic rule pack: {out_path} ({len(deduped_rules)} rules, "
-        f"status={extraction_status})"
+        f"status={pack['extraction_status']})"
     )
     return out_path
 
@@ -1234,6 +1434,7 @@ def generate_pack(
     allow_partial: bool = False,
     overwrite: bool = False,
     non_interactive: bool = False,
+    detect_implicit: bool = False,
 ) -> str:
     """Generate a rule pack from a regulatory/standards PDF.
 
@@ -1259,14 +1460,21 @@ def generate_pack(
 
     # Route to appropriate generator
     if doc_type == "tagged_standard":
-        pack_path = _generate_pack_tagged_standard(pdf_path, output_dir, name, use_vision)
+        pack_path = _generate_pack_tagged_standard(
+            pdf_path, output_dir, name, use_vision,
+            detect_implicit=detect_implicit,
+        )
     elif doc_type == "far_style":
-        pack_path = _generate_pack_far_style(pdf_path, output_dir, name, use_vision)
+        pack_path = _generate_pack_far_style(
+            pdf_path, output_dir, name, use_vision,
+            detect_implicit=detect_implicit,
+        )
     else:
         # cfr_style and generic both use the generic pipeline
         pack_path = _generate_pack_generic(
             pdf_path, output_dir, name, use_vision,
             force_type=force_type,
+            detect_implicit=detect_implicit,
         )
 
     # Register in library
@@ -1413,6 +1621,8 @@ def _render_pack_for_oracle(
 
 def _estimate_tokens(text: str) -> int:
     """Rough token estimate using the 4-chars-per-token heuristic."""
+    # WHY 4: standard GPT tokenizer averages ~4 chars/token for English prose.
+    # Conservative for non-English or code.
     return len(text) // 4
 
 
@@ -1688,6 +1898,12 @@ def run_review(
                     pandoc_error,
                 )
             draft = _extract_docx_text_fallback(document_path)
+    elif suffix in (".md", ".markdown", ".txt"):
+        # Native markdown / plain text — pass straight through without
+        # conversion.  Uploading a .md bypasses the pandoc dependency
+        # entirely, which is important when pandoc is not installed on
+        # the server (the DOCX pipeline degrades without it).
+        draft = document_path.read_text(encoding="utf-8")
     else:
         draft = document_path.read_text(encoding="utf-8")
 
@@ -2037,6 +2253,7 @@ def cmd_generate_pack(args: argparse.Namespace) -> None:
         allow_partial=getattr(args, 'allow_partial', False),
         overwrite=getattr(args, 'overwrite', False),
         non_interactive=getattr(args, 'non_interactive', False),
+        detect_implicit=getattr(args, 'implicit', False),
     )
 
     print(f"\nPack generated and registered: {pack_name}")
@@ -2226,6 +2443,8 @@ Examples:
                         help="Allow registration of packs with partial extraction")
     p_gen.add_argument("--overwrite", action="store_true",
                         help="Overwrite existing pack with same name")
+    p_gen.add_argument("--implicit", action="store_true",
+                        help="Run Pass 1c: detect implicit obligations without keyword markers")
     p_gen.set_defaults(func=cmd_generate_pack)
 
     # --- list-packs ---

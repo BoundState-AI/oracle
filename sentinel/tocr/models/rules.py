@@ -33,6 +33,9 @@ class RuleApplicability(BaseModel):
     clause_required: Optional[list[str]] = None
     revision_status: Optional[list[str]] = None
 
+    # Why extra="allow": Rule packs are user-authored JSON that may carry
+    # metadata fields (notes, change_history, author) the engine ignores.
+    # Forbidding extras would reject valid rule packs on import.
     model_config = {"extra": "allow"}
 
 
@@ -42,6 +45,9 @@ class RuleTrigger(BaseModel):
     all: list[str] = Field(default_factory=list)
     any: list[str] = Field(default_factory=list)
 
+    # Why extra="allow": Rule packs are user-authored JSON that may carry
+    # metadata fields (notes, change_history, author) the engine ignores.
+    # Forbidding extras would reject valid rule packs on import.
     model_config = {"extra": "allow"}
 
 
@@ -66,4 +72,7 @@ class TOCRRule(BaseModel):
     guidance: str = ""
     remediation: str = ""
 
+    # Why extra="allow": Rule packs are user-authored JSON that may carry
+    # metadata fields (notes, change_history, author) the engine ignores.
+    # Forbidding extras would reject valid rule packs on import.
     model_config = {"extra": "allow"}

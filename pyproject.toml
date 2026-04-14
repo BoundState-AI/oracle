@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = "LicenseRef-Proprietary"
 authors = [
-    { name = "Dr. Joseph Wilde", email = "joe@boundstate.ai" },
+    { name = "Dr. Joseph Wilde", email = "jnwilde@pm.me" },
     { name = "BoundState AI" },
 ]
 classifiers = [

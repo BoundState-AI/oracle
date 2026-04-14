@@ -57,3 +57,74 @@ pytest tests/ -v
 - All packs register as "draft" — human promotion required
 - Non-TTY promotion fails closed (requires --yes)
 - Token budget fails hard if compliance context can't fit
+
+## Tier-One Code Standards (Enforced on ALL New Code)
+
+Every file in this repo must meet BoundState A-level engineering standards. These are non-negotiable for new code and modifications.
+
+### File Headers (Python)
+Every .py file MUST have this header format:
+```python
+"""
+Module: [module name]
+Purpose: [one-line WHY this module exists]
+
+BoundState AI 2026
+Classification: BoundState Proprietary
+
+[If compliance-affecting: __safety_critical__: bool = True]
+[Optional: Spec: BS-SPEC-ORACLE-001, Section X.Y]
+"""
+
+__safety_critical__: bool = True  # if applicable
+```
+
+### File Headers (TypeScript/React)
+Every .ts/.tsx file MUST have a JSDoc module comment:
+```tsx
+/**
+ * [Component/Module name] — [what it does in one line].
+ * [Optional: WHY this exists as a separate module.]
+ */
+```
+
+### Safety-Critical Marker
+Add `__safety_critical__: bool = True` to any module that:
+- Extracts compliance obligations (shall_extractor, pack builders)
+- Makes routing/grading decisions (chat_engine, chat_grader)
+- Validates compliance packs (pack_validator)
+- Orchestrates review or compliance checks (oracle2, conductor, engines)
+- Produces remediation language (remediation_formatter)
+
+### WHY Comments (Non-Negotiable)
+- Every regex pattern: WHY this pattern, what it detects, known false positive/negative risks
+- Every magic number/threshold: WHY this value, what happens if changed
+- Every architectural decision: WHY this approach was chosen over alternatives
+- Every security decision: WHY this is safe, what threat it mitigates
+
+### Composability
+- Functions MUST be under 50 lines. If over, decompose into named helpers.
+- "Can I explain this file's purpose in one sentence without 'and'?" — if not, split it.
+
+### Pydantic Models
+- All API boundary models: `model_config = ConfigDict(extra="forbid")`
+- Parser/rule-pack models that accept extensible input: `extra="allow"` WITH a WHY comment
+
+### Logging
+- Use `LOGGER = logging.getLogger("oracle.[module]")` — always uppercase
+- No `print()` in production code (CLI `main()` entry points are acceptable)
+
+### Naming
+- Python: `snake_case` for functions/variables, `PascalCase` for classes, `UPPER_SNAKE` for constants
+- TypeScript: `camelCase` for functions/variables, `PascalCase` for components/types
+- Logger: always `LOGGER` (uppercase)
+
+### Testing
+- Every test file MUST have a module-level docstring: `"""Tests for [what this suite validates]."""`
+- Test function names must be descriptive: `test_[what]_[condition]_[expected]`
+- No `monkeypatch` unless mocking external APIs (use protocol mocks or fixtures)
+
+### Frontend
+- Tailwind for all styling — no inline `style={{ }}` attributes
+- Trust boundary comments on any API proxy or auth middleware
+- Component types exported when shared across files — no type duplication

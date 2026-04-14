@@ -1,3 +1,4 @@
+"""Tests for OpenAI provider integration — strict schema enforcement, refusal handling, and empty response errors."""
 from __future__ import annotations
 
 from types import SimpleNamespace
