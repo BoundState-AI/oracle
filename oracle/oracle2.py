@@ -122,6 +122,23 @@ When synthesizing reviews:
 - If two reviewers disagree, identify the governing tradeoff and decide.
 - Reference findings by their issue_id (e.g. ISSUE-001), not by title.
 
+Markdown formatting rules for the revised_draft (these are enforced
+downstream when the draft is rendered to .docx/.pptx):
+- Tables MUST use GitHub-flavored pipe-table syntax with a delimiter row,
+  e.g.
+    | Column A | Column B |
+    |----------|----------|
+    | value 1  | value 2  |
+  Never substitute ASCII art, indented lists, or prose for a table. Put a
+  blank line before and after the table.
+- Code, schema, CLI, or any literal text the reader would copy-paste MUST
+  be wrapped in triple-backtick fences (```lang ... ```). Never leave a
+  class/function/snippet as an indented or bare paragraph — the renderer
+  only recognizes fenced blocks as code.
+- Headings use ATX style (# / ## / ###); keep depth at or below ###.
+- Bullet lists use "- ", numbered lists use "1. "; indent nested items
+  by 2 spaces per level.
+
 CRITICAL: Include the full revised draft text in the "revised_draft" field.
 If no revision is needed, set "revised_draft" to null.
 

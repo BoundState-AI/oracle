@@ -49,9 +49,33 @@ GREEN = "375623"          # Good/resolved items
 # ---------------------------------------------------------------------------
 
 class Block(NamedTuple):
-    kind: str       # "h1","h2","h3","paragraph","bullet","numbered","code","hr"
+    kind: str       # "h1","h2","h3","paragraph","bullet","numbered","code","hr","table"
     text: str
     level: int
+    # WHY: Only populated for kind=="table". Stored as list-of-rows so the
+    # renderer can emit a real Word table instead of the raw pipe text that
+    # previously collapsed into a single paragraph.
+    rows: list[list[str]] | None = None
+
+
+# WHY: GitHub-Flavored Markdown pipe-table delimiter row. Each column is
+# a run of dashes with optional leading/trailing colons (alignment hints),
+# segments separated by '|'. Optional leading/trailing '|' on the line.
+_TABLE_DELIM_RE = re.compile(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$")
+
+
+def _split_table_row(line: str) -> list[str]:
+    """Split a pipe-delimited row into trimmed cells.
+
+    Strips the optional edge pipes (`| a | b |` -> `['a','b']`) so callers
+    don't have to worry about empty leading/trailing cells.
+    """
+    s = line.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|"):
+        s = s[:-1]
+    return [c.strip() for c in s.split("|")]
 
 
 def parse_markdown(md: str) -> list[Block]:
@@ -120,6 +144,29 @@ def parse_markdown(md: str) -> list[Block]:
             i += 1
             continue
 
+        # WHY: GFM pipe table — a header line containing '|' followed by a
+        # delimiter row of dashes. Detected BEFORE the paragraph fallback
+        # because otherwise the continuation loop joins header/delimiter/
+        # data rows into one long "Normal" paragraph with raw pipes (the
+        # bug this branch exists to fix).
+        if "|" in stripped and i + 1 < len(lines) and _TABLE_DELIM_RE.match(lines[i + 1]):
+            table_rows: list[list[str]] = [_split_table_row(line)]
+            i += 2  # skip header + delimiter
+            while i < len(lines):
+                nl = lines[i]
+                ns = nl.strip()
+                if not ns or "|" not in ns:
+                    break
+                # Stop on a different block-level element.
+                if re.match(r"^#{1,6}\s+", ns) or ns.startswith("```"):
+                    break
+                if re.match(r"^[-*_]{3,}\s*$", ns):
+                    break
+                table_rows.append(_split_table_row(nl))
+                i += 1
+            blocks.append(Block("table", "", 0, rows=table_rows))
+            continue
+
         # Regular paragraph — collect continuation lines
         para_lines = [stripped]
         i += 1
@@ -130,6 +177,10 @@ def parse_markdown(md: str) -> list[Block]:
             if re.match(r"^\d+[.)]\s+", nl) or re.match(r"^[-*_]{3,}\s*$", nl):
                 break
             if nl.startswith("```"):
+                break
+            # Don't swallow a table that happens to follow a paragraph with
+            # no blank line between them.
+            if "|" in nl and i + 1 < len(lines) and _TABLE_DELIM_RE.match(lines[i + 1]):
                 break
             para_lines.append(nl)
             i += 1
@@ -191,6 +242,20 @@ def _shade_paragraph(paragraph, color: str):
     pPr.append(shd)
 
 
+def _shade_cell(cell, color: str):
+    """Apply background shading to a table cell.
+
+    WHY: Paragraph-level shading only tints the text line; to fill the
+    whole header cell with navy we have to write to the cell's tcPr.
+    """
+    from docx.oxml.ns import qn
+    tcPr = cell._tc.get_or_add_tcPr()
+    shd = tcPr.makeelement(qn("w:shd"), {
+        qn("w:val"): "clear", qn("w:color"): "auto", qn("w:fill"): color,
+    })
+    tcPr.append(shd)
+
+
 # ---------------------------------------------------------------------------
 # DOCX: Rich text rendering
 # ---------------------------------------------------------------------------
@@ -242,6 +307,54 @@ def _detect_callout(text: str) -> str | None:
     if lower.startswith("important:"):
         return AMBER
     return None
+
+
+# ---------------------------------------------------------------------------
+# DOCX: Table rendering
+# ---------------------------------------------------------------------------
+
+def _render_docx_table(doc, rows: list[list[str]]):
+    """Render a GFM table as a Word table with a navy header row.
+
+    WHY: python-docx's built-in "Table Grid" style gives us visible cell
+    borders without constructing OOXML by hand. The header gets navy
+    shading + bold white text so readers see structure at a glance; body
+    cells go through _add_rich_runs so inline **bold**, *italic*, and
+    `code` formatting inside cells is preserved.
+
+    Rows are normalized to the widest row's width so python-docx doesn't
+    raise on ragged tables (which the model occasionally emits).
+    """
+    from docx.shared import Pt, RGBColor
+
+    if not rows:
+        return
+
+    n_cols = max(len(r) for r in rows)
+    norm = [r + [""] * (n_cols - len(r)) for r in rows]
+
+    table = doc.add_table(rows=len(norm), cols=n_cols)
+    if "Table Grid" in doc.styles:
+        table.style = doc.styles["Table Grid"]
+
+    for r_idx, row in enumerate(norm):
+        for c_idx, cell_text in enumerate(row):
+            cell = table.rows[r_idx].cells[c_idx]
+            para = cell.paragraphs[0]
+            # Clear the default empty run python-docx inserts so we can
+            # write styled runs into a pristine paragraph.
+            para.text = ""
+
+            if r_idx == 0:
+                _shade_cell(cell, NAVY_DARK)
+                run = para.add_run(_strip_md(cell_text))
+                run.bold = True
+                run.font.size = Pt(10)
+                run.font.color.rgb = RGBColor.from_string("FFFFFF")
+            else:
+                _add_rich_runs(para, cell_text, default_color=GRAY_DARK)
+                for run in para.runs:
+                    run.font.size = Pt(10)
 
 
 # ---------------------------------------------------------------------------
@@ -466,6 +579,9 @@ def generate_docx(
             run.font.size = Pt(9)
             run.font.color.rgb = RGBColor.from_string(GRAY_DARK)
             _shade_paragraph(p, "F1F5F9")
+
+        elif block.kind == "table":
+            _render_docx_table(doc, block.rows or [])
 
         elif block.kind == "hr":
             doc.add_paragraph()  # empty spacer, matching Beth's style
@@ -806,6 +922,19 @@ def _blocks_to_lines(blocks: list[Block]) -> list[str]:
             if len(b.text) > 200:
                 snippet += "..."
             lines.append(snippet)
+        elif b.kind == "table" and b.rows:
+            # WHY: Slides are a poor venue for real tables. Flatten to
+            # "header: value | header: value" bullets keyed off the
+            # header row — readable at a glance, no layout gymnastics.
+            header = b.rows[0]
+            for row in b.rows[1:]:
+                pieces = [
+                    f"{_strip_md(h)}: {_strip_md(c)}"
+                    for h, c in zip(header, row)
+                    if c.strip()
+                ]
+                if pieces:
+                    lines.append("\u2022 " + " | ".join(pieces))
     return lines
 
 
