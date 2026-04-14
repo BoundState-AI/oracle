@@ -13,6 +13,7 @@ Classification: BoundState Proprietary
 Spec: BS-SPEC-TOCR-001-REV1, Section 12 (Remediation Advisory)
 """
 
+__safety_critical__: bool = True
 __version__ = "1.0.0"
 
 import json

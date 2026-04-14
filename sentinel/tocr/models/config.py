@@ -73,6 +73,11 @@ class ContractConfig(BaseModel):
         ),
     )
 
+    # Why extra="allow": ContractConfig is user-facing configuration that may
+    # carry agency-specific or vehicle-specific fields the engine doesn't consume
+    # yet (e.g., ESSCA-specific metadata).  Forbidding extras would break forward
+    # compatibility when new config fields are added to rule packs before the
+    # engine is updated to consume them.
     model_config = {"extra": "allow"}
 
     def has_clause(self, clause: str) -> bool:

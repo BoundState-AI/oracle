@@ -138,7 +138,10 @@ class PDFParser:
             if not table or len(table) < 2:
                 continue
             header = [str(h or "").lower() for h in table[0]]
-            if not any("sub" in h or "task" in h for h in header):
+            # Match tables with sub-task headers: require both "sub" AND "task"
+            # in the same cell, OR an "id" column.  Parenthesized to avoid
+            # precedence bugs (and binds tighter than or).
+            if not any(("sub" in h and "task" in h) or "id" in h for h in header):
                 continue
 
             id_col = next((i for i, h in enumerate(header) if "id" in h or "sub" in h), None)

@@ -85,11 +85,15 @@ def parse_markdown(md: str) -> list[Block]:
             i += 1
             continue
 
+        # WHY: 3+ repetitions of -, *, or _ denote a horizontal rule in
+        # standard Markdown (CommonMark spec, thematic break).
         if re.match(r"^[-*_]{3,}\s*$", stripped):
             blocks.append(Block("hr", "", 0))
             i += 1
             continue
 
+        # WHY: ATX-style headings — 1-6 leading '#' chars followed by space.
+        # We cap at h3 for docx outline depth.
         hm = re.match(r"^(#{1,6})\s+(.*)", stripped)
         if hm:
             level = len(hm.group(1))
@@ -98,6 +102,8 @@ def parse_markdown(md: str) -> list[Block]:
             i += 1
             continue
 
+        # WHY: Unordered list — leading whitespace sets nesting depth (2-space
+        # indentation per level), marker is -, *, or +.
         bm = re.match(r"^(\s*)[-*+]\s+(.*)", line)
         if bm:
             indent = len(bm.group(1)) // 2
@@ -105,6 +111,8 @@ def parse_markdown(md: str) -> list[Block]:
             i += 1
             continue
 
+        # WHY: Ordered list — digits followed by . or ) then space.
+        # Leading whitespace sets nesting depth, same 2-space convention.
         nm = re.match(r"^(\s*)\d+[.)]\s+(.*)", line)
         if nm:
             indent = len(nm.group(1)) // 2

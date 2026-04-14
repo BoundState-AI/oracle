@@ -1,3 +1,10 @@
+/**
+ * DropZone — file upload with drag-and-drop, click-to-browse, and client-side validation.
+ * Accepts .docx, .pptx, and .md (markdown).  Submitting .md bypasses the
+ * server-side pandoc dependency, which degrades the DOCX pipeline when
+ * pandoc is unavailable.  20 MB size cap, inline errors.
+ */
+
 "use client";
 
 import { useCallback, useState, useRef } from "react";
@@ -6,8 +13,10 @@ import { Upload, FileText, X } from "lucide-react";
 const ACCEPTED_TYPES = [
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  "text/markdown",
+  "text/plain",
 ];
-const ACCEPTED_EXTENSIONS = [".docx", ".pptx"];
+const ACCEPTED_EXTENSIONS = [".docx", ".pptx", ".md", ".markdown"];
 const MAX_SIZE_BYTES = 20 * 1024 * 1024;
 
 interface DropZoneProps {
@@ -29,7 +38,7 @@ export function DropZone({ file, onFileSelect }: DropZoneProps) {
   const validate = useCallback((f: File): string | null => {
     const ext = f.name.toLowerCase().slice(f.name.lastIndexOf("."));
     if (!ACCEPTED_EXTENSIONS.includes(ext) && !ACCEPTED_TYPES.includes(f.type)) {
-      return "Only .docx and .pptx files are accepted.";
+      return "Only .docx, .pptx, and .md files are accepted.";
     }
     if (f.size > MAX_SIZE_BYTES) {
       return `File too large (${formatSize(f.size)}). Maximum is 20 MB.`;
@@ -100,7 +109,7 @@ export function DropZone({ file, onFileSelect }: DropZoneProps) {
         <input
           ref={inputRef}
           type="file"
-          accept=".docx,.pptx"
+          accept=".docx,.pptx,.md,.markdown"
           onChange={handleChange}
           className="hidden"
         />
@@ -135,7 +144,7 @@ export function DropZone({ file, onFileSelect }: DropZoneProps) {
                 Drop your document here
               </p>
               <p className="text-xs text-muted-foreground mt-1">
-                .docx or .pptx &mdash; max 20 MB
+                .docx, .pptx, or .md &mdash; max 20 MB
               </p>
             </div>
             <button

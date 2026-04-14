@@ -10,6 +10,7 @@ Classification: BoundState Proprietary
 Spec: BS-SPEC-TOCR-001-REV1, Section 4
 """
 
+__safety_critical__: bool = True
 __version__ = "1.0.0"
 
 import copy
@@ -351,7 +352,31 @@ class TOCRConductor:
                 - mapping: list of {blind_index, original_prior, original_proposed}
                 - ranked: results sorted by score ascending (worst first)
         """
-        # Build revision pairs with original identity
+        pairs, indices = self._prepare_blind_pairs(revisions, seed)
+        blind_results, mapping = self._execute_blind_reviews(pairs, indices)
+
+        # Rank by score ascending (worst compliance first)
+        ranked = sorted(
+            blind_results,
+            key=lambda r: r["report"].score.raw_score if r["report"].score else 100,
+        )
+
+        return {
+            "blind_results": blind_results,
+            "mapping": mapping,
+            "ranked": ranked,
+        }
+
+    def _prepare_blind_pairs(
+        self,
+        revisions: list[TaskOrder],
+        seed: Optional[int],
+    ) -> tuple[list[dict], list[int]]:
+        """Build revision pairs and randomize their order.
+
+        Returns (pairs, shuffled_indices) so the caller can iterate
+        without knowing which pair corresponds to which cycle.
+        """
         pairs = []
         for i in range(len(revisions) - 1):
             pairs.append({
@@ -361,21 +386,29 @@ class TOCRConductor:
                 "proposed": revisions[i + 1],
             })
 
-        # Randomize order
         rng = random.Random(seed)
         indices = list(range(len(pairs)))
         rng.shuffle(indices)
+        return pairs, indices
 
-        # Run each pair with stripped identifiers
+    def _execute_blind_reviews(
+        self,
+        pairs: list[dict],
+        indices: list[int],
+    ) -> tuple[list[dict], list[dict]]:
+        """Run each pair with stripped identifiers, preserving chain-of-custody.
+
+        Why fingerprint before stripping: the fingerprint proves which real data
+        produced the blind score, maintaining audit trail integrity even though
+        the engine operates on anonymized copies.
+        """
         blind_results = []
         mapping = []
 
         for blind_idx, original_idx in enumerate(indices):
             pair = pairs[original_idx]
 
-            # Fingerprint the ORIGINAL data before stripping identifiers.
-            # This preserves chain-of-custody: the fingerprint proves which
-            # real data produced the blind score.
+            # Fingerprint ORIGINAL data before stripping identifiers
             original_prior_fp = self._fingerprint_task_order(pair["prior"])
             original_proposed_fp = self._fingerprint_task_order(pair["proposed"])
 
@@ -392,7 +425,7 @@ class TOCRConductor:
             # Run the review — engine has no idea which cycle this is
             report = self.review(prior_blind, proposed_blind)
 
-            # Overwrite the corrupted blind fingerprint with the real one
+            # Restore the real fingerprint on the report
             fp_rules = self._fingerprint_rules(self.rule_engine.rules)
             report.input_fingerprint = (
                 f"prior:{original_prior_fp[:16]} | proposed:{original_proposed_fp[:16]} | rules:{fp_rules[:16]}"
@@ -408,17 +441,7 @@ class TOCRConductor:
                 "original_proposed": pair["original_proposed"],
             })
 
-        # Rank by score ascending (worst compliance first)
-        ranked = sorted(
-            blind_results,
-            key=lambda r: r["report"].score.raw_score if r["report"].score else 100,
-        )
-
-        return {
-            "blind_results": blind_results,
-            "mapping": mapping,
-            "ranked": ranked,
-        }
+        return blind_results, mapping
 
     def _build_assumptions(self, diff, disclosures) -> list[str]:
         """Build the assumption drawer for the report."""

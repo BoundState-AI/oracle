@@ -1,4 +1,10 @@
+/**
+ * RootLayout — application shell with ClerkProvider auth and dark-mode-first theme.
+ * Wraps every page with the Inter font, Sonner toast provider, and global styles.
+ */
+
 import type { Metadata } from "next";
+import { ClerkProvider } from "@clerk/nextjs";
 import { Inter } from "next/font/google";
 import { Toaster } from "@/components/ui/sonner";
 import { Analytics } from "@vercel/analytics/next";
@@ -22,8 +28,10 @@ export default function RootLayout({
   return (
     <html lang="en" className={`${inter.variable} h-full dark`}>
       <body className="min-h-full flex flex-col antialiased font-sans">
-        {children}
-        <Toaster />
+        <ClerkProvider>
+          {children}
+          <Toaster />
+        </ClerkProvider>
         <Analytics />
       </body>
     </html>

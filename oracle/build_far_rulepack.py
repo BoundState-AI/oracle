@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Build a tiered FAR rule pack for oracle2.py compliance review.
+Module: oracle.build_far_rulepack
+Purpose: Builds tiered FAR compliance rule packs from shall-extraction output.
 
 Tier 1 — Summary index: one-liner per FAR Part with requirement counts
 Tier 2 — Full requirements for user-specified Parts (--far-parts)
@@ -13,14 +14,18 @@ Usage:
         --input docs/far_shall_extraction/FAR_shall_statements.json \
         --output docs/far_rulepack.json
 
+__safety_critical__: bool = True — builds FAR compliance packs used in review decisions
+
 BoundState AI 2026
 Classification: BoundState Proprietary
 
-Co-Authored-By: Claude "Atlas" <noreply@anthropic.com>
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
 Co-Authored-By: Dr. Joseph Wilde, BoundState AI
 """
 
 from __future__ import annotations
+
+__safety_critical__: bool = True
 
 import argparse
 import json
@@ -31,7 +36,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger(__name__)
+LOGGER = logging.getLogger(__name__)
 
 # FAR Part titles — official names from acquisition.gov
 FAR_PART_TITLES: dict[int, str] = {
@@ -128,21 +133,21 @@ def build_rulepack(
         - parts (Tier 2: full requirements grouped by Part)
         - unassigned (requirements without a detected Part number)
     """
-    logger.info("Loading shall extraction: %s", input_path)
+    LOGGER.info("Loading shall extraction: %s", input_path)
     with open(input_path, encoding="utf-8") as f:
         data = json.load(f)
 
     stmts = data["statements"]
-    logger.info("Loaded %d statements", len(stmts))
+    LOGGER.info("Loaded %d statements", len(stmts))
 
-    # Filter to binding requirements only
+    # Filter to binding requirements only (including implicit obligations)
     if mandatory_only:
         before = len(stmts)
         stmts = [
             s for s in stmts
-            if s["obligation_type"] in ("mandatory", "prohibition")
+            if s["obligation_type"] in ("mandatory", "prohibition", "implicit")
         ]
-        logger.info("Filtered to mandatory/prohibition: %d -> %d", before, len(stmts))
+        LOGGER.info("Filtered to mandatory/prohibition/implicit: %d -> %d", before, len(stmts))
 
     # Group by Part
     parts: dict[int, list[dict]] = defaultdict(list)
@@ -156,7 +161,7 @@ def build_rulepack(
         else:
             unassigned.append(compressed)
 
-    logger.info(
+    LOGGER.info(
         "Grouped into %d Parts + %d unassigned", len(parts), len(unassigned)
     )
 
@@ -304,13 +309,13 @@ def main() -> None:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with open(args.output, "w", encoding="utf-8") as f:
         json.dump(rulepack, f, indent=2, ensure_ascii=False)
-    logger.info("Wrote rule pack: %s", args.output)
+    LOGGER.info("Wrote rule pack: %s", args.output)
 
     # Also write the Tier 1 summary as a standalone text file
     summary_path = args.output.with_suffix(".summary.txt")
     with open(summary_path, "w", encoding="utf-8") as f:
         f.write(render_tier1_summary(rulepack))
-    logger.info("Wrote summary: %s", summary_path)
+    LOGGER.info("Wrote summary: %s", summary_path)
 
     # Stats
     print(f"\n{'='*60}")

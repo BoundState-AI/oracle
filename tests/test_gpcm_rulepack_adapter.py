@@ -1,3 +1,4 @@
+"""Tests for GPCM rule pack adapter — dedup, shall derivation, ID normalization, and section pattern matching."""
 from oracle.gpcm_rulepack_adapter import (
     canonical_requirement_id,
     clean_justification,

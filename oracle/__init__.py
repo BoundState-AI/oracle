@@ -1,5 +1,6 @@
 """
-ORACLE — Orchestrated Review And Compliance Liaison Engine
+Module: oracle
+Purpose: ORACLE — Orchestrated Review And Compliance Liaison Engine.
 
 Multi-oracle adversarial document review with extensible compliance rule packs.
 

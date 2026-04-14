@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Shall Statement Extractor - Local-Only Processing
+Module: oracle.shall_extractor
+Purpose: Extracts binding obligation statements from regulatory/standards PDFs.
 
 Extracts obligation statements from PDF text:
   Pass 1: PyMuPDF text extraction + regex + tagged requirement parsing
@@ -8,9 +9,19 @@ Extracts obligation statements from PDF text:
   Pass 2: Local Ollama LLM classification (optional)
 
 Output is always written to JSON + summary text.
+
+__safety_critical__: bool = True — extracts binding obligations that drive compliance review
+
+BoundState AI 2026
+Classification: BoundState Proprietary
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+Co-Authored-By: Dr. Joseph Wilde, BoundState AI
 """
 
 from __future__ import annotations
+
+__safety_critical__: bool = True
 
 import argparse
 import base64
@@ -27,22 +38,60 @@ from typing import Optional
 
 import fitz  # PyMuPDF
 
-logger = logging.getLogger(__name__)
+LOGGER = logging.getLogger(__name__)
 
 
 # ============================================================================
 # Models
 # ============================================================================
 
+# ---------------------------------------------------------------------------
+# Obligation keyword -> type mapping.
+#
+# WHY these specific keywords and types:
+#   These are the canonical obligation verbs defined by NASA/DoD standards
+#   writing conventions (see NASA-STD-0005, MIL-STD-961E, IEEE 830):
+#
+#   "shall" / "must" / "is required" / "are required" = MANDATORY — legally binding, must
+#     be verified.  These are the words that create enforceable requirements.
+#   "shall not" / "must not" / "is prohibited" / "are prohibited" / "may not" = PROHIBITION —
+#     explicitly forbidden actions.  Critical for safety: "shall not use
+#     Teflon in LOX service above 350 psi."
+#   "will" = INTENT — declaration of future action by the authoring body,
+#     not an obligation on the implementer.  Often confused with "shall"
+#     in informal writing; distinguishing them prevents over-scoping.
+#   "should" / "should not" = RECOMMENDATION — best practice, not binding.
+#     Important to capture because auditors sometimes treat "should" as
+#     mandatory; tagging it correctly prevents scope creep.
+#   "may" = PERMISSION — explicitly grants latitude.  Without this tag,
+#     engineers may assume a permissive clause is mandatory.
+#
+# The multi-word forms ("shall not", "are required to") are listed before
+# their single-word substrings so regex alternation matches the longest
+# form first (OBLIGATION_PATTERN uses these in longest-first order).
+#
+# Known edge cases:
+#   - "required" alone (without "is") catches adjectival usage like
+#     "required documentation" — acceptable, as these still indicate
+#     mandatory artifacts.
+#   - "will" is ambiguous (intent vs. future tense narrative); Pass 2
+#     LLM classification can reclassify if needed.
+# ---------------------------------------------------------------------------
 OBLIGATION_KEYWORDS = {
     "shall": "mandatory",
     "shall not": "prohibition",
     "must": "mandatory",
     "must not": "prohibition",
+    "are required to": "mandatory",
+    "are required": "mandatory",
     "is required to": "mandatory",
     "is required": "mandatory",
+    "be required to": "mandatory",
+    "be required": "mandatory",
     "required": "mandatory",
+    "are prohibited": "prohibition",
     "is prohibited": "prohibition",
+    "be prohibited": "prohibition",
     "prohibited": "prohibition",
     "will": "intent",
     "should": "recommendation",
@@ -54,8 +103,8 @@ OBLIGATION_KEYWORDS = {
 OBLIGATION_PATTERN = re.compile(
     r"(?:^|(?<=\.\s)|(?<=\n))"
     r"([^.;\n]*?"
-    r"\b(shall not|shall|must not|must|is required to|is required|"
-    r"is prohibited|prohibited|should not|should|may not|may|will)\b"
+    r"\b(shall not|shall|must not|must|are required to|are required|is required to|is required|"
+    r"be required to|be required|are prohibited|is prohibited|be prohibited|prohibited|should not|should|may not|may|will)\b"
     r"[^.;\n]*)"
     r"[.;]?",
     re.IGNORECASE | re.MULTILINE,
@@ -84,7 +133,84 @@ RATIONALE_PATTERN = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
-# Domain vocabulary for keyword extraction
+# WHY this signal pattern exists:
+#   Some standards place the hazard/mechanism sentence immediately before
+#   the tagged shall statement without an explicit "Rationale:" label.
+#   These tokens bias the extractor toward true engineering reasons rather
+#   than generic narrative prose.
+PRECEDING_RATIONALE_SIGNAL_PATTERN = re.compile(
+    r"\b(?:because|due to|to avoid|to prevent|to reduce|to minimize|to ensure|"
+    r"to protect|hazard|risk|toxic|toxicity|contaminat|outgas|outgassing|"
+    r"sublim|embrittlement|corrosion|flammab|whisker|degrad|damage|failure)\b",
+    re.IGNORECASE,
+)
+
+# WHY these stopwords are excluded:
+#   Overlap between the requirement and the candidate rationale is used as
+#   a guardrail. Generic grammar words would create false overlap and pull
+#   in nearby narrative sentences that are not actual rationale.
+RATIONALE_OVERLAP_STOPWORDS = {
+    "all",
+    "and",
+    "are",
+    "be",
+    "crew",
+    "for",
+    "from",
+    "hardware",
+    "not",
+    "shall",
+    "that",
+    "the",
+    "their",
+    "these",
+    "this",
+    "use",
+    "used",
+    "vacuum",
+}
+
+# ---------------------------------------------------------------------------
+# Domain vocabulary for keyword extraction.
+#
+# WHY these specific terms:
+#   These are the high-signal nouns from NASA M&P (Materials & Processes)
+#   standards — specifically NASA-STD-6001B (flammability), 6016C (M&P
+#   requirements), MMPDS (metallic design data), and CMH-17 (composites).
+#
+#   Each term was selected because it appears in rule text AND is useful
+#   for downstream classification:
+#
+#   Materials: material(s), metallic, nonmetallic, polymer, composite,
+#     adhesive, elastomer, fluoropolymer — identifies WHAT is being
+#     regulated.  Enables filtering by material family.
+#
+#   Processes: welding, bonding, coating, plating, heat-treat, annealing,
+#     braze, solder, weld — identifies manufacturing processes that carry
+#     their own qualification requirements.
+#
+#   Environments: oxygen, hydrogen, cryogenic, vacuum, propellant,
+#     flammability — identifies service environments that trigger
+#     additional testing requirements (e.g. O2 compatibility per 6001B).
+#
+#   Failure modes: corrosion, fracture, fatigue, embrittlement, toxicity,
+#     outgassing — identifies the risk being mitigated.  Critical for
+#     mapping rules to FMEA entries.
+#
+#   Program artifacts: MUA, MAPTIS, NDE, qualification, certification,
+#     specification — identifies process/documentation requirements vs.
+#     technical requirements.
+#
+#   Both singular and plural forms are included (material/materials,
+#   process/processes) because PDF extraction may capture either form
+#   and the extractor does not stem these terms.
+#
+# WHY this enables downstream use:
+#   After extraction, each shall statement is tagged with matching domain
+#   keywords.  This powers: (1) faceted search in rule packs, (2) auto-
+#   routing to the correct MIRA engine (H2, galvanic, flammability),
+#   (3) applicability filtering when building project-specific rule sets.
+# ---------------------------------------------------------------------------
 DOMAIN_KEYWORDS = {
     "material", "materials", "process", "processes", "test", "testing",
     "oxygen", "hydrogen", "flammability", "compatibility", "corrosion",
@@ -102,7 +228,45 @@ DOMAIN_KEYWORDS = {
     "weld", "braze", "solder", "heat-treat", "annealing",
 }
 
-# Applicability classification patterns
+# ---------------------------------------------------------------------------
+# Applicability classification patterns.
+#
+# WHY these patterns matter:
+#   NASA requirements are not universally applied — they are scoped by
+#   service environment, criticality level, and material class.  A rule
+#   that applies to "human-rated oxygen systems" does NOT apply to an
+#   unmanned structural component.  These patterns auto-tag each extracted
+#   shall statement with its applicability scope.
+#
+#   human_rated: Triggers the most stringent requirements (crew safety).
+#     Human-rated hardware must meet NASA-STD-5009 and additional testing.
+#   mission_critical / safety_critical / flight_critical: Tiered
+#     criticality levels that determine required test depth and review
+#     authority.
+#   oxygen_service: O2-compatible materials require flammability testing
+#     per NASA-STD-6001B.  LOX = liquid oxygen, GOX = gaseous oxygen.
+#   hydrogen_service: H2 compatibility requires embrittlement assessment.
+#     LH2 = liquid hydrogen, GH2 = gaseous hydrogen.
+#   propellant: Hypergolic propellants (NTO = nitrogen tetroxide,
+#     MMH = monomethylhydrazine) require unique compatibility testing.
+#   pressure_systems: Pressure vessels/lines require fracture-mechanics
+#     analysis per NASA-STD-5019.
+#   structural: Load-bearing components require fatigue and fracture
+#     assessment.
+#   thermal: Cryogenic or elevated-temperature service changes allowable
+#     properties and requires specific test data.
+#   contamination_control: NVR = non-volatile residue, outgassing per
+#     ASTM E595 — critical for vacuum/optical/oxygen systems.
+#   metallic / nonmetallic: Fundamental material class split that
+#     determines which standards apply (MMPDS vs. CMH-17, different
+#     flammability test methods).
+#
+# WHY regex instead of keyword sets:
+#   These terms appear in compound forms with varying punctuation in PDFs
+#   (e.g. "human-rated", "human rated", "humanrated" after OCR).  Regex
+#   with .? wildcards handles the variation without maintaining separate
+#   entries for each spelling.
+# ---------------------------------------------------------------------------
 APPLICABILITY_PATTERNS = {
     "human_rated": re.compile(
         r"human.?rated|crew|life.?critical|habitable|crewed", re.IGNORECASE
@@ -274,6 +438,7 @@ def _extract_mpr_blocks(text: str, page: int) -> list[dict]:
                 "mpr_id": mpr_id,
                 "text": block,
                 "tag_start": match.start(),
+                "tag_end": match.end(),
                 "page": page,
             }
         )
@@ -311,19 +476,72 @@ def _classify_applicability(text: str, context: str = "") -> list[str]:
     return sorted(tags)
 
 
-def _extract_justification(full_page_text: str, tag_end_pos: int) -> str:
-    """Look for Rationale/Note text following the requirement."""
-    # Search in a window after the requirement
-    search_start = tag_end_pos
-    search_end = min(len(full_page_text), tag_end_pos + 500)
-    window = full_page_text[search_start:search_end]
+def _extract_labeled_rationale(window: str) -> str:
+    """Extract the nearest explicit rationale/note marker from a text window."""
+    matches = list(RATIONALE_PATTERN.finditer(window))
+    if not matches:
+        return ""
+    rationale = re.sub(r"\s+", " ", matches[-1].group(1)).strip()
+    if len(rationale) <= 10:
+        return ""
+    return rationale[:300]
 
-    m = RATIONALE_PATTERN.search(window)
-    if m:
-        rationale = re.sub(r"\s+", " ", m.group(1)).strip()
-        if len(rationale) > 10:
-            return rationale[:300]
+
+def _requirement_overlap_terms(requirement_text: str) -> set[str]:
+    """Return subject terms that must overlap with an unlabeled rationale."""
+    tokens = {
+        token.lower()
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9/-]{2,}", requirement_text)
+    }
+    return {token for token in tokens if token not in RATIONALE_OVERLAP_STOPWORDS}
+
+
+def _extract_preceding_rationale(window: str, requirement_text: str) -> str:
+    """Reuse the nearest prior hazard/mechanism sentence when it is on-topic."""
+    overlap_terms = _requirement_overlap_terms(requirement_text)
+    if not overlap_terms:
+        return ""
+
+    candidates = [
+        re.sub(r"\s+", " ", chunk).strip()
+        for chunk in re.split(r"(?<=[.!?])\s+|\n+", window)
+        if chunk.strip()
+    ]
+
+    for candidate in reversed(candidates[-3:]):
+        lowered = candidate.lower()
+        if len(candidate) < 20:
+            continue
+        if re.search(r"\b(shall|must|required|prohibited|should|may|will)\b", candidate, re.IGNORECASE):
+            continue
+        if not PRECEDING_RATIONALE_SIGNAL_PATTERN.search(candidate):
+            continue
+        if not any(term in lowered for term in overlap_terms):
+            continue
+        return candidate[:300]
     return ""
+
+
+def _extract_justification(
+    full_page_text: str,
+    tag_start_pos: int,
+    tag_end_pos: int,
+    requirement_text: str,
+) -> str:
+    """Look for rationale text around the tagged requirement."""
+    # WHY 500 chars: enough to capture the adjacent note/basis paragraph
+    # while staying inside the local requirement neighborhood on NASA PDFs.
+    forward_window = full_page_text[tag_end_pos:min(len(full_page_text), tag_end_pos + 500)]
+    forward_rationale = _extract_labeled_rationale(forward_window)
+    if forward_rationale:
+        return forward_rationale
+
+    backward_window = full_page_text[max(0, tag_start_pos - 500):tag_start_pos]
+    backward_rationale = _extract_labeled_rationale(backward_window)
+    if backward_rationale:
+        return backward_rationale
+
+    return _extract_preceding_rationale(backward_window, requirement_text)
 
 
 def _split_inline_rationale(text: str) -> tuple[str, str]:
@@ -363,6 +581,31 @@ def _statement_is_covered_by_tagged_requirement(
 # Pass 1 extraction (improved)
 # ============================================================================
 
+# ---------------------------------------------------------------------------
+# Noise terms: strings whose presence in a sentence indicates boilerplate
+# or document-navigation text rather than an actual obligation.
+#
+# WHY these specific terms:
+#   "page " — page number artifacts from PDF extraction (e.g. "page 12 of
+#     45").  The trailing space distinguishes "page 12" from legitimate
+#     uses like "page-level requirements."
+#   "table of contents" — TOC entries contain obligation keywords ("shall"
+#     appears in the title of sections about shall-statements) but are
+#     not obligations themselves.  Without this filter, every TOC line
+#     would generate a false extraction.
+#   "revision history" — revision log entries describe past changes using
+#     obligation language ("added shall statement in 4.2") but are not
+#     current requirements.
+#   "export controlled" — ITAR/EAR markings appear on every page of
+#     controlled documents.  They contain "shall" in the warning text
+#     but are not technical requirements.
+#   "proprietary" — similar to export-controlled; proprietary notices
+#     use mandatory language about handling restrictions that would
+#     pollute the obligation set.
+#
+# These are checked via substring match (case-insensitive) — simple and
+# fast.  A sentence matching ANY noise term is skipped entirely.
+# ---------------------------------------------------------------------------
 NOISE_TERMS = (
     "page ",
     "table of contents",
@@ -371,6 +614,28 @@ NOISE_TERMS = (
     "proprietary",
 )
 
+# ---------------------------------------------------------------------------
+# Generic skip-page patterns: regex patterns that identify entire pages
+# whose content should be excluded from obligation extraction.
+#
+# WHY these specific patterns:
+#   "requirements identification matrix" — RIM/RTM pages are cross-reference
+#     tables that LIST requirement IDs but do not DEFINE them.  Extracting
+#     from these pages produces duplicate, context-free fragments.
+#   "requirement in this standard" — meta-discussion about the standard's
+#     own requirement structure (e.g. "Each requirement in this standard
+#     is verified by...").  These are about the document, not the domain.
+#   "for example purposes only" — example/illustration pages that use
+#     obligation language in hypothetical contexts.  Extracting these
+#     would create false requirements.
+#   "not requirements related to this standard" — explicit disclaimer
+#     pages that warn the reader certain content is informational only.
+#
+# These patterns are checked against the full page text.  If ANY pattern
+# matches, the entire page is skipped.  This is aggressive but correct:
+# these page types consistently produce false extractions, and any real
+# obligations on these pages are restated in their canonical location.
+# ---------------------------------------------------------------------------
 GENERIC_SKIP_PAGE_PATTERNS = (
     re.compile(r"requirements identification matrix", re.IGNORECASE),
     re.compile(r"requirement in this standard", re.IGNORECASE),
@@ -383,9 +648,15 @@ STRONG_GENERIC_KEYWORDS = {
     "shall not",
     "must",
     "must not",
+    "are required to",
+    "are required",
     "is required to",
     "is required",
+    "be required to",
+    "be required",
+    "are prohibited",
     "is prohibited",
+    "be prohibited",
     "prohibited",
 }
 
@@ -441,26 +712,23 @@ def _extract_subject_requirement(statement: str, keyword: str) -> tuple[str, str
     return subject, requirement
 
 
-def extract_pass1(pdf_path: Path) -> ExtractionResult:
-    pdf_path = Path(pdf_path)
-    if not pdf_path.exists():
-        raise FileNotFoundError(f"PDF not found: {pdf_path}")
+def _extract_tagged_requirements(
+    doc,
+    stmt_id_start: int = 0,
+) -> tuple[list[ShallStatement], dict[int, list[str]], int | None, int | None, int]:
+    """Phase A: Extract MPR/FCR tag-aware requirements (full block text).
 
-    doc = fitz.open(pdf_path)
-    total_pages = len(doc)
+    Returns (statements, tagged_texts_by_page, first_tagged_page,
+    last_tagged_page, next_stmt_id).
+    """
     statements: list[ShallStatement] = []
-    stmt_id = 0
     seen_mpr_ids: set[str] = set()
     tagged_texts_by_page: dict[int, list[str]] = {}
     first_tagged_page: int | None = None
     last_tagged_page: int | None = None
     carry_base_section = ""
+    stmt_id = stmt_id_start
 
-    logger.info("Pass 1: extracting from %s (%d pages)", pdf_path.name, total_pages)
-
-    # ------------------------------------------------------------------
-    # Phase A: MPR/FCR tag-aware extraction (full block text)
-    # ------------------------------------------------------------------
     for page_idx in range(len(doc)):
         raw_text = doc[page_idx].get_text()
         if not raw_text or len(raw_text.strip()) < 20:
@@ -476,13 +744,10 @@ def extract_pass1(pdf_path: Path) -> ExtractionResult:
             full_text, inline_rationale = _split_inline_rationale(block["text"])
             full_text = _clean_tagged_requirement_text(full_text)
 
-            # Skip change-log / front-matter noise: require obligation keyword
-            # in the block text and minimum meaningful length
             has_obligation = bool(
                 re.search(
                     r"\bshall\b|\bmust\b|\brequired\b|\bprohibited\b",
-                    full_text,
-                    re.IGNORECASE,
+                    full_text, re.IGNORECASE,
                 )
             )
             if not has_obligation or len(full_text) < 30:
@@ -504,19 +769,20 @@ def extract_pass1(pdf_path: Path) -> ExtractionResult:
             if base_section:
                 carry_base_section = base_section
 
-            # Determine obligation keyword from the block text
             kw_match = re.search(
-                r"\b(shall not|shall|must not|must|is required to|is required|"
-                r"required|is prohibited|prohibited)\b",
-                full_text,
-                re.IGNORECASE,
+                r"\b(shall not|shall|must not|must|are required to|are required|is required to|is required|"
+                r"be required to|be required|required|are prohibited|is prohibited|be prohibited|prohibited)\b",
+                full_text, re.IGNORECASE,
             )
             keyword = kw_match.group(0).lower() if kw_match else "shall"
             obligation_type = OBLIGATION_KEYWORDS.get(keyword, "mandatory")
             subject, requirement = _extract_subject_requirement(full_text, keyword)
 
             justification = _extract_justification(
-                text, block["tag_start"] + len(full_text)
+                text,
+                block["tag_start"],
+                block["tag_end"],
+                full_text,
             )
             if inline_rationale:
                 inline_rationale = re.sub(r"\s+", " ", inline_rationale).strip()
@@ -527,40 +793,39 @@ def extract_pass1(pdf_path: Path) -> ExtractionResult:
             stmt_id += 1
             statements.append(
                 ShallStatement(
-                    id=stmt_id,
-                    page=block["page"],
-                    section=section,
-                    obligation_keyword=keyword,
-                    obligation_type=obligation_type,
-                    statement_text=full_text,
-                    subject=subject,
-                    requirement=requirement,
-                    context="",
-                    mpr_id=mpr_id,
-                    justification=justification,
-                    keywords=keywords,
-                    applies_to=applies_to,
+                    id=stmt_id, page=block["page"], section=section,
+                    obligation_keyword=keyword, obligation_type=obligation_type,
+                    statement_text=full_text, subject=subject, requirement=requirement,
+                    context="", mpr_id=mpr_id, justification=justification,
+                    keywords=keywords, applies_to=applies_to,
                 )
             )
 
-    logger.info("Phase A: %d MPR/FCR tagged requirements", len(statements))
+    return statements, tagged_texts_by_page, first_tagged_page, last_tagged_page, stmt_id
 
-    # ------------------------------------------------------------------
-    # Phase B: Generic obligation extraction (non-tagged shall/must/etc.)
-    # ------------------------------------------------------------------
+
+def _extract_generic_requirements(
+    doc,
+    tagged_texts_by_page: dict[int, list[str]],
+    first_tagged_page: int | None,
+    last_tagged_page: int | None,
+    tagged_standard: bool,
+    stmt_id_start: int = 0,
+) -> tuple[list[ShallStatement], int]:
+    """Phase B: Extract generic obligation statements (non-tagged shall/must/etc.).
+
+    Returns (generic_statements_after_dedup, dedup_removed_count).
+    """
     generic_statements: list[ShallStatement] = []
-    raw_texts: list[str] = []
-    tagged_standard = len(seen_mpr_ids) >= 20
+    stmt_id = stmt_id_start
     generic_carry_section = ""
 
     for page_idx in range(len(doc)):
         raw_text = doc[page_idx].get_text()
         if not raw_text or len(raw_text.strip()) < 20:
-            raw_texts.append("")
             continue
 
         text = _preprocess_page_text(raw_text)
-        raw_texts.append(text)
         page_number = page_idx + 1
 
         if tagged_standard and first_tagged_page is not None and last_tagged_page is not None:
@@ -579,13 +844,10 @@ def extract_pass1(pdf_path: Path) -> ExtractionResult:
             if tagged_standard and keyword not in STRONG_GENERIC_KEYWORDS:
                 continue
 
-            # Skip if this text is already covered by a tagged requirement block.
             if MPR_TAG_PATTERN.search(sentence):
                 continue
             if _statement_is_covered_by_tagged_requirement(
-                sentence,
-                page_number,
-                tagged_texts_by_page,
+                sentence, page_number, tagged_texts_by_page,
             ):
                 continue
 
@@ -602,17 +864,10 @@ def extract_pass1(pdf_path: Path) -> ExtractionResult:
             stmt_id += 1
             generic_statements.append(
                 ShallStatement(
-                    id=stmt_id,
-                    page=page_number,
-                    section=section,
-                    obligation_keyword=keyword,
-                    obligation_type=obligation_type,
-                    statement_text=sentence,
-                    subject=subject,
-                    requirement=requirement,
-                    context=context,
-                    keywords=keywords,
-                    applies_to=applies_to,
+                    id=stmt_id, page=page_number, section=section,
+                    obligation_keyword=keyword, obligation_type=obligation_type,
+                    statement_text=sentence, subject=subject, requirement=requirement,
+                    context=context, keywords=keywords, applies_to=applies_to,
                 )
             )
 
@@ -620,11 +875,7 @@ def extract_pass1(pdf_path: Path) -> ExtractionResult:
         if page_tail_section:
             generic_carry_section = page_tail_section
 
-    doc.close()
-
-    # ------------------------------------------------------------------
-    # Fix 1: Header/footer dedup — remove any text appearing 5+ times
-    # ------------------------------------------------------------------
+    # Header/footer dedup — remove any text appearing 5+ times
     text_counts = Counter(s.statement_text for s in generic_statements)
     boilerplate = {txt for txt, cnt in text_counts.items() if cnt >= 5}
     before_dedup = len(generic_statements)
@@ -632,15 +883,48 @@ def extract_pass1(pdf_path: Path) -> ExtractionResult:
     dedup_removed = before_dedup - len(generic_statements)
 
     if boilerplate:
-        logger.info(
+        LOGGER.info(
             "Fix 1: removed %d boilerplate duplicates (%d unique patterns)",
-            dedup_removed,
-            len(boilerplate),
+            dedup_removed, len(boilerplate),
         )
 
-    statements.extend(generic_statements)
+    return generic_statements, dedup_removed
 
-    # Renumber IDs sequentially
+
+def extract_pass1(pdf_path: Path) -> ExtractionResult:
+    """Pass 1: Extract all binding obligations from a PDF.
+
+    Two-phase approach:
+      Phase A: MPR/FCR tag-aware extraction (structured NASA standards)
+      Phase B: Generic obligation extraction (shall/must/required patterns)
+
+    Phase B is scoped to the tagged page range when >= 20 tagged requirements
+    are found, to avoid extracting noise from front/back matter.
+    """
+    pdf_path = Path(pdf_path)
+    if not pdf_path.exists():
+        raise FileNotFoundError(f"PDF not found: {pdf_path}")
+
+    doc = fitz.open(pdf_path)
+    total_pages = len(doc)
+    LOGGER.info("Pass 1: extracting from %s (%d pages)", pdf_path.name, total_pages)
+
+    # Phase A: Tagged requirements
+    tagged_stmts, tagged_texts_by_page, first_tp, last_tp, stmt_id = (
+        _extract_tagged_requirements(doc)
+    )
+    LOGGER.info("Phase A: %d MPR/FCR tagged requirements", len(tagged_stmts))
+
+    # Phase B: Generic requirements
+    tagged_standard = len({s.mpr_id for s in tagged_stmts if s.mpr_id}) >= 20
+    generic_stmts, dedup_removed = _extract_generic_requirements(
+        doc, tagged_texts_by_page, first_tp, last_tp, tagged_standard, stmt_id,
+    )
+
+    doc.close()
+
+    # Merge and renumber
+    statements = tagged_stmts + generic_stmts
     for i, s in enumerate(statements, 1):
         s.id = i
 
@@ -661,12 +945,9 @@ def extract_pass1(pdf_path: Path) -> ExtractionResult:
         statements=statements,
     )
 
-    logger.info(
+    LOGGER.info(
         "Pass 1 complete: %d statements (%d MPR/FCR, %d generic, %d deduped)",
-        result.total_statements,
-        mpr_count,
-        len(generic_statements),
-        dedup_removed,
+        result.total_statements, mpr_count, len(generic_stmts), dedup_removed,
     )
     return result
 
@@ -733,7 +1014,7 @@ def enrich_with_sonnet(
     justification, keywords, and applies_to extraction."""
     mpr_stmts = [s for s in result.statements if s.mpr_id]
     if not mpr_stmts:
-        logger.info("Sonnet enrichment skipped: no MPR/FCR statements")
+        LOGGER.info("Sonnet enrichment skipped: no MPR/FCR statements")
         return result
 
     # Group by page
@@ -746,7 +1027,7 @@ def enrich_with_sonnet(
         pages = pages[:max_pages]
 
     total_pages = len(pages)
-    logger.info(
+    LOGGER.info(
         "Sonnet enrichment: %d MPR/FCR across %d pages",
         sum(len(by_page[p]) for p in pages),
         total_pages,
@@ -838,7 +1119,7 @@ def enrich_with_sonnet(
             elapsed = time.time() - started
             avg = elapsed / i
             eta = max(0, (total_pages - i) * avg)
-            logger.info(
+            LOGGER.info(
                 "  Page %d/%d (p.%d): %d/%d enriched (%.1fs, ETA ~%.0fs)",
                 i,
                 total_pages,
@@ -851,19 +1132,341 @@ def enrich_with_sonnet(
 
         except json.JSONDecodeError as e:
             failed_count += len(page_stmts)
-            logger.warning("  Page %d: JSON parse failed: %s", page_num, e)
+            LOGGER.warning("  Page %d: JSON parse failed: %s", page_num, e)
         except Exception as e:
             failed_count += len(page_stmts)
-            logger.error("  Page %d: %s", page_num, e)
+            LOGGER.error("  Page %d: %s", page_num, e)
 
     doc.close()
 
-    logger.info(
+    LOGGER.info(
         "Sonnet enrichment complete: %d/%d enriched, %d failed (%.1fs total)",
         enriched_count,
         len(mpr_stmts),
         failed_count,
         time.time() - started,
+    )
+    return result
+
+
+# ============================================================================
+# Pass 1c: Implicit obligation detection
+# ============================================================================
+
+IMPLICIT_DETECTION_PROMPT = """You are analyzing a page from a regulatory or contractual document.
+
+Below is the page text. Some explicit obligation statements (using "shall", "must", "required", etc.) have ALREADY been extracted and are listed under ALREADY EXTRACTED.
+
+Your job: find **implicit obligations** — statements that impose a binding requirement on the contractor or system WITHOUT using standard obligation keywords. These are statements that a proposal manager would need to respond to, but that an automated keyword search would miss.
+
+Examples of implicit obligations:
+- "Reports are due quarterly" (= contractor shall submit reports quarterly)
+- "The system operates at 5V" (= system shall be designed to operate at 5V)
+- "All personnel hold a SECRET clearance" (= contractor shall staff only cleared personnel)
+- "Testing follows MIL-STD-810" (= contractor shall test per MIL-STD-810)
+- "Documentation is maintained in CMMI Level 3 format" (= contractor shall maintain CMMI L3 docs)
+- "The program office reviews deliverables within 10 business days" (= deliverables have a 10-day review cycle the contractor must plan around)
+
+Do NOT extract:
+- Statements that use shall/must/required/prohibited (already captured)
+- Background information, definitions, or scope descriptions
+- Statements describing what the government will do (unless they create a contractor obligation)
+- Recommendations (should/may)
+- Obvious boilerplate or headers
+
+For each implicit obligation found, assess your confidence (0.0-1.0) that this is genuinely a binding requirement rather than informational text.
+
+Return STRICT JSON only:
+{{"obligations": [
+  {{
+    "statement_text": "the exact text from the document",
+    "requirement": "what the contractor/system must do (rewritten as an explicit obligation)",
+    "subject": "who/what must comply",
+    "section": "section number if visible",
+    "confidence": 0.0-1.0,
+    "keywords": ["keyword1", "keyword2"],
+    "context": "brief explanation of why this is binding"
+  }}
+]}}
+
+Rules:
+- Only extract genuinely binding implicit obligations, not informational text.
+- Each obligation must be atomic: one requirement per entry.
+- Preserve exact source language in statement_text.
+- Be conservative — when in doubt, do not extract. False negatives are preferable to false positives.
+- Confidence below 0.5 means you're unsure — include it and let the human reviewer decide.
+- If no implicit obligations are found, return {{"obligations": []}}.
+- Return valid JSON only. No markdown fences, no commentary.\
+"""
+
+
+def _normalize_for_dedup(text: str) -> str:
+    """Lowercase, collapse whitespace, strip punctuation for dedup comparison."""
+    text = re.sub(r"\s+", " ", text.lower().strip())
+    text = re.sub(r"[^\w\s]", "", text)
+    return text
+
+
+def _overlaps_existing(
+    new_text: str,
+    existing_texts: set[str],
+    threshold: float = 0.6,
+) -> bool:
+    """Check if new_text substantially overlaps any existing statement."""
+    new_norm = _normalize_for_dedup(new_text)
+    new_words = set(new_norm.split())
+    if not new_words:
+        return True
+    for existing_norm in existing_texts:
+        existing_words = set(existing_norm.split())
+        if not existing_words:
+            continue
+        overlap = len(new_words & existing_words)
+        smaller = min(len(new_words), len(existing_words))
+        if smaller > 0 and overlap / smaller >= threshold:
+            return True
+    return False
+
+
+def detect_implicit_obligations(
+    result: ExtractionResult,
+    pdf_path: Path,
+    *,
+    api_key: str | None = None,
+    max_pages: int = 0,
+    min_confidence: float = 0.0,
+) -> ExtractionResult:
+    """Pass 1c: Detect implicit obligations that lack standard obligation keywords.
+
+    Sends each page to Claude with the already-extracted explicit statements
+    for that page, asking it to find binding requirements expressed without
+    shall/must/required/prohibited language.
+
+    New statements are added with obligation_type='implicit' and the
+    confidence score from the LLM.
+    """
+    import os
+
+    try:
+        from anthropic import Anthropic
+    except ImportError:
+        raise ImportError(
+            "anthropic package required for implicit detection. "
+            "Run: pip install anthropic"
+        )
+
+    import httpx
+
+    key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+    if not key:
+        raise ValueError(
+            "No API key found. Set ANTHROPIC_API_KEY or pass --api-key"
+        )
+    client = Anthropic(
+        api_key=key,
+        timeout=httpx.Timeout(
+            float(os.environ.get("ORACLE_TIMEOUT_SECONDS", "300")),
+            connect=10.0,
+        ),
+    )
+
+    doc = fitz.open(pdf_path)
+    total_pages = len(doc)
+
+    # Build per-page index of already-extracted statements
+    existing_by_page: dict[int, list[ShallStatement]] = {}
+    for s in result.statements:
+        existing_by_page.setdefault(s.page, []).append(s)
+
+    # Build normalized text set for dedup
+    existing_norm_texts: set[str] = {
+        _normalize_for_dedup(s.statement_text) for s in result.statements
+    }
+
+    pages_to_process = list(range(total_pages))
+    if max_pages and max_pages > 0:
+        pages_to_process = pages_to_process[:max_pages]
+
+    LOGGER.info(
+        "Pass 1c: detecting implicit obligations across %d pages",
+        len(pages_to_process),
+    )
+
+    new_statements: list[ShallStatement] = []
+    next_id = max((s.id for s in result.statements), default=0) + 1
+    failed_pages = 0
+    started = time.time()
+
+    # Process in chunks of 5 pages (same chunking as generic extraction)
+    CHUNK_SIZE = 5
+    chunk_start = 0
+
+    while chunk_start < len(pages_to_process):
+        chunk_end = min(chunk_start + CHUNK_SIZE, len(pages_to_process))
+        chunk_page_indices = pages_to_process[chunk_start:chunk_end]
+        chunk_page_numbers = [idx + 1 for idx in chunk_page_indices]
+
+        # Build page text and existing obligations summary for the chunk
+        page_texts = []
+        already_extracted_lines = []
+
+        for page_idx in chunk_page_indices:
+            raw_text = doc[page_idx].get_text()
+            if not raw_text or len(raw_text.strip()) < 20:
+                continue
+            text = _preprocess_page_text(raw_text)
+            page_num = page_idx + 1
+            page_texts.append(f"--- PAGE {page_num} ---\n{text}")
+
+            page_stmts = existing_by_page.get(page_num, [])
+            for s in page_stmts:
+                already_extracted_lines.append(
+                    f"  - [{s.obligation_keyword.upper()}] {s.statement_text[:200]}"
+                )
+
+        if not page_texts:
+            chunk_start = chunk_end
+            continue
+
+        already_section = ""
+        if already_extracted_lines:
+            already_section = (
+                "\n\nALREADY EXTRACTED (do not re-extract these):\n"
+                + "\n".join(already_extracted_lines)
+            )
+
+        content = (
+            "\n\n".join(page_texts)
+            + already_section
+            + "\n\n"
+            + IMPLICIT_DETECTION_PROMPT
+        )
+
+        try:
+            response = client.messages.create(
+                model=os.environ.get("ORACLE_VISION_MODEL", "claude-sonnet-4-6"),
+                max_tokens=4096,
+                temperature=0,
+                messages=[{"role": "user", "content": content}],
+            )
+
+            if not response.content:
+                chunk_start = chunk_end
+                continue
+
+            raw_response = response.content[0].text
+
+            # Strip markdown fences if present
+            if "```" in raw_response:
+                start_idx = raw_response.find("```")
+                first_nl = raw_response.find("\n", start_idx)
+                end_idx = raw_response.rfind("```")
+                if first_nl != -1 and end_idx > first_nl:
+                    raw_response = raw_response[first_nl + 1 : end_idx].strip()
+
+            parsed = json.loads(raw_response)
+            obligations = parsed.get("obligations", [])
+
+            chunk_new = 0
+            for ob in obligations:
+                stmt_text = ob.get("statement_text", "").strip()
+                if not stmt_text or len(stmt_text) < 15:
+                    continue
+
+                confidence = float(ob.get("confidence", 0.5))
+                if confidence < min_confidence:
+                    continue
+
+                # Dedup against existing explicit statements
+                if _overlaps_existing(stmt_text, existing_norm_texts):
+                    continue
+
+                section = ob.get("section", "")
+                requirement = ob.get("requirement", stmt_text)
+                subject = ob.get("subject", "(implicit)")
+                keywords_list = ob.get("keywords", [])
+                if isinstance(keywords_list, str):
+                    keywords_list = [keywords_list]
+
+                page_num = chunk_page_numbers[0]  # default to first page in chunk
+                # Try to figure out which page this came from
+                for pn in chunk_page_numbers:
+                    page_stmts_text = "\n".join(
+                        p for p in page_texts
+                        if p.startswith(f"--- PAGE {pn} ---")
+                    )
+                    if stmt_text[:50].lower() in page_stmts_text.lower():
+                        page_num = pn
+                        break
+
+                applies_to = _classify_applicability(stmt_text, ob.get("context", ""))
+
+                stmt = ShallStatement(
+                    id=next_id,
+                    page=page_num,
+                    section=section,
+                    obligation_keyword="(implicit)",
+                    obligation_type="implicit",
+                    statement_text=stmt_text,
+                    subject=subject,
+                    requirement=requirement,
+                    context=ob.get("context", ""),
+                    keywords=keywords_list[:7],
+                    applies_to=applies_to,
+                    confidence=confidence,
+                )
+                new_statements.append(stmt)
+                existing_norm_texts.add(_normalize_for_dedup(stmt_text))
+                next_id += 1
+                chunk_new += 1
+
+            LOGGER.info(
+                "  Pages %d–%d: found %d implicit obligations",
+                chunk_page_numbers[0],
+                chunk_page_numbers[-1],
+                chunk_new,
+            )
+
+        except json.JSONDecodeError as e:
+            failed_pages += len(chunk_page_indices)
+            LOGGER.warning(
+                "  Pages %d–%d: JSON parse failed: %s",
+                chunk_page_numbers[0],
+                chunk_page_numbers[-1],
+                e,
+            )
+        except Exception as e:
+            failed_pages += len(chunk_page_indices)
+            LOGGER.error(
+                "  Pages %d–%d: %s",
+                chunk_page_numbers[0],
+                chunk_page_numbers[-1],
+                e,
+            )
+
+        chunk_start = chunk_end
+
+    doc.close()
+
+    # Append to result
+    result.statements.extend(new_statements)
+    result.total_statements = len(result.statements)
+
+    # Update by_type counts
+    implicit_count = sum(1 for s in result.statements if s.obligation_type == "implicit")
+    if implicit_count > 0:
+        result.by_type["implicit"] = implicit_count
+
+    # Renumber IDs sequentially
+    for i, s in enumerate(result.statements, 1):
+        s.id = i
+
+    elapsed = time.time() - started
+    LOGGER.info(
+        "Pass 1c complete: %d implicit obligations found, %d pages failed (%.1fs)",
+        len(new_statements),
+        failed_pages,
+        elapsed,
     )
     return result
 
@@ -931,7 +1534,7 @@ def _call_ollama(
                 return str(content)
         except (TimeoutError, socket.timeout) as e:
             if attempt < retries:
-                logger.warning(
+                LOGGER.warning(
                     "Ollama timeout (attempt %d/%d), retrying...",
                     attempt + 1,
                     retries + 1,
@@ -945,7 +1548,7 @@ def _call_ollama(
             msg = str(e).lower()
             if "timed out" in msg:
                 if attempt < retries:
-                    logger.warning(
+                    LOGGER.warning(
                         "Ollama timeout/URLError (attempt %d/%d), retrying...",
                         attempt + 1,
                         retries + 1,
@@ -987,7 +1590,7 @@ def _parse_llm_classifications(response_text: str) -> list[dict]:
                 except json.JSONDecodeError:
                     continue
         if parsed is None:
-            logger.warning("Could not parse LLM JSON payload (prefix=%r)", text[:120])
+            LOGGER.warning("Could not parse LLM JSON payload (prefix=%r)", text[:120])
             return []
 
     if isinstance(parsed, dict):
@@ -1038,11 +1641,11 @@ def extract_pass2(
 
     total = len(statements)
     if total == 0:
-        logger.info("Pass 2 skipped: no statements")
+        LOGGER.info("Pass 2 skipped: no statements")
         return result
 
     total_batches = (total + batch_size - 1) // batch_size
-    logger.info(
+    LOGGER.info(
         "Pass 2: classifying %d statements with %s (%d batches x %d)",
         total,
         model,
@@ -1099,7 +1702,7 @@ def extract_pass2(
             avg = (time.time() - started) / batch_num
             rem = max(0, total_batches - batch_num)
             eta_min = int((avg * rem) / 60)
-            logger.info(
+            LOGGER.info(
                 "  Batch %d/%d: %d/%d OK (%d/%d total, %d%%, %.1fs, ETA ~%dm)",
                 batch_num,
                 total_batches,
@@ -1113,12 +1716,12 @@ def extract_pass2(
             )
 
         except ConnectionError:
-            logger.error("Ollama not available - aborting pass 2")
+            LOGGER.error("Ollama not available - aborting pass 2")
             break
         except TimeoutError as e:
             failed_count += len(batch)
             consecutive_failures += 1
-            logger.error(
+            LOGGER.error(
                 "  Batch %d/%d timeout: %s (%d/%d total)",
                 batch_num,
                 total_batches,
@@ -1127,7 +1730,7 @@ def extract_pass2(
                 total,
             )
             if consecutive_failures >= max_consecutive_failures:
-                logger.error(
+                LOGGER.error(
                     "Stopping pass 2 after %d consecutive failures.",
                     consecutive_failures,
                 )
@@ -1135,7 +1738,7 @@ def extract_pass2(
         except Exception as e:
             failed_count += len(batch)
             consecutive_failures += 1
-            logger.error(
+            LOGGER.error(
                 "  Batch %d/%d failed: %s (%d/%d total)",
                 batch_num,
                 total_batches,
@@ -1144,13 +1747,13 @@ def extract_pass2(
                 total,
             )
             if consecutive_failures >= max_consecutive_failures:
-                logger.error(
+                LOGGER.error(
                     "Stopping pass 2 after %d consecutive failures.",
                     consecutive_failures,
                 )
                 break
 
-    logger.info(
+    LOGGER.info(
         "Pass 2 complete: %d/%d classified, %d failed",
         classified_count,
         total,
@@ -1233,8 +1836,8 @@ def save_results(result: ExtractionResult, output_dir: Path) -> dict[str, Path]:
                     f.write(f"    Applies to: {', '.join(s.applies_to)}\n")
                 f.write("\n")
 
-    logger.info("Saved: %s", json_path)
-    logger.info("Saved: %s", summary_path)
+    LOGGER.info("Saved: %s", json_path)
+    LOGGER.info("Saved: %s", summary_path)
     return {"json": json_path, "summary": summary_path}
 
 
@@ -1335,6 +1938,17 @@ def main() -> None:
         default=150,
         help="DPI for page rendering in Sonnet enrichment (default: 150)",
     )
+    parser.add_argument(
+        "--implicit",
+        action="store_true",
+        help="Run Pass 1c: detect implicit obligations without keyword markers",
+    )
+    parser.add_argument(
+        "--implicit-min-confidence",
+        type=float,
+        default=0.0,
+        help="Minimum confidence for implicit obligations (default: 0.0, keep all)",
+    )
     args = parser.parse_args()
 
     pdf_path = Path(args.pdf)
@@ -1353,11 +1967,11 @@ def main() -> None:
         result.by_type = {}
         for s in result.statements:
             result.by_type[s.obligation_type] = result.by_type.get(s.obligation_type, 0) + 1
-        logger.info("Filtered to mandatory/prohibition: %d -> %d", before, result.total_statements)
+        LOGGER.info("Filtered to mandatory/prohibition: %d -> %d", before, result.total_statements)
 
     # Always checkpoint pass 1 immediately so caller gets JSON even if enrichment is slow.
     checkpoint = save_results(result, output_dir)
-    logger.info("Pass 1 checkpoint written: %s", checkpoint["json"])
+    LOGGER.info("Pass 1 checkpoint written: %s", checkpoint["json"])
 
     # Sonnet Vision enrichment (Pass 1.5)
     if args.enrich_sonnet:
@@ -1370,7 +1984,19 @@ def main() -> None:
         )
         # Checkpoint after enrichment
         save_results(result, output_dir)
-        logger.info("Sonnet enrichment checkpoint written")
+        LOGGER.info("Sonnet enrichment checkpoint written")
+
+    # Implicit obligation detection (Pass 1c)
+    if args.implicit:
+        result = detect_implicit_obligations(
+            result,
+            pdf_path,
+            api_key=args.api_key,
+            max_pages=args.max_pages,
+            min_confidence=args.implicit_min_confidence,
+        )
+        save_results(result, output_dir)
+        LOGGER.info("Implicit obligation detection checkpoint written")
 
     if args.classify:
         result = extract_pass2(

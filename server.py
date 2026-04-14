@@ -28,10 +28,10 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from oracle.cli import (
     _load_manifest,
@@ -45,6 +45,7 @@ from oracle.cli import (
     remove_pack as cli_remove_pack,
     run_review as cli_run_review,
 )
+from oracle.chat_engine import answer_query as oracle_answer_query
 from oracle.oracle2 import compute_metrics
 from oracle.oracle2_adapter import build_review_result
 
@@ -62,19 +63,28 @@ app.add_middleware(
     allow_origins=[
         os.environ.get("FRONTEND_URL", "http://localhost:3000"),
     ],
-    allow_methods=["POST", "GET"],
-    allow_headers=["*"],
+    allow_methods=["POST", "GET", "DELETE"],
+    # Why scoped headers: allow_headers=["*"] previously accepted any header.
+    # We only need Content-Type (for JSON/form bodies) and X-API-Key (auth).
+    allow_headers=["Content-Type", "X-API-Key"],
 )
 
 # ---------------------------------------------------------------------------
-# API Key Auth
+# API Key Auth — enforced via Depends() on the oracle router
 # ---------------------------------------------------------------------------
+# Why Depends() instead of manual calls: previously every endpoint called
+# verify_api_key() manually.  If a new endpoint forgot the call, it was
+# silently unauthenticated.  Router-level dependencies make auth the default.
 
 API_KEY = os.environ.get("ORACLE_API_KEY", "")
 
 
 async def verify_api_key(request: Request) -> None:
-    """Verify X-API-Key header matches the configured key."""
+    """Verify X-API-Key header matches the configured key.
+
+    Registered as a router-level dependency so ALL /oracle/* endpoints
+    are protected by default.  No manual calls needed in endpoint bodies.
+    """
     if not API_KEY:
         return
     key = request.headers.get("X-API-Key", "")
@@ -82,11 +92,43 @@ async def verify_api_key(request: Request) -> None:
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 
+# All /oracle/* endpoints go through this router, which enforces auth.
+oracle_router = APIRouter(prefix="/oracle", dependencies=[Depends(verify_api_key)])
+
 # ---------------------------------------------------------------------------
-# Session Store (in-memory for beta)
+# Session Store (in-memory for beta, with eviction)
 # ---------------------------------------------------------------------------
+# Why TTL eviction: without it, _sessions grows unboundedly under sustained
+# use.  Completed/errored sessions older than 2 hours are evicted on each
+# new session creation.  In-progress sessions are never evicted.
+
+import time as _time  # noqa: E402 — grouped with session store for locality
+
+_SESSION_TTL_SECONDS = 2 * 60 * 60  # 2 hours
+_MAX_SESSIONS = 200
 
 _sessions: dict[str, dict[str, Any]] = {}
+_chat_sessions: dict[str, dict[str, Any]] = {}
+
+
+def _evict_stale_sessions() -> None:
+    """Remove completed/errored sessions older than TTL, keeping at most _MAX_SESSIONS."""
+    now = _time.time()
+    stale = [
+        sid for sid, s in _sessions.items()
+        if s.get("status") in ("completed", "error")
+        and (now - s.get("created_at", now)) > _SESSION_TTL_SECONDS
+    ]
+    for sid in stale:
+        _sessions.pop(sid, None)
+    # Hard cap: if still over limit, drop oldest completed sessions
+    if len(_sessions) > _MAX_SESSIONS:
+        completed = sorted(
+            [(sid, s) for sid, s in _sessions.items() if s.get("status") in ("completed", "error")],
+            key=lambda x: x[1].get("created_at", 0),
+        )
+        for sid, _ in completed[:len(_sessions) - _MAX_SESSIONS]:
+            _sessions.pop(sid, None)
 
 # ---------------------------------------------------------------------------
 # Log Capture — intercepts oracle2 logger output per-session
@@ -124,6 +166,11 @@ SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 SESSION_STATE_FILE = "session_state.json"
 MAX_LOG_MESSAGES = 200
 
+# Hard ceiling for UI-driven reviews. Each round fans out to ~4 reviewer LLMs
+# over the full document, so cost scales roughly linearly. The CLI can still
+# exceed this; the cap applies only to requests that come through the HTTP API.
+UI_MAX_ROUNDS_CEILING = 4
+
 
 def _max_rounds_for_mode(mode: str) -> int:
     """Return the configured review budget for a given UI mode."""
@@ -137,10 +184,28 @@ def _max_rounds_for_mode(mode: str) -> int:
     if not raw:
         return defaults[mode]
     try:
-        return max(1, int(raw))
+        parsed = int(raw)
     except ValueError:
         LOGGER.warning("Invalid %s=%r, falling back to %d", env_name, raw, defaults[mode])
         return defaults[mode]
+    return max(1, min(UI_MAX_ROUNDS_CEILING, parsed))
+
+
+def _clamp_user_rounds(requested: int | None, mode: str) -> int:
+    """Clamp a user-supplied max_rounds value to the UI ceiling.
+
+    Falls back to the mode default when not supplied. Values below 1 are
+    coerced to 1; values above UI_MAX_ROUNDS_CEILING are coerced to the
+    ceiling. The backend is the source of truth — the frontend cap is
+    purely a UX hint.
+    """
+    if requested is None:
+        return _max_rounds_for_mode(mode)
+    if requested < 1:
+        return 1
+    if requested > UI_MAX_ROUNDS_CEILING:
+        return UI_MAX_ROUNDS_CEILING
+    return requested
 
 
 def extract_text(file_path: Path) -> str:
@@ -538,7 +603,7 @@ def _run_pack_generate_background(
 # ---------------------------------------------------------------------------
 
 
-@app.post("/oracle/analyze")
+@oracle_router.post("/analyze")
 async def analyze(
     request: Request,
     file: UploadFile = File(...),
@@ -552,11 +617,11 @@ async def analyze(
     Returns session_id immediately. Client should connect to
     GET /oracle/stream/{session_id} for live progress.
     """
-    await verify_api_key(request)
 
     if mode not in ("polish", "review", "rewrite"):
         raise HTTPException(status_code=400, detail=f"Invalid mode: {mode}")
 
+    _evict_stale_sessions()
     session_id = uuid.uuid4().hex[:12]
     session_dir = SESSIONS_DIR / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
@@ -576,7 +641,7 @@ async def analyze(
     # Create message queue and start background thread
     msg_queue: queue.Queue[str | None] = queue.Queue()
     output_dir = session_dir / "oracle_output"
-    review_budget = max_rounds or _max_rounds_for_mode(mode)
+    review_budget = _clamp_user_rounds(max_rounds, mode)
 
     # Store queue for the stream endpoint to read
     _sessions[session_id] = {
@@ -592,6 +657,7 @@ async def analyze(
         "status": "processing",
         "msg_queue": msg_queue,
         "error": None,
+        "created_at": _time.time(),
     }
     _persist_session_state(_sessions[session_id])
 
@@ -618,7 +684,7 @@ async def analyze(
     }
 
 
-@app.get("/oracle/stream/{session_id}")
+@oracle_router.get("/stream/{session_id}")
 async def stream(request: Request, session_id: str):
     """SSE stream of live oracle2 progress messages.
 
@@ -627,7 +693,6 @@ async def stream(request: Request, session_id: str):
       event: done    — data: JSON result (same shape as old /analyze response)
       event: error   — data: error message
     """
-    await verify_api_key(request)
 
     session = _get_session(session_id)
     if not session:
@@ -686,10 +751,9 @@ async def stream(request: Request, session_id: str):
     )
 
 
-@app.get("/oracle/session/{session_id}")
+@oracle_router.get("/session/{session_id}")
 async def session_status(request: Request, session_id: str):
     """Return the latest session status/result payload for polling fallbacks."""
-    await verify_api_key(request)
 
     session = _get_session(session_id)
     if not session:
@@ -789,20 +853,147 @@ def _clean_log_message(msg: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Oracle Chat
+# ---------------------------------------------------------------------------
+
+
+class OracleChatMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    role: str
+    content: str
+
+
+class OracleChatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    message: str
+    session_id: str | None = None
+    history: list[OracleChatMessage] = Field(default_factory=list)
+    selected_packs: list[str] = Field(default_factory=list)
+    compare_only: bool = False
+    review_only: bool = False
+
+
+def _split_chat_chunks(text: str) -> list[str]:
+    chunks = [
+        chunk.strip()
+        for chunk in text.replace("\r\n", "\n").split("\n\n")
+        if chunk.strip()
+    ]
+    return chunks or [text]
+
+
+def _resolve_chat_scope(request: OracleChatRequest) -> tuple[str, list[str], bool, bool]:
+    session_id = request.session_id or f"chat-{uuid.uuid4().hex[:8]}"
+    session = _chat_sessions.setdefault(session_id, {})
+
+    fields_set = getattr(request, "model_fields_set", set())
+    if "selected_packs" in fields_set:
+        selected_packs = list(request.selected_packs)
+    else:
+        selected_packs = list(session.get("selected_packs", []))
+
+    review_only = bool(
+        request.review_only if "review_only" in fields_set else session.get("review_only", False)
+    )
+    compare_requested = (
+        request.compare_only if "compare_only" in fields_set else session.get("compare_only", False)
+    )
+    compare_only = bool(compare_requested and not review_only)
+
+    session["selected_packs"] = list(selected_packs)
+    session["compare_only"] = compare_only
+    session["review_only"] = review_only
+    return session_id, list(selected_packs), compare_only, review_only
+
+
+@oracle_router.get("/chat/ping")
+async def chat_ping(request: Request):
+    return {"status": "ok", "domain": "oracle-chat", "advisory_only": True}
+
+
+@oracle_router.post("/chat")
+async def oracle_chat(request: Request, body: OracleChatRequest):
+    session_id, selected_packs, compare_only, review_only = _resolve_chat_scope(body)
+    result = oracle_answer_query(
+        message=body.message,
+        pack_names=selected_packs,
+        pack_dir=_pack_dir(),
+        compare_only=compare_only,
+        review_only=review_only,
+    )
+    return {
+        "session_id": session_id,
+        **result,
+    }
+
+
+@oracle_router.post("/chat/stream")
+async def oracle_chat_stream(request: Request, body: OracleChatRequest):
+    session_id, selected_packs, compare_only, review_only = _resolve_chat_scope(body)
+
+    async def _event_generator():
+        try:
+            result = oracle_answer_query(
+                message=body.message,
+                pack_names=selected_packs,
+                pack_dir=_pack_dir(),
+                compare_only=compare_only,
+                review_only=review_only,
+            )
+            yield f"event: meta\ndata: {json.dumps({'status': result['status'], 'selected_packs': result['selected_packs'], 'compare_only': result['compare_only'], 'review_only': result['review_only']})}\n\n"
+            yield "event: text_start\ndata: {}\n\n"
+            for chunk in _split_chat_chunks(str(result["response"])):
+                yield f"event: text\ndata: {json.dumps({'text': chunk})}\n\n"
+                await asyncio.sleep(0)
+            yield "event: text_end\ndata: {}\n\n"
+            done_payload = {
+                "envelope_version": result.get("envelope_version"),
+                "session_id": session_id,
+                "status": result["status"],
+                "answer_text": result.get("answer_text"),
+                "evidence_assessment": result.get("evidence_assessment"),
+                "citations": result["citations"],
+                "follow_ups": result["follow_ups"],
+                "selected_packs": result["selected_packs"],
+                "compare_only": result["compare_only"],
+                "review_only": result["review_only"],
+                "advisory_only": result["advisory_only"],
+                "diagnostics": result.get("diagnostics"),
+                "stage_artifacts": result.get("stage_artifacts"),
+            }
+            yield f"event: done\ndata: {json.dumps(done_payload)}\n\n"
+        except Exception as exc:
+            yield f"event: error\ndata: {json.dumps({'detail': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        _event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
 # Pack Library
 # ---------------------------------------------------------------------------
 
 
 class PromotePackRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     reviewer: str
     notes: str | None = None
     allow_partial_promotion: bool = False
     override_hash_mismatch: bool = False
 
 
-@app.get("/oracle/packs")
+@oracle_router.get("/packs")
 async def list_packs(request: Request):
-    await verify_api_key(request)
     manifest = _load_manifest(_pack_dir())
     packs = [
         _pack_summary(entry)
@@ -814,7 +1005,7 @@ async def list_packs(request: Request):
     return {"packs": packs}
 
 
-@app.post("/oracle/packs/import")
+@oracle_router.post("/packs/import")
 async def import_pack(
     request: Request,
     file: UploadFile = File(...),
@@ -823,7 +1014,6 @@ async def import_pack(
     allow_partial: bool = Form(False),
     overwrite: bool = Form(False),
 ):
-    await verify_api_key(request)
 
     session_dir = SESSIONS_DIR / f"pack-import-{uuid.uuid4().hex[:12]}"
     session_dir.mkdir(parents=True, exist_ok=True)
@@ -844,7 +1034,7 @@ async def import_pack(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.post("/oracle/packs/generate")
+@oracle_router.post("/packs/generate")
 async def generate_pack_endpoint(
     request: Request,
     file: UploadFile = File(...),
@@ -854,7 +1044,6 @@ async def generate_pack_endpoint(
     allow_partial: bool = Form(False),
     overwrite: bool = Form(False),
 ):
-    await verify_api_key(request)
 
     session_id = uuid.uuid4().hex[:12]
     session_dir = SESSIONS_DIR / session_id
@@ -876,6 +1065,7 @@ async def generate_pack_endpoint(
         "output_dir": str(output_dir),
         "log_messages": [],
         "msg_queue": msg_queue,
+        "created_at": _time.time(),
     }
     _persist_session_state(_sessions[session_id])
 
@@ -899,18 +1089,16 @@ async def generate_pack_endpoint(
     return {"session_id": session_id, "status": "processing", "job_type": "pack_generate"}
 
 
-@app.get("/oracle/packs/{name}")
+@oracle_router.get("/packs/{name}")
 async def show_pack(request: Request, name: str, verbose: bool = False):
-    await verify_api_key(request)
     try:
         return _pack_detail(name, verbose=verbose)
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@app.post("/oracle/packs/{name}/promote")
+@oracle_router.post("/packs/{name}/promote")
 async def promote_pack_endpoint(request: Request, name: str, body: PromotePackRequest):
-    await verify_api_key(request)
     try:
         cli_promote_pack(
             pack_name=name,
@@ -926,9 +1114,8 @@ async def promote_pack_endpoint(request: Request, name: str, body: PromotePackRe
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.delete("/oracle/packs/{name}")
+@oracle_router.delete("/packs/{name}")
 async def delete_pack(request: Request, name: str):
-    await verify_api_key(request)
     if not cli_remove_pack(name, _pack_dir()):
         raise HTTPException(status_code=404, detail=f"Pack not found: {name}")
     return {"status": "complete", "removed": name}
@@ -942,14 +1129,15 @@ async def delete_pack(request: Request, name: str):
 class GenerateRequest(BaseModel):
     """Request body for the generate endpoint."""
 
+    model_config = ConfigDict(extra="forbid")
+
     session_id: str
     approved: bool
 
 
-@app.post("/oracle/generate")
+@oracle_router.post("/generate")
 async def generate(request: Request, body: GenerateRequest):
     """Generate polished output documents from a reviewed session."""
-    await verify_api_key(request)
 
     session = _get_session(body.session_id)
     if not session:
@@ -964,10 +1152,9 @@ async def generate(request: Request, body: GenerateRequest):
     }
 
 
-@app.get("/oracle/download/{session_id}/{fmt}")
+@oracle_router.get("/download/{session_id}/{fmt}")
 async def download(request: Request, session_id: str, fmt: str):
     """Download a generated document (polished formatting)."""
-    await verify_api_key(request)
 
     session = _get_session(session_id)
     if not session:
@@ -1075,7 +1262,11 @@ async def download(request: Request, session_id: str, fmt: str):
         raise HTTPException(status_code=400, detail=f"Invalid format: {fmt}")
 
 
+# Mount the authenticated oracle router onto the app
+app.include_router(oracle_router)
+
+
 @app.get("/health")
 async def health():
-    """Health check endpoint for Railway."""
+    """Health check endpoint for Railway. No auth required."""
     return {"status": "ok", "service": "oracle"}

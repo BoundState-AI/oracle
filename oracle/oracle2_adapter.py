@@ -187,7 +187,12 @@ def verify_session_dir(session_dir: Path) -> list[str]:
 # Citation Extraction
 # ---------------------------------------------------------------------------
 
-# Pattern: [pack_id:rule_id]  e.g., [far-rulepack-complete:far-15-001]
+# WHY this pattern: Oracle reviews embed rule citations as [pack_id:rule_id]
+# (e.g., [far-rulepack-complete:far-15-001]) so downstream tools can trace
+# findings back to specific rules in specific packs.  The bracket delimiter
+# was chosen because it doesn't conflict with Markdown link syntax and is
+# visually distinct in prose.  The colon separates pack from rule because
+# both IDs may contain hyphens.
 _CITATION_PATTERN = re.compile(r"\[([^:\]]+):([^\]]+)\]")
 
 

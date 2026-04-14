@@ -12,6 +12,8 @@ Version: 1.0.0
 Classification: BoundState Proprietary
 """
 
+__safety_critical__: bool = True
+
 __version__ = "1.0.0"
 
 import asyncio
@@ -179,11 +181,13 @@ async def format_remediation_sonnet(
             raise RuntimeError("Sonnet formatter returned empty response.")
         return text
 
-    loop = asyncio.get_event_loop()
+    # Use get_running_loop() — get_event_loop() is deprecated since Python 3.10
+    # and may create a new loop unexpectedly in non-main threads.
+    loop = asyncio.get_running_loop()
     try:
         text = await loop.run_in_executor(None, _call_sonnet)
         return text
-    except Exception as exc:
+    except (RuntimeError, ConnectionError, TimeoutError) as exc:
         LOGGER.warning("[TOCR] Sonnet remediation formatter failed: %s", exc)
         return None
 

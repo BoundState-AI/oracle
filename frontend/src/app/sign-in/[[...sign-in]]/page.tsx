@@ -1,3 +1,8 @@
+/**
+ * SignInPage — Clerk sign-in catch-all route with branded context panel.
+ * Provides a full-page auth experience instead of dropping users into a blank wall.
+ */
+
 import Link from "next/link";
 import { SignIn } from "@clerk/nextjs";
 import { ArrowLeft, ShieldCheck, Workflow } from "lucide-react";

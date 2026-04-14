@@ -79,16 +79,11 @@ class DOCXParser:
         sub_tasks = self._extract_sub_tasks(tables_data)
         funding_table = self._extract_funding(tables_data)
 
-        # Detect software/QMS
-        software_scope = bool(re.search(r"\b(software|AI|machine learning)\b", description, re.I))
-        qms_required = bool(re.search(r"\b(QMS|quality management|8739)\b", quality_text, re.I))
+        quality_plan = self._detect_quality_plan(description, quality_text)
 
-        quality_plan = QualityPlan(
-            text=quality_text,
-            qms_required=qms_required,
-            software_scope=software_scope,
-        ) if quality_text else None
-
+        # Known limitation: "non-emergency" would match the emergency regex. This
+        # is acceptable because emergency designation is typically in a dedicated
+        # field, not negated inline.
         emergency = bool(re.search(r"\bemergency\b", emergency_text, re.I))
 
         return TaskOrder(
@@ -105,8 +100,42 @@ class DOCXParser:
             emergency_designation=emergency,
             emergency_justification=emergency_text if emergency else "",
             agency_comments=comments,
-            parser_confidence=ParserConfidence.HIGH,
+            # Degrade confidence when critical fields fall back to defaults.
+            # Why: a DOCX that yields no TO number or title was likely not a
+            # well-formed task order — downstream engines should weight findings
+            # accordingly.  Matches the degradation pattern in PDFParser.
+            parser_confidence=(
+                ParserConfidence.HIGH if (to_number and title) else
+                ParserConfidence.MEDIUM if (to_number or title) else
+                ParserConfidence.LOW
+            ),
             source_format="docx",
+        )
+
+    def _detect_quality_plan(self, description: str, quality_text: str) -> Optional[QualityPlan]:
+        """Detect quality plan from description and quality section text.
+
+        Compliance heuristics: detect software scope and QMS requirements.
+        Why these keywords:
+          - software_scope: triggers NASA-STD-8739.8B applicability checks.
+            "software", "AI", "machine learning" are the three categories that
+            invoke SWE requirements under ESSCA. False negatives are acceptable
+            (engine errs toward "not software" — conservative for the contractor).
+          - qms_required: "QMS" and "quality management" are the explicit terms;
+            "8739" catches references to NASA-STD-8739.x family without the full
+            standard title.  False positives are acceptable here (engine errs
+            toward "QMS required" — conservative for compliance).
+        """
+        if not quality_text:
+            return None
+
+        software_scope = bool(re.search(r"\b(software|AI|machine learning)\b", description, re.I))
+        qms_required = bool(re.search(r"\b(QMS|quality management|8739)\b", quality_text, re.I))
+
+        return QualityPlan(
+            text=quality_text,
+            qms_required=qms_required,
+            software_scope=software_scope,
         )
 
     def _extract_tables(self, doc) -> list[list[list[str]]]:
@@ -152,7 +181,10 @@ class DOCXParser:
             if not table:
                 continue
             header = [h.lower() for h in table[0]]
-            if not any("sub" in h and "task" in h or "id" in h for h in header):
+            # Match tables with sub-task headers: require both "sub" AND "task"
+            # in the same cell, OR an "id" column.  Parenthesized to avoid
+            # precedence bugs (and binds tighter than or).
+            if not any(("sub" in h and "task" in h) or "id" in h for h in header):
                 continue
 
             id_col = self._find_col(header, ["sub_task", "sub-task", "id", "task id"])

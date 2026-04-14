@@ -1,19 +1,25 @@
 #!/usr/bin/env python3
 """
-SENTINEL-TOCR Standalone Server
-Minimal FastAPI server for TOCR — no MIRA backend dependencies.
+Module: SENTINEL-TOCR Standalone Server
+Purpose: Minimal FastAPI server for TOCR — no MIRA backend dependencies.
+
+BoundState AI 2026
+Classification: BoundState Proprietary
 
 Usage:
     python -m sentinel.tocr.server
     # Then open http://localhost:8099/tocr
 """
 
+import logging
+import os
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from typing import List
 
 import uvicorn
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -21,16 +27,27 @@ from fastapi.staticfiles import StaticFiles
 from sentinel.tocr.engine.conductor import TOCRConductor
 from sentinel.tocr.models.config import ContractConfig
 from sentinel.tocr.models.enums import ContractType, RevisionStatus
+from sentinel.tocr.models.report import ComplianceReport
 from sentinel.tocr.parsers.essca_parser import ESSCAParser
+
+LOGGER = logging.getLogger(__name__)
 
 app = FastAPI(title="SENTINEL-TOCR", version="1.0.0")
 
+# CORS: restrict to known origins in production, allow all in development.
+# Why: TOCR may be embedded in MIRA or OCA frontends on different domains
+# during development, but production deployments should pin origins.
+_cors_origins = os.environ.get("TOCR_CORS_ORIGINS", "*").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+_ALLOWED_EXTENSIONS = {".docx", ".pdf", ".json"}
+_MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB — generous for DOCX task orders
 
 
 def _default_config() -> ContractConfig:
@@ -44,16 +61,72 @@ def _default_config() -> ContractConfig:
     )
 
 
-def _parse_upload(upload: UploadFile):
-    parser = ESSCAParser()
-    with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
+@contextmanager
+def _temp_upload(upload: UploadFile):
+    """Write upload to a temp file, yield the path, then clean up.
+
+    Why contextmanager: NamedTemporaryFile(delete=False) previously leaked
+    files on every request.  This ensures cleanup even on exceptions.
+    """
+    suffix = Path(upload.filename or "upload").suffix or ".docx"
+    tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+    try:
         content = upload.file.read()
         tmp.write(content)
         tmp.flush()
-        return parser.parse(Path(tmp.name))
+        tmp.close()
+        yield Path(tmp.name)
+    finally:
+        Path(tmp.name).unlink(missing_ok=True)
 
 
-def _report_to_dict(report) -> dict:
+def _validate_upload(upload: UploadFile) -> None:
+    """Validate file type and size at the API boundary.
+
+    Why boundary validation: parsers assume well-formed input.  Rejecting
+    bad files here produces clear 422 errors instead of opaque parser tracebacks.
+    """
+    filename = upload.filename or ""
+    ext = Path(filename).suffix.lower()
+    if ext not in _ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unsupported file type '{ext}'. Accepted: {', '.join(sorted(_ALLOWED_EXTENSIONS))}",
+        )
+    # Check content length if provided by client
+    if upload.size is not None and upload.size > _MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File exceeds {_MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit",
+        )
+
+
+def _parse_upload(upload: UploadFile):
+    """Parse an uploaded task order document.
+
+    Returns a TaskOrder model on success; raises HTTPException on failure.
+    """
+    _validate_upload(upload)
+    parser = ESSCAParser()
+    with _temp_upload(upload) as tmp_path:
+        try:
+            return parser.parse(tmp_path)
+        except Exception as exc:
+            LOGGER.error("Failed to parse upload %s: %s", upload.filename, exc)
+            raise HTTPException(
+                status_code=422,
+                detail=f"Could not parse '{upload.filename}': {type(exc).__name__}",
+            ) from exc
+
+
+def _report_to_dict(report: ComplianceReport) -> dict:
+    """Serialize a ComplianceReport to a JSON-safe dict.
+
+    Why manual serialization: ComplianceReport contains enums and nested
+    models that need value extraction.  model_dump() would work but this
+    gives us control over field truncation (evidence text capped at 500 chars)
+    and stable API shape independent of model changes.
+    """
     findings = []
     for f in report.findings:
         finding = {
@@ -137,8 +210,9 @@ async def review(
     files: List[UploadFile] = File(...),
     use_sonnet: str = Form("false"),
 ):
+    """Compare two or more task order revisions and produce compliance findings."""
     if len(files) < 2:
-        return {"error": "Review requires at least 2 files"}
+        raise HTTPException(status_code=422, detail="Review requires at least 2 files")
 
     revisions = [_parse_upload(f) for f in files]
     conductor = TOCRConductor(config=_default_config())
@@ -159,8 +233,9 @@ async def scan(
     files: List[UploadFile] = File(...),
     use_sonnet: str = Form("false"),
 ):
+    """Scan a single task order for compliance issues without a prior revision."""
     if len(files) < 1:
-        return {"error": "Scan requires at least 1 file"}
+        raise HTTPException(status_code=422, detail="Scan requires at least 1 file")
 
     to = _parse_upload(files[0])
     conductor = TOCRConductor(config=_default_config())
@@ -182,9 +257,14 @@ if _DIST_DIR.exists():
 
     @app.get("/{full_path:path}")
     async def serve_spa(full_path: str):
-        # Serve index.html for all non-API routes (SPA routing)
-        file_path = _DIST_DIR / full_path
-        if file_path.exists() and file_path.is_file():
+        """Serve index.html for all non-API routes (SPA routing).
+
+        Why path validation: FastAPI/Starlette normalizes path components,
+        but we resolve against _DIST_DIR and verify the result stays within
+        the dist directory to prevent directory traversal.
+        """
+        file_path = (_DIST_DIR / full_path).resolve()
+        if file_path.is_relative_to(_DIST_DIR) and file_path.exists() and file_path.is_file():
             return FileResponse(str(file_path))
         return FileResponse(str(_DIST_DIR / "index.html"))
 else:
@@ -198,6 +278,5 @@ else:
 
 
 if __name__ == "__main__":
-    print("\n  SENTINEL-TOCR Server")
-    print("  http://localhost:8099/tocr\n")
+    LOGGER.info("SENTINEL-TOCR Server starting on http://localhost:8099/tocr")
     uvicorn.run(app, host="0.0.0.0", port=8099)

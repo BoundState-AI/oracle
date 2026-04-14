@@ -1,6 +1,7 @@
+"""Tests for server review-mode round budgets — defaults, env overrides, and user-round clamping."""
 from __future__ import annotations
 
-from server import _max_rounds_for_mode
+from server import UI_MAX_ROUNDS_CEILING, _clamp_user_rounds, _max_rounds_for_mode
 
 
 def test_max_rounds_defaults_to_single_round_for_ui_modes(monkeypatch):
@@ -24,3 +25,30 @@ def test_max_rounds_clamps_invalid_values(monkeypatch):
 
     monkeypatch.setenv("ORACLE_MAX_ROUNDS_REVIEW", "not-a-number")
     assert _max_rounds_for_mode("review") == 1
+
+
+def test_max_rounds_env_override_caps_at_ui_ceiling(monkeypatch):
+    monkeypatch.setenv("ORACLE_MAX_ROUNDS_REVIEW", "99")
+    assert _max_rounds_for_mode("review") == UI_MAX_ROUNDS_CEILING
+
+
+def test_clamp_user_rounds_falls_back_to_mode_default(monkeypatch):
+    monkeypatch.delenv("ORACLE_MAX_ROUNDS_REVIEW", raising=False)
+    assert _clamp_user_rounds(None, "review") == 1
+
+
+def test_clamp_user_rounds_honors_in_range_value():
+    assert _clamp_user_rounds(3, "review") == 3
+
+
+def test_clamp_user_rounds_caps_above_ceiling():
+    assert _clamp_user_rounds(99, "review") == UI_MAX_ROUNDS_CEILING
+
+
+def test_clamp_user_rounds_floors_below_one():
+    assert _clamp_user_rounds(0, "review") == 1
+    assert _clamp_user_rounds(-5, "review") == 1
+
+
+def test_clamp_user_rounds_accepts_exact_ceiling():
+    assert _clamp_user_rounds(UI_MAX_ROUNDS_CEILING, "review") == UI_MAX_ROUNDS_CEILING
