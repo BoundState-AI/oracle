@@ -1898,6 +1898,12 @@ def run_review(
                     pandoc_error,
                 )
             draft = _extract_docx_text_fallback(document_path)
+    elif suffix in (".md", ".markdown", ".txt"):
+        # Native markdown / plain text — pass straight through without
+        # conversion.  Uploading a .md bypasses the pandoc dependency
+        # entirely, which is important when pandoc is not installed on
+        # the server (the DOCX pipeline degrades without it).
+        draft = document_path.read_text(encoding="utf-8")
     else:
         draft = document_path.read_text(encoding="utf-8")
 

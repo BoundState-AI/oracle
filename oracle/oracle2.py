@@ -292,6 +292,17 @@ PROVIDER_TIMEOUT = int(os.environ.get("ORACLE_TIMEOUT_SECONDS", "600"))
 OPENAI_REVIEWER_MAX_TOKENS = int(
     os.environ.get("ORACLE_OPENAI_REVIEWER_MAX_TOKENS", "24576")
 )
+# WHY 64000 for Beth: the coordinator emits a full JSON envelope including
+# the complete `revised_draft` — a large-document rewrite can exceed
+# 50K chars of output on its own.  Add adaptive-thinking consumption
+# (Opus 4.6 routinely allocates 8–16K for reasoning on complex docs) and
+# JSON-escaping overhead and 32K total becomes a truncation ceiling.
+# 64K is the current Opus 4.6 output maximum and is the right default for
+# a doc-rewriting coordinator; tune down via env var for small docs or
+# cost-sensitive runs.
+BETH_COORDINATOR_MAX_TOKENS = int(
+    os.environ.get("ORACLE_BETH_MAX_TOKENS", "64000")
+)
 # WHY "high": reviewers must reason carefully about compliance implications;
 # lower effort risks missed findings on nuanced regulatory language.
 OPENAI_REASONING_EFFORT = os.environ.get("ORACLE_OPENAI_REASONING_EFFORT", "high")
@@ -334,7 +345,7 @@ ORACLE_ROSTER: dict[str, OracleConfig] = {
         model=os.environ.get("ORACLE_BETH_MODEL", "claude-opus-4-6"),
         system_prompt=BETH_COORDINATOR_PROMPT,
         temperature=0.0,
-        max_tokens=32768,
+        max_tokens=BETH_COORDINATOR_MAX_TOKENS,
     ),
     "fran": OracleConfig(
         name="Fran",
