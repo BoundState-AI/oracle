@@ -11,12 +11,19 @@ The diff-based pipeline catches what CHANGED. This engine catches what IS WRONG.
 Give it a task order, it tells you compliant or not, and if not, why not.
 """
 
+__safety_critical__: bool = True
 __version__ = "1.0.0"
 
 import hashlib
 import re
 from typing import Optional
 
+from sentinel.tocr.engine.shared import (
+    CONTRACT_STOPWORDS,
+    URGENCY_INDICATORS,
+    filter_applicable_rules,
+    trigger_matches,
+)
 from sentinel.tocr.models.config import ContractConfig
 from sentinel.tocr.models.enums import (
     ChangeClassification,
@@ -64,11 +71,29 @@ class TaskOrderContext:
         self._compute_signals()
 
     def _compute_signals(self) -> None:
-        to = self.task_order
+        """Compute all trigger signals for this task order context."""
+        self._compute_scope_signals()
+        self._compute_subtask_signals()
+        self._compute_funding_signals()
+        self._compute_quality_signals()
+        self._compute_emergency_signals()
+        self._compute_cost_signals()
 
-        # --- Scope analysis ---
+        # --- Draft status ---
+        if self.task_order.revision_status.value == "draft":
+            self.signals.add("revision_is_draft")
+
+        # --- Summary of changes ---
+        if not self.task_order.summary_of_changes.strip():
+            self.signals.add("no_summary_of_changes")
+            self.signal_details["no_summary_of_changes"] = (
+                "Summary of Changes is empty."
+            )
+
+    def _compute_scope_signals(self) -> None:
+        """Compute scope-related signals: software scope, AI/ML detection, scope text analysis."""
+        to = self.task_order
         scope = f"{to.task_order_description} {to.scope_text}"
-        scope_lower = scope.lower()
 
         if scope.strip():
             self.signals.add("has_scope")
@@ -92,7 +117,10 @@ class TaskOrderContext:
                 f"Retroactive language detected: '{match.group()}'"
             )
 
-        # --- Sub-task analysis ---
+    def _compute_subtask_signals(self) -> None:
+        """Compute sub-task signals: presence, labor categories, deliverables."""
+        to = self.task_order
+
         if not to.sub_tasks:
             self.signals.add("no_sub_tasks")
             self.signal_details["no_sub_tasks"] = "Task order has zero sub-tasks."
@@ -164,12 +192,18 @@ class TaskOrderContext:
                     f"{st.sub_task_id} has no funding, no WBS, no charge code. "
                 )
 
-        # --- Funding analysis ---
+    def _compute_funding_signals(self) -> None:
+        """Compute funding table signals: zero funding detection, unfunded scope."""
+        to = self.task_order
+
         if to.total_funding is not None and to.total_funding == 0:
             self.signals.add("zero_total_funding")
             self.signal_details["zero_total_funding"] = "Total funding is $0."
 
-        # --- QMS analysis ---
+    def _compute_quality_signals(self) -> None:
+        """Compute quality signals: QMS requirements, software without QMS."""
+        to = self.task_order
+
         if "software_scope_present" in self.signals:
             qp = to.quality_plan
             if not qp or not qp.qms_required:
@@ -178,7 +212,10 @@ class TaskOrderContext:
                     "Software scope present but no QMS plan (NASA-STD-8739.8B required)."
                 )
 
-        # --- Emergency analysis ---
+    def _compute_emergency_signals(self) -> None:
+        """Compute emergency signals: designation, justification substance."""
+        to = self.task_order
+
         if to.emergency_designation:
             self.signals.add("emergency_designated")
             just_text = to.emergency_justification.strip()
@@ -194,21 +231,9 @@ class TaskOrderContext:
                 )
             else:
                 # FAR 16.505(b)(4) substance check
+                # See engine/shared.py for indicator list provenance.
                 just_lower = just_text.lower()
-                _URGENCY_INDICATORS = [
-                    "urgent", "urgency", "immediate", "immediately", "critical path",
-                    "safety", "safety concern", "hazard", "risk to",
-                    "cannot wait", "cannot delay", "time-sensitive", "time sensitive",
-                    "deadline", "window", "launch window", "test window",
-                    "hardware at risk", "schedule impact", "schedule pressure",
-                    "mission impact", "mission critical", "flight hardware",
-                    "delay would", "delay will", "if delayed", "cannot be delayed",
-                    "normal procedures cannot", "normal process cannot",
-                    "standard process would", "standard review would",
-                    "unacceptable delay", "unacceptable risk",
-                    "life safety", "crew safety", "loss of",
-                ]
-                has_urgency = any(phrase in just_lower for phrase in _URGENCY_INDICATORS)
+                has_urgency = any(phrase in just_lower for phrase in URGENCY_INDICATORS)
                 if not has_urgency:
                     self.signals.add("emergency_justification_no_urgency")
                     self.signal_details["emergency_justification_no_urgency"] = (
@@ -219,19 +244,9 @@ class TaskOrderContext:
                         f"(3) what harm results from delay."
                     )
 
-        # --- Draft status ---
-        if to.revision_status.value == "draft":
-            self.signals.add("revision_is_draft")
-
-        # --- Cost misallocation ---
+    def _compute_cost_signals(self) -> None:
+        """Compute cost misallocation overlap detection."""
         self._check_cost_misallocation()
-
-        # --- Summary of changes ---
-        if not to.summary_of_changes.strip():
-            self.signals.add("no_summary_of_changes")
-            self.signal_details["no_summary_of_changes"] = (
-                "Summary of Changes is empty."
-            )
 
     def _check_cost_misallocation(self) -> None:
         """Check for cross-sub-task cost misallocation risk.
@@ -243,21 +258,6 @@ class TaskOrderContext:
         if len(to.sub_tasks) < 2:
             return
 
-        # Expanded stopwords: English + common contract/ESSCA boilerplate
-        _STOPWORDS = {
-            # English
-            "the", "a", "an", "and", "or", "for", "of", "in", "to", "is",
-            "with", "be", "are", "was", "were", "will", "shall", "by", "at",
-            "on", "as", "it", "this", "that", "from", "not", "but", "all",
-            "has", "have", "had", "may", "can", "its", "per", "any", "each",
-            # Common ESSCA/NASA contract boilerplate
-            "contractor", "provide", "services", "support", "activities",
-            "include", "following", "materials", "evaluation", "assessment",
-            "required", "engineering", "effort", "task", "work", "perform",
-            "shall", "including", "necessary", "processes", "laboratory",
-            "office", "design", "analysis", "test", "testing", "development",
-        }
-
         for st in to.sub_tasks:
             if not st.description:
                 continue
@@ -266,7 +266,7 @@ class TaskOrderContext:
                 if other.sub_task_id == st.sub_task_id or not other.description:
                     continue
                 other_words = set(other.description.lower().split())
-                overlap = (desc_words & other_words) - _STOPWORDS
+                overlap = (desc_words & other_words) - CONTRACT_STOPWORDS
                 if len(overlap) > self._cost_overlap_threshold:
                     self.signals.add("cost_misallocation_risk")
                     self.signal_details["cost_misallocation_risk"] = (
@@ -335,48 +335,11 @@ class ScanEngine:
 
     def _filter_applicable(self, config: ContractConfig) -> list[TOCRRule]:
         """Filter rules by contract config applicability."""
-        applicable = []
-        for rule in self.rules:
-            app = rule.applicability
-
-            if not config.matches_contract_type(app.contract_type):
-                self._suppression_log.append({
-                    "rule_id": rule.rule_id, "reason": f"Contract type: {app.contract_type}",
-                })
-                continue
-            if app.agency and not any(config.matches_agency(a) for a in app.agency):
-                self._suppression_log.append({
-                    "rule_id": rule.rule_id, "reason": f"Agency: {app.agency}",
-                })
-                continue
-            if app.local_pack and not any(config.matches_local_pack(p) for p in app.local_pack):
-                self._suppression_log.append({
-                    "rule_id": rule.rule_id, "reason": f"Local pack: {app.local_pack}",
-                })
-                continue
-            if app.clause_required and not all(config.has_clause(c) for c in app.clause_required):
-                self._suppression_log.append({
-                    "rule_id": rule.rule_id, "reason": f"Missing clause: {app.clause_required}",
-                })
-                continue
-            if not config.matches_revision_status(app.revision_status):
-                self._suppression_log.append({
-                    "rule_id": rule.rule_id, "reason": f"Status: {app.revision_status}",
-                })
-                continue
-
-            applicable.append(rule)
-        return applicable
+        return filter_applicable_rules(self.rules, config, self._suppression_log)
 
     def _trigger_matches(self, rule: TOCRRule, ctx: TaskOrderContext) -> bool:
-        trigger = rule.trigger
-        if trigger.all and not all(sig in ctx.signals for sig in trigger.all):
-            return False
-        if trigger.any and not any(sig in ctx.signals for sig in trigger.any):
-            return False
-        if not trigger.all and not trigger.any:
-            return False
-        return True
+        """Check if all trigger conditions are met."""
+        return trigger_matches(rule, ctx.signals)
 
     def _create_finding(self, rule: TOCRRule, ctx: TaskOrderContext) -> TOCRFinding:
         # Deterministic ID: hash of (rule_id, TO number, signals)

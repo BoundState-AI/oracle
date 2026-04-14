@@ -62,6 +62,8 @@ class FieldChange(BaseModel):
 class SubTaskChange(BaseModel):
     """Change to a specific sub-task."""
 
+    model_config = {"extra": "forbid"}
+
     sub_task_id: str
     change_type: ChangeType
     field_changes: list[FieldChange] = Field(default_factory=list)

@@ -308,6 +308,8 @@ def _count_rules(pack_data: dict) -> int:
     return 0
 
 
+# _compute_content_hash: reads entire file into memory for small pack JSON files.
+# _compute_file_hash (below): streams in 64 KB chunks for large on-disk files (PDFs).
 def _compute_content_hash(file_path: Path) -> str:
     """Compute SHA-256 hash of a file's contents."""
     h = hashlib.sha256(file_path.read_bytes())
@@ -705,7 +707,14 @@ def _detect_document_type(
     for i in range(pass1_pages):
         page_texts[i] = doc[i].get_text("text")
 
-    # Pattern definitions
+    # Pattern definitions for 2-pass document type detection (Section 5.3).
+    # WHY 3 separate patterns: each identifies a different regulatory document
+    # family.  The detection heuristic counts matches per page — whichever
+    # pattern dominates determines the extraction route:
+    #   tag_pattern → GPCM route (NASA tagged standards with [MPR N]/[FCR N])
+    #   far_pattern → FAR route (federal acquisition regulations with Part.Section)
+    #   cfr_pattern → Generic route (Code of Federal Regulations references)
+    # If no pattern dominates, the generic Claude extraction route is used.
     tag_pattern = re.compile(r"\[(MPR|FCR)\s+\d+\]", re.IGNORECASE)
     far_pattern = re.compile(r"(?:FAR|DFARS|NFS|GSAM)\s+(?:Part\s+)?\d+\.\d+", re.IGNORECASE)
     cfr_pattern = re.compile(r"(?:\d+\s+CFR|Code of Federal Regulations)", re.IGNORECASE)
@@ -1133,6 +1142,181 @@ def _detect_implicit_generic(
     return implicit_rules
 
 
+def _extract_chunk(
+    doc,
+    chunk_start: int,
+    chunk_end: int,
+    total_pages: int,
+    use_vision: bool,
+    client,
+) -> tuple[list[dict] | None, str]:
+    """Extract obligations from a single PDF chunk via Claude.
+
+    Returns (rules_list, error_string).  On success error_string is empty.
+    On failure after all retries, rules_list is None.
+
+    Why bounded retry: LLM responses occasionally return malformed JSON
+    or use wrong keys.  Max 2 retries with a repair prompt is enough to
+    recover most cases without burning excessive API credits.
+    """
+    import base64
+    import fitz as _fitz
+
+    LOGGER.info(f"  Processing pages {chunk_start + 1}–{chunk_end} of {total_pages}...")
+
+    content: list[dict] = []
+    for page_idx in range(chunk_start, chunk_end):
+        page = doc[page_idx]
+        if use_vision:
+            matrix = _fitz.Matrix(150 / 72, 150 / 72)
+            pix = page.get_pixmap(matrix=matrix, alpha=False)
+            img_b64 = base64.b64encode(pix.tobytes("png")).decode("utf-8")
+            content.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/png", "data": img_b64},
+            })
+            content.append({"type": "text", "text": f"[Page {page_idx + 1}]"})
+        else:
+            page_text = page.get_text("text")
+            content.append({"type": "text", "text": f"--- PAGE {page_idx + 1} ---\n{page_text}"})
+
+    content.append({"type": "text", "text": GENERIC_EXTRACTION_PROMPT})
+
+    max_retries = 2
+    last_error = ""
+
+    for attempt in range(1, max_retries + 2):
+        try:
+            response = client.messages.create(
+                model=os.environ.get("ORACLE_VISION_MODEL", "claude-sonnet-4-6"),
+                max_tokens=8192,
+                temperature=0,
+                messages=[{"role": "user", "content": content}],
+            )
+
+            if response.content:
+                raw_text = response.content[0].text
+                parsed = _parse_extraction_json(raw_text)
+
+                if parsed is None:
+                    last_error = "JSON parse failure after markdown fence stripping"
+                    if attempt <= max_retries:
+                        LOGGER.warning(f"    Attempt {attempt}: malformed JSON, retrying with repair prompt...")
+                        content.append({
+                            "type": "text",
+                            "text": (
+                                f"Your previous response was malformed:\n{raw_text[:500]}\n\n"
+                                "Return ONLY a valid JSON object with a 'rules' array. "
+                                "No markdown fences, no commentary."
+                            ),
+                        })
+                    continue
+
+                rules = parsed.get("rules")
+                if rules is None:
+                    last_error = f"JSON missing 'rules' key, got keys: {list(parsed.keys())}"
+                    if attempt <= max_retries:
+                        LOGGER.warning(f"    Attempt {attempt}: {last_error}, retrying with repair prompt...")
+                        content.append({
+                            "type": "text",
+                            "text": (
+                                f"Your response was valid JSON but used the wrong key. "
+                                f"You returned: {json.dumps(list(parsed.keys()))}. "
+                                f"Return a JSON object with a 'rules' array. Example: "
+                                f'{{"rules": [{{"rule_id": "...", "statement_text": "..."}}]}}'
+                            ),
+                        })
+                    continue
+
+                LOGGER.info(f"    Found {len(rules)} obligations (attempt {attempt})")
+                return rules, ""
+
+        except Exception as e:
+            last_error = str(e)
+            if attempt <= max_retries:
+                LOGGER.warning(f"    Attempt {attempt} failed: {e}. Retrying...")
+                time.sleep(2 * attempt)
+
+    return None, last_error
+
+
+def _deduplicate_rules(rules: list[dict]) -> list[dict]:
+    """Deduplicate rules using composite key (section + normalized text).
+
+    Why composite key: Section 5.4 specifies that rules with identical text
+    but different sections are preserved (same obligation in different contexts).
+    Only exact section+text duplicates from chunk overlap regions are removed.
+    """
+    seen_keys: set[tuple[str, str]] = set()
+    deduped: list[dict] = []
+    for rule in rules:
+        key = (
+            rule.get("section", "").strip().lower(),
+            re.sub(r"\s+", " ", rule.get("statement_text", "").strip().lower()),
+        )
+        if key not in seen_keys:
+            seen_keys.add(key)
+            deduped.append(rule)
+
+    dupes_removed = len(rules) - len(deduped)
+    if dupes_removed > 0:
+        LOGGER.info(f"  Deduplicated: removed {dupes_removed} duplicate rules (overlap regions)")
+
+    # Re-sequence rule IDs after dedup
+    for i, rule in enumerate(deduped, 1):
+        rule["rule_id"] = f"RULE-{i:04d}"
+
+    return deduped
+
+
+def _assemble_generic_pack(
+    pdf_path: Path,
+    deduped_rules: list[dict],
+    total_pages: int,
+    extracted_pages: list[int],
+    chunk_failures: list[dict],
+    name: str | None,
+    use_vision: bool,
+    force_type: str | None,
+) -> dict:
+    """Build the final generic pack dict from extracted + deduped rules."""
+    source_hash = _compute_file_hash(pdf_path)
+    standard_id = name or pdf_path.stem
+    extraction_status = "partial" if chunk_failures else "complete"
+
+    return {
+        "schema_version": "oracle_generic/v1",
+        "rule_pack_id": f"generic-{_slugify(standard_id)}",
+        "standard_id": standard_id,
+        "standard_title": name or pdf_path.stem,
+        "version": "1.0.0",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "source_document": str(pdf_path),
+        "extraction_method": "claude_vision" if use_vision else "claude_text",
+        "extraction_status": extraction_status,
+        "total_source_pages": total_pages,
+        "extracted_pages": sorted(set(extracted_pages)),
+        "failed_page_ranges": [
+            f"{cf['page_start']}-{cf['page_end']}" for cf in chunk_failures
+        ],
+        "chunk_failures": chunk_failures,
+        "total_rules": len(deduped_rules),
+        "oracle_metadata": {
+            "name": name or standard_id,
+            "slug": _slugify(standard_id),
+            "description": f"Auto-extracted from {pdf_path.name}",
+            "status": "draft",
+            "added_at": datetime.now(timezone.utc).isoformat(),
+            "promoted_at": None,
+            "promoted_by": None,
+            "promotion_notes": None,
+            "source_document_hash": source_hash,
+            "detection_override": force_type,
+        },
+        "rules": deduped_rules,
+    }
+
+
 def _generate_pack_generic(
     pdf_path: Path,
     output_dir: Path,
@@ -1171,9 +1355,8 @@ def _generate_pack_generic(
     doc = fitz.open(pdf_path)
     total_pages = len(doc)
 
-    # --- Chunking with 1-page overlap (Section 5.4 / 13.3) ---
     CHUNK_SIZE = 5
-    OVERLAP = 1  # 1-page overlap between consecutive chunks
+    OVERLAP = 1  # 1-page overlap between consecutive chunks (Section 5.4 / 13.3)
 
     all_rules: list[dict] = []
     rule_counter = 0
@@ -1183,130 +1366,33 @@ def _generate_pack_generic(
     chunk_start = 0
     while chunk_start < total_pages:
         chunk_end = min(chunk_start + CHUNK_SIZE, total_pages)
-        LOGGER.info(f"  Processing pages {chunk_start + 1}–{chunk_end} of {total_pages}...")
 
-        # Build message content for this chunk
-        content: list[dict] = []
-        for page_idx in range(chunk_start, chunk_end):
-            page = doc[page_idx]
+        rules, error = _extract_chunk(doc, chunk_start, chunk_end, total_pages, use_vision, client)
 
-            if use_vision:
-                # Vision mode: render page as image
-                import base64
-                matrix = fitz.Matrix(150 / 72, 150 / 72)
-                pix = page.get_pixmap(matrix=matrix, alpha=False)
-                img_b64 = base64.b64encode(pix.tobytes("png")).decode("utf-8")
-                content.append({
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "image/png",
-                        "data": img_b64,
-                    },
-                })
-                content.append({
-                    "type": "text",
-                    "text": f"[Page {page_idx + 1}]",
-                })
-            else:
-                # Text mode: extract text
-                page_text = page.get_text("text")
-                content.append({
-                    "type": "text",
-                    "text": f"--- PAGE {page_idx + 1} ---\n{page_text}",
-                })
-
-        content.append({
-            "type": "text",
-            "text": GENERIC_EXTRACTION_PROMPT,
-        })
-
-        # --- Bounded retry: max 2 retries per chunk (Section 5.4) ---
-        chunk_success = False
-        max_retries = 2
-        last_error = ""
-
-        for attempt in range(1, max_retries + 2):  # 1 initial + 2 retries = 3 total
-            try:
-                response = client.messages.create(
-                    model=os.environ.get("ORACLE_VISION_MODEL", "claude-sonnet-4-6"),
-                    max_tokens=8192,
-                    temperature=0,
-                    messages=[{"role": "user", "content": content}],
-                )
-
-                if response.content:
-                    raw_text = response.content[0].text
-                    parsed = _parse_extraction_json(raw_text)
-
-                    if parsed is None:
-                        # JSON parse failure — retry with repair prompt
-                        last_error = "JSON parse failure after markdown fence stripping"
-                        if attempt <= max_retries:
-                            LOGGER.warning(f"    Attempt {attempt}: malformed JSON, retrying with repair prompt...")
-                            content.append({
-                                "type": "text",
-                                "text": (
-                                    f"Your previous response was malformed:\n{raw_text[:500]}\n\n"
-                                    "Return ONLY a valid JSON object with a 'rules' array. "
-                                    "No markdown fences, no commentary."
-                                ),
-                            })
-                        continue
-
-                    rules = parsed.get("rules")
-                    if rules is None:
-                        # Valid JSON but wrong shape (e.g., {"obligations": [...]})
-                        # Append repair prompt so the next attempt gets guidance
-                        last_error = f"JSON missing 'rules' key, got keys: {list(parsed.keys())}"
-                        if attempt <= max_retries:
-                            LOGGER.warning(f"    Attempt {attempt}: {last_error}, retrying with repair prompt...")
-                            content.append({
-                                "type": "text",
-                                "text": (
-                                    f"Your response was valid JSON but used the wrong key. "
-                                    f"You returned: {json.dumps(list(parsed.keys()))}. "
-                                    f"Return a JSON object with a 'rules' array. Example: "
-                                    f'{{"rules": [{{"rule_id": "...", "statement_text": "..."}}]}}'
-                                ),
-                            })
-                        continue
-
-                    # Valid response (even if empty — page may have no obligations)
-                    for rule in rules:
-                        rule_counter += 1
-                        rule["rule_id"] = f"RULE-{rule_counter:04d}"
-                        rule.setdefault("page", chunk_start + 1)
-                    all_rules.extend(rules)
-                    extracted_pages.extend(range(chunk_start + 1, chunk_end + 1))
-                    LOGGER.info(f"    Found {len(rules)} obligations (attempt {attempt})")
-                    chunk_success = True
-                    break
-
-            except Exception as e:
-                last_error = str(e)
-                if attempt <= max_retries:
-                    LOGGER.warning(f"    Attempt {attempt} failed: {e}. Retrying...")
-                    time.sleep(2 * attempt)  # Brief backoff
-
-        if not chunk_success:
+        if rules is not None:
+            for rule in rules:
+                rule_counter += 1
+                rule["rule_id"] = f"RULE-{rule_counter:04d}"
+                rule.setdefault("page", chunk_start + 1)
+            all_rules.extend(rules)
+            extracted_pages.extend(range(chunk_start + 1, chunk_end + 1))
+        else:
             LOGGER.error(
-                f"    Chunk pages {chunk_start+1}–{chunk_end} FAILED after {max_retries+1} attempts: {last_error}"
+                f"    Chunk pages {chunk_start+1}–{chunk_end} FAILED: {error}"
             )
             chunk_failures.append({
                 "page_start": chunk_start + 1,
                 "page_end": chunk_end,
-                "retries_used": max_retries,
-                "final_error": last_error[:500],
+                "retries_used": 2,
+                "final_error": error[:500],
                 "extraction_mode": "vision" if use_vision else "text",
             })
 
-        # Advance with overlap
         chunk_start = chunk_end - OVERLAP if chunk_end < total_pages else chunk_end
 
     doc.close()
 
-    # --- Pass 1c: Implicit obligation detection ---
+    # Pass 1c: Implicit obligation detection
     if detect_implicit:
         LOGGER.info("Pass 1c: Detecting implicit obligations...")
         implicit_rules = _detect_implicit_generic(
@@ -1319,79 +1405,20 @@ def _generate_pack_generic(
         )
         LOGGER.info(f"  Found {len(implicit_rules)} implicit obligations")
 
-    # --- Deduplication using composite key (section + normalized text) ---
-    # Section 5.4: Rules with identical text but different sections are preserved
-    seen_keys: set[tuple[str, str]] = set()
-    deduped_rules: list[dict] = []
-    for rule in all_rules:
-        key = (
-            rule.get("section", "").strip().lower(),
-            re.sub(r"\s+", " ", rule.get("statement_text", "").strip().lower()),
-        )
-        if key not in seen_keys:
-            seen_keys.add(key)
-            deduped_rules.append(rule)
+    deduped_rules = _deduplicate_rules(all_rules)
 
-    dupes_removed = len(all_rules) - len(deduped_rules)
-    if dupes_removed > 0:
-        LOGGER.info(f"  Deduplicated: removed {dupes_removed} duplicate rules (overlap regions)")
+    pack = _assemble_generic_pack(
+        pdf_path, deduped_rules, total_pages, extracted_pages,
+        chunk_failures, name, use_vision, force_type,
+    )
 
-    # Re-sequence rule IDs after dedup
-    for i, rule in enumerate(deduped_rules, 1):
-        rule["rule_id"] = f"RULE-{i:04d}"
-
-    # --- Build the pack ---
-    # Compute source document hash
-    source_hash = _compute_file_hash(pdf_path)
-
-    # Derive failed page ranges from chunk_failures
-    failed_page_ranges = []
-    for cf in chunk_failures:
-        failed_page_ranges.append(f"{cf['page_start']}-{cf['page_end']}")
-
-    # Deduplicate extracted_pages
-    extracted_pages = sorted(set(extracted_pages))
-
-    standard_id = name or pdf_path.stem
-    extraction_status = "partial" if chunk_failures else "complete"
-
-    pack = {
-        "schema_version": "oracle_generic/v1",
-        "rule_pack_id": f"generic-{_slugify(standard_id)}",
-        "standard_id": standard_id,
-        "standard_title": name or pdf_path.stem,
-        "version": "1.0.0",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "source_document": str(pdf_path),
-        "extraction_method": "claude_vision" if use_vision else "claude_text",
-        "extraction_status": extraction_status,
-        "total_source_pages": total_pages,
-        "extracted_pages": extracted_pages,
-        "failed_page_ranges": failed_page_ranges,
-        "chunk_failures": chunk_failures,
-        "total_rules": len(deduped_rules),
-        "oracle_metadata": {
-            "name": name or standard_id,
-            "slug": _slugify(standard_id),
-            "description": f"Auto-extracted from {pdf_path.name}",
-            "status": "draft",
-            "added_at": datetime.now(timezone.utc).isoformat(),
-            "promoted_at": None,
-            "promoted_by": None,
-            "promotion_notes": None,
-            "source_document_hash": source_hash,
-            "detection_override": force_type,
-        },
-        "rules": deduped_rules,
-    }
-
-    out_path = output_dir / f"{_slugify(standard_id)}_rulepack.json"
+    out_path = output_dir / f"{_slugify(pack['standard_id'])}_rulepack.json"
     out_path.write_text(
         json.dumps(pack, indent=2, ensure_ascii=False), encoding="utf-8"
     )
     LOGGER.info(
         f"Generic rule pack: {out_path} ({len(deduped_rules)} rules, "
-        f"status={extraction_status})"
+        f"status={pack['extraction_status']})"
     )
     return out_path
 
@@ -1594,6 +1621,8 @@ def _render_pack_for_oracle(
 
 def _estimate_tokens(text: str) -> int:
     """Rough token estimate using the 4-chars-per-token heuristic."""
+    # WHY 4: standard GPT tokenizer averages ~4 chars/token for English prose.
+    # Conservative for non-English or code.
     return len(text) // 4
 
 
@@ -1869,6 +1898,12 @@ def run_review(
                     pandoc_error,
                 )
             draft = _extract_docx_text_fallback(document_path)
+    elif suffix in (".md", ".markdown", ".txt"):
+        # Native markdown / plain text — pass straight through without
+        # conversion.  Uploading a .md bypasses the pandoc dependency
+        # entirely, which is important when pandoc is not installed on
+        # the server (the DOCX pipeline degrades without it).
+        draft = document_path.read_text(encoding="utf-8")
     else:
         draft = document_path.read_text(encoding="utf-8")
 

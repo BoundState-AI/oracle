@@ -1,3 +1,4 @@
+"""Tests for server pack endpoints — list, show, import, and GPCM ID normalization on register."""
 import json
 from pathlib import Path
 

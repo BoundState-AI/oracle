@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""TOCR data models."""
+"""
+Module: TOCR Models
+Purpose: TOCR data models.
+
+BoundState AI 2026
+Classification: BoundState Proprietary
+"""
 
 from sentinel.tocr.models.enums import (
     BasisType,

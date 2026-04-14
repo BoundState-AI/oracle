@@ -10,6 +10,7 @@ Classification: BoundState Proprietary
 Spec: BS-SPEC-TOCR-001-REV1, Section 4.1
 """
 
+__safety_critical__: bool = True
 __version__ = "1.0.0"
 
 import difflib
@@ -121,42 +122,8 @@ class DiffEngine:
         """
         field_changes: list[FieldChange] = []
 
-        # Compare top-level text fields.
-        # If scope_text is identical to task_order_description (common in
-        # ESSCA-parsed documents), skip scope_text to avoid duplicate findings.
-        skip_scope_text = (
-            prior.scope_text == prior.task_order_description
-            and proposed.scope_text == proposed.task_order_description
-        )
-        text_fields = [
-            ("task_order_description.scope", prior.task_order_description, proposed.task_order_description),
-        ]
-        if not skip_scope_text:
-            text_fields.append(("scope_text", prior.scope_text, proposed.scope_text))
-        text_fields.extend([
-            ("summary_of_changes", prior.summary_of_changes, proposed.summary_of_changes),
-            ("emergency_justification", prior.emergency_justification, proposed.emergency_justification),
-            ("agency_comments", prior.agency_comments, proposed.agency_comments),
-            ("title", prior.title, proposed.title),
-        ])
-
-        for field_path, prior_text, proposed_text in text_fields:
-            change = self._compare_text(field_path, prior_text, proposed_text)
-            if change:
-                field_changes.append(change)
-
-        # Compare emergency designation
-        if prior.emergency_designation != proposed.emergency_designation:
-            field_changes.append(FieldChange(
-                field_path="emergency_designation",
-                change_type=ChangeType.MODIFICATION,
-                prior_text=str(prior.emergency_designation),
-                proposed_text=str(proposed.emergency_designation),
-                classification=ChangeClassification.ADMINISTRATIVE,
-                classification_confidence=ConfidenceLevel.DETERMINISTIC,
-                classification_reason="Emergency designation flag changed",
-                is_material=True,
-            ))
+        # Compare top-level text fields and emergency designation
+        field_changes.extend(self._compare_top_level_fields(prior, proposed))
 
         # Compare quality plans
         qp_change = self._compare_quality_plans(prior, proposed)
@@ -194,6 +161,50 @@ class DiffEngine:
             removed_sub_tasks=removed_subs,
             parser_confidence=parser_conf,
         )
+
+    def _compare_top_level_fields(
+        self, prior: TaskOrder, proposed: TaskOrder
+    ) -> list[FieldChange]:
+        """Compare top-level text fields and emergency designation between revisions."""
+        field_changes: list[FieldChange] = []
+
+        # If scope_text is identical to task_order_description (common in
+        # ESSCA-parsed documents), skip scope_text to avoid duplicate findings.
+        skip_scope_text = (
+            prior.scope_text == prior.task_order_description
+            and proposed.scope_text == proposed.task_order_description
+        )
+        text_fields = [
+            ("task_order_description.scope", prior.task_order_description, proposed.task_order_description),
+        ]
+        if not skip_scope_text:
+            text_fields.append(("scope_text", prior.scope_text, proposed.scope_text))
+        text_fields.extend([
+            ("summary_of_changes", prior.summary_of_changes, proposed.summary_of_changes),
+            ("emergency_justification", prior.emergency_justification, proposed.emergency_justification),
+            ("agency_comments", prior.agency_comments, proposed.agency_comments),
+            ("title", prior.title, proposed.title),
+        ])
+
+        for field_path, prior_text, proposed_text in text_fields:
+            change = self._compare_text(field_path, prior_text, proposed_text)
+            if change:
+                field_changes.append(change)
+
+        # Compare emergency designation
+        if prior.emergency_designation != proposed.emergency_designation:
+            field_changes.append(FieldChange(
+                field_path="emergency_designation",
+                change_type=ChangeType.MODIFICATION,
+                prior_text=str(prior.emergency_designation),
+                proposed_text=str(proposed.emergency_designation),
+                classification=ChangeClassification.ADMINISTRATIVE,
+                classification_confidence=ConfidenceLevel.DETERMINISTIC,
+                classification_reason="Emergency designation flag changed",
+                is_material=True,
+            ))
+
+        return field_changes
 
     def _compare_text(
         self, field_path: str, prior: str, proposed: str
@@ -325,7 +336,40 @@ class DiffEngine:
 
         all_ids = set(prior_map) | set(proposed_map)
 
+        # Detect new and removed sub-tasks
+        self._detect_new_removed_subtasks(
+            sorted(all_ids), prior_map, proposed_map,
+            sub_task_changes, new_subs, removed_subs, field_changes,
+        )
+
+        # Compare fields within existing sub-tasks
         for st_id in sorted(all_ids):
+            p = prior_map.get(st_id)
+            n = proposed_map.get(st_id)
+            if p and n:
+                st_changes = self._compare_sub_task_fields(st_id, p, n)
+                if st_changes:
+                    field_changes.extend(st_changes)
+                    sub_task_changes.append(SubTaskChange(
+                        sub_task_id=st_id,
+                        change_type=ChangeType.MODIFICATION,
+                        field_changes=st_changes,
+                    ))
+
+        return sub_task_changes, new_subs, removed_subs, field_changes
+
+    def _detect_new_removed_subtasks(
+        self,
+        sorted_ids: list[str],
+        prior_map: dict,
+        proposed_map: dict,
+        sub_task_changes: list[SubTaskChange],
+        new_subs: list[str],
+        removed_subs: list[str],
+        field_changes: list[FieldChange],
+    ) -> None:
+        """Detect new and removed sub-tasks, appending results to the provided lists."""
+        for st_id in sorted_ids:
             p = prior_map.get(st_id)
             n = proposed_map.get(st_id)
 
@@ -369,18 +413,6 @@ class DiffEngine:
                     field_changes=[fc],
                     is_removed_sub_task=True,
                 ))
-            elif p and n:
-                # Compare existing sub-task fields
-                st_changes = self._compare_sub_task_fields(st_id, p, n)
-                if st_changes:
-                    field_changes.extend(st_changes)
-                    sub_task_changes.append(SubTaskChange(
-                        sub_task_id=st_id,
-                        change_type=ChangeType.MODIFICATION,
-                        field_changes=st_changes,
-                    ))
-
-        return sub_task_changes, new_subs, removed_subs, field_changes
 
     def _compare_sub_task_fields(
         self, st_id: str, prior, proposed

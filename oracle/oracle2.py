@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Module: Oracle2
+Module: oracle.oracle2
 Purpose: Multi-oracle review system for specs, plans, and architecture docs.
 
 Flow:
@@ -16,6 +16,8 @@ Convergence:
   - Delta in accepted defects < 10%
   - Same unresolved tradeoff repeats twice
 
+__safety_critical__: bool = True — multi-oracle compliance review engine
+
 BoundState AI 2026
 Classification: BoundState Proprietary
 
@@ -24,6 +26,8 @@ Co-Authored-By: Dr. Joseph Wilde, BoundState AI
 """
 
 from __future__ import annotations
+
+__safety_critical__: bool = True
 
 import argparse
 import json
@@ -280,10 +284,37 @@ Output JSON:
 # LLM client abstraction
 # ---------------------------------------------------------------------------
 
+# WHY 600s: multi-oracle reviews with 3 parallel calls + normalization +
+# coordination can take 8-10 minutes for large documents.
 PROVIDER_TIMEOUT = int(os.environ.get("ORACLE_TIMEOUT_SECONDS", "600"))
+# WHY 24576: GPT-5.4 reviewer responses include full findings JSON + rationale;
+# 24K tokens accommodates documents with 50+ findings without truncation.
 OPENAI_REVIEWER_MAX_TOKENS = int(
     os.environ.get("ORACLE_OPENAI_REVIEWER_MAX_TOKENS", "24576")
 )
+# WHY 64000 for Beth: the coordinator emits a full JSON envelope including
+# the complete `revised_draft` — a large-document rewrite can exceed
+# 50K chars of output on its own.  Add adaptive-thinking consumption
+# (Opus 4.6 routinely allocates 8–16K for reasoning on complex docs) and
+# JSON-escaping overhead and 32K total becomes a truncation ceiling.
+# 64K is the current Opus 4.6 output maximum and is the right default for
+# a doc-rewriting coordinator; tune down via env var for small docs or
+# cost-sensitive runs.
+BETH_COORDINATOR_MAX_TOKENS = int(
+    os.environ.get("ORACLE_BETH_MAX_TOKENS", "64000")
+)
+# WHY 16384 for Sonnet: the referee's output is the union of
+# normalized_issues across every reviewer.  Round-1 reviews routinely
+# normalize 30+ issues with full metadata (rule_id, severity, sources,
+# matched canonical_signature) — easily 12K-15K characters of JSON.
+# 8K (the dataclass default) was leaving Sonnet exposed to truncation
+# on any review larger than ~20 findings.  16K gives 2x headroom; can
+# be tuned via env var if reviews exceed it.
+SONNET_REFEREE_MAX_TOKENS = int(
+    os.environ.get("ORACLE_SONNET_MAX_TOKENS", "16384")
+)
+# WHY "high": reviewers must reason carefully about compliance implications;
+# lower effort risks missed findings on nuanced regulatory language.
 OPENAI_REASONING_EFFORT = os.environ.get("ORACLE_OPENAI_REASONING_EFFORT", "high")
 OPENAI_VERBOSITY = os.environ.get("ORACLE_OPENAI_VERBOSITY", "low")
 
@@ -324,7 +355,7 @@ ORACLE_ROSTER: dict[str, OracleConfig] = {
         model=os.environ.get("ORACLE_BETH_MODEL", "claude-opus-4-6"),
         system_prompt=BETH_COORDINATOR_PROMPT,
         temperature=0.0,
-        max_tokens=32768,
+        max_tokens=BETH_COORDINATOR_MAX_TOKENS,
     ),
     "fran": OracleConfig(
         name="Fran",
@@ -359,18 +390,27 @@ ORACLE_ROSTER: dict[str, OracleConfig] = {
         provider="anthropic",
         model=os.environ.get("ORACLE_SONNET_MODEL", "claude-sonnet-4-6"),
         system_prompt=SONNET_REFEREE_PROMPT,
+        max_tokens=SONNET_REFEREE_MAX_TOKENS,
     ),
 }
 
 
 def _call_anthropic(config: OracleConfig, user_message: str) -> dict:
-    """Call Anthropic Messages API (Beth / Sonnet)."""
+    """Call Anthropic Messages API (Beth / Sonnet) via streaming.
+
+    Uses `client.messages.stream()` + `get_final_message()` instead of
+    `messages.create()` because non-streaming requests over 10 minutes are
+    not supported by the Anthropic API. Beth with extended thinking on a
+    large input regularly exceeds that ceiling, so streaming is mandatory.
+    See https://docs.anthropic.com/en/api/errors#long-requests.
+    """
     import httpx
     from anthropic import Anthropic
 
     client = Anthropic(
         api_key=os.environ.get("ANTHROPIC_API_KEY"),
         timeout=httpx.Timeout(config.timeout, connect=10.0),
+        max_retries=0,
     )
     kwargs: dict[str, Any] = {
         "model": config.model,
@@ -379,15 +419,20 @@ def _call_anthropic(config: OracleConfig, user_message: str) -> dict:
         "messages": [{"role": "user", "content": user_message}],
     }
     if "opus" in config.model:
-        # Extended thinking: budget_tokens for internal reasoning, temperature must be 1
+        # Adaptive thinking: the model sizes its own reasoning budget per turn.
+        # budget_tokens is deprecated on Opus 4.6 / Sonnet 4.6 and will be
+        # removed in a future model release. Temperature must be 1 for any
+        # thinking mode.
         kwargs["temperature"] = 1
-        kwargs["thinking"] = {"type": "enabled", "budget_tokens": 16384}
+        kwargs["thinking"] = {"type": "adaptive"}
     else:
         kwargs["temperature"] = config.temperature
 
-    response = client.messages.create(**kwargs)
+    with client.messages.stream(**kwargs) as stream:
+        final_message = stream.get_final_message()
+
     text = ""
-    for block in response.content:
+    for block in final_message.content:
         if getattr(block, "type", None) == "text":
             text = block.text
             break
@@ -716,19 +761,86 @@ def _parse_json(text: str, oracle_name: str) -> dict:
         return _recover_truncated_json(text, oracle_name)
 
 
-def _recover_truncated_json(text: str, oracle_name: str) -> dict:
-    """Attempt to recover useful data from truncated Beth responses.
+def _recover_array_field(text: str, field_name: str) -> list | None:
+    """Walk a JSON array string and return as many well-formed top-level
+    elements as can be parsed before the first malformed / truncated one.
 
-    Beth's revised_draft field is often so large that the response
-    gets truncated mid-JSON. This extracts what we can:
-    1. Try to find revision_decisions before the truncation
-    2. Extract revised_draft content even if JSON is incomplete
+    Used when an oracle response either truncates mid-array or contains
+    a malformed element partway through.  Each top-level element is an
+    object (`{...}`); we balance braces to find element boundaries, then
+    `json.loads` each candidate independently.  An element that fails
+    to parse stops the walk — earlier well-formed elements are returned.
+
+    Returns None when the named array key is not present in the text.
+    Returns [] when the key is present but no element can be salvaged.
+    """
+    import re
+    match = re.search(rf'"{re.escape(field_name)}"\s*:\s*\[', text)
+    if match is None:
+        return None
+
+    pos = match.end()
+    elements: list = []
+    while pos < len(text):
+        # Skip whitespace and trailing commas between elements
+        while pos < len(text) and text[pos] in ' \t\n\r,':
+            pos += 1
+        if pos >= len(text) or text[pos] == ']':
+            break
+        if text[pos] != '{':
+            # Unexpected character — stop walk
+            break
+        # Find the balanced object starting at pos
+        depth = 0
+        in_string = False
+        escape_next = False
+        end = pos
+        for i in range(pos, len(text)):
+            ch = text[i]
+            if escape_next:
+                escape_next = False
+                continue
+            if ch == '\\':
+                escape_next = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        if depth != 0:
+            # Truncated mid-element — stop, return what we have
+            break
+        try:
+            elements.append(json.loads(text[pos:end]))
+        except json.JSONDecodeError:
+            # Malformed element — stop walk; downstream sees what was parseable
+            break
+        pos = end
+    return elements
+
+
+def _recover_truncated_json(text: str, oracle_name: str) -> dict:
+    """Best-effort partial-content recovery from a malformed JSON response.
+
+    Originally Beth-specific (for revised_draft truncation); now generic
+    so any oracle's expected top-level array (revised_draft,
+    revision_decisions, normalized_issues, findings) can be partially
+    salvaged.  A degraded round with N-1 findings is far less harmful
+    than a failed round with zero.
     """
     import re
 
     result: dict = {"oracle_name": oracle_name}
 
-    # Try to extract revised_draft as a raw string between markers
+    # --- Beth-specific recovery: revised_draft (a string field) ---
     draft_match = re.search(r'"revised_draft"\s*:\s*"', text)
     if draft_match:
         draft_start = draft_match.end()
@@ -743,13 +855,11 @@ def _recover_truncated_json(text: str, oracle_name: str) -> dict:
             pos += 1
         if pos < len(text):
             raw_draft = text[draft_start:pos]
-            # Unescape JSON string escapes
             try:
                 revised = json.loads(f'"{raw_draft}"')
                 result["revised_draft"] = revised
                 LOGGER.info(f"[{oracle_name}] Recovered revised_draft ({len(revised)} chars)")
             except Exception:
-                # Even raw is useful
                 result["revised_draft"] = raw_draft.replace("\\n", "\n").replace('\\"', '"')
                 LOGGER.info(f"[{oracle_name}] Recovered raw revised_draft ({len(raw_draft)} chars)")
         else:
@@ -758,32 +868,41 @@ def _recover_truncated_json(text: str, oracle_name: str) -> dict:
             result["revised_draft"] = raw_draft.replace("\\n", "\n").replace('\\"', '"')
             LOGGER.info(f"[{oracle_name}] Recovered truncated revised_draft ({len(raw_draft)} chars)")
 
-    # Try to extract revision_decisions array
-    decisions_match = re.search(r'"revision_decisions"\s*:\s*\[', text)
-    if decisions_match:
-        bracket_start = decisions_match.end() - 1
-        depth = 0
-        for i in range(bracket_start, len(text)):
-            if text[i] == '[':
-                depth += 1
-            elif text[i] == ']':
-                depth -= 1
-                if depth == 0:
-                    try:
-                        decisions = json.loads(text[bracket_start:i + 1])
-                        result["revision_decisions"] = decisions
-                    except Exception:
-                        pass
-                    break
+    # --- Generic array-field recovery (works for any oracle role) ---
+    # Try every known array key.  Whichever one(s) appear in the text
+    # get partially salvaged; missing keys get default empty lists.
+    for field in (
+        "revision_decisions",       # Beth (coordinator)
+        "revised_sections",         # Beth (coordinator)
+        "open_questions",           # Beth (coordinator)
+        "normalized_issues",        # Sonnet (referee)
+        "findings",                 # Fran / Codex / Grok (reviewers)
+    ):
+        recovered = _recover_array_field(text, field)
+        if recovered is not None:
+            result[field] = recovered
+            if recovered:
+                LOGGER.info(
+                    f"[{oracle_name}] Recovered {len(recovered)} element(s) "
+                    f"for {field!r} from malformed response"
+                )
 
-    # Defaults for missing fields
+    # Defaults for missing Beth-shape fields
     result.setdefault("revision_decisions", [])
     result.setdefault("revised_sections", [])
     result.setdefault("open_questions", [])
 
-    if "revised_draft" not in result:
-        LOGGER.error(f"[{oracle_name}] Could not recover any content from truncated response")
-        result["error"] = "Truncated JSON, no recoverable content"
+    # If nothing of substance was recovered, surface the parse failure
+    # so the retry loop kicks in.
+    has_content = (
+        "revised_draft" in result
+        or any(result.get(f) for f in (
+            "revision_decisions", "normalized_issues", "findings",
+        ))
+    )
+    if not has_content:
+        LOGGER.error(f"[{oracle_name}] Could not recover any content from malformed response")
+        result["error"] = "Malformed JSON, no recoverable content"
         result["raw"] = text[:2000]
 
     return result
@@ -962,6 +1081,129 @@ def _check_convergence(session: OracleSession) -> tuple[bool, str]:
     return True, f"Converged: {len(high)} high, issue overlap {overlap:.0%}"
 
 
+def _run_round(
+    session: OracleSession,
+    round_num: int,
+    output_dir: Path,
+    compliance_context: str | None,
+) -> tuple[ReviewRound, bool]:
+    """Execute a single review round: parallel reviewers → Sonnet → Beth.
+
+    Returns (review_round, converged).  The round is appended to session.rounds
+    and session.canonical_draft is updated if Beth revises.
+
+    Why extracted: run_review was 170 lines with the round loop inlined.
+    Each round is an independent unit of work — extracting it makes the
+    convergence loop in run_review readable and each round independently testable.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    review_round = ReviewRound(round_number=round_num)
+
+    last_valid = _last_valid_round(session)
+    changed_sections = last_valid.coordinator_decisions.get("revised_sections", []) if last_valid else None
+    prior_decisions = last_valid.coordinator_decisions if last_valid else None
+    prior_issues = last_valid.normalized_issues.get("normalized_issues", []) if last_valid else []
+
+    # --- Parallel blind review (Fran, Codex, Grok) ---
+    review_msg = _build_review_message(
+        session.canonical_draft, round_num, changed_sections,
+        compliance_context=compliance_context,
+    )
+
+    required_reviewers = ("fran", "codex", "grok")
+    reviewer_failed = False
+
+    def _call_reviewer(key: str) -> tuple[str, dict]:
+        config = ORACLE_ROSTER[key]
+        try:
+            result = call_oracle(config, review_msg)
+            return config.name, result
+        except Exception as e:
+            LOGGER.error(f"[{config.name}] FAILED after retries: {e}")
+            return config.name, {"oracle_name": config.name, "error": str(e), "findings": []}
+
+    LOGGER.info(f"  Launching {len(required_reviewers)} reviewers in parallel...")
+    with ThreadPoolExecutor(max_workers=len(required_reviewers)) as pool:
+        futures = {pool.submit(_call_reviewer, key): key for key in required_reviewers}
+        for future in as_completed(futures):
+            name, result = future.result()
+            review_round.reviewer_outputs[name] = result
+            if "error" in result and not result.get("findings"):
+                reviewer_failed = True
+
+    for name, output in review_round.reviewer_outputs.items():
+        (output_dir / f"round{round_num}_{name.lower()}.json").write_text(
+            encoding="utf-8", data=json.dumps(output, indent=2)
+        )
+
+    if reviewer_failed:
+        LOGGER.error(f"Round {round_num} INVALID: required reviewer failed.")
+        session.rounds.append(review_round)
+        return review_round, False
+
+    # --- Sonnet normalizes ---
+    referee_msg = _build_referee_message(
+        session.canonical_draft, review_round.reviewer_outputs,
+        round_number=round_num, prior_issues=prior_issues,
+    )
+    try:
+        normalized = call_oracle(ORACLE_ROSTER["sonnet"], referee_msg)
+    except Exception as e:
+        LOGGER.error(f"[Sonnet] FAILED after retries: {e}. Round invalid.")
+        session.rounds.append(review_round)
+        return review_round, False
+
+    review_round.normalized_issues = normalized
+    (output_dir / f"round{round_num}_sonnet_normalized.json").write_text(
+        encoding="utf-8", data=json.dumps(normalized, indent=2)
+    )
+
+    # --- Beth classifies and revises ---
+    coord_msg = _build_coordinator_message(
+        session.canonical_draft, normalized, round_num,
+        prior_decisions=[prior_decisions] if prior_decisions else None,
+    )
+    try:
+        beth_response = call_oracle(ORACLE_ROSTER["beth"], coord_msg)
+    except Exception as e:
+        LOGGER.error(f"[Beth] FAILED after retries: {e}. Round invalid.")
+        session.rounds.append(review_round)
+        return review_round, False
+
+    review_round.coordinator_decisions = beth_response
+
+    revised = beth_response.get("revised_draft")
+    if revised and isinstance(revised, str) and revised.strip():
+        session.canonical_draft = revised.strip()
+        review_round.revised_draft = session.canonical_draft
+        LOGGER.info(f"[Beth] Draft revised ({len(session.canonical_draft)} chars)")
+    else:
+        LOGGER.info("[Beth] No revision to draft this round")
+
+    review_round.valid = True
+
+    (output_dir / f"round{round_num}_beth_decisions.json").write_text(
+        encoding="utf-8", data=json.dumps(beth_response, indent=2)
+    )
+    if review_round.revised_draft:
+        (output_dir / f"round{round_num}_revised_draft.md").write_text(
+            encoding="utf-8", data=review_round.revised_draft
+        )
+
+    session.rounds.append(review_round)
+
+    converged, reason = _check_convergence(session)
+    if converged:
+        session.converged = True
+        session.convergence_reason = reason
+        LOGGER.info(f"\nConverged after round {round_num}: {reason}")
+    else:
+        LOGGER.info(f"\nNot converged: {reason}")
+
+    return review_round, converged
+
+
 def run_review(
     draft: str,
     document_path: str = "",
@@ -969,7 +1211,11 @@ def run_review(
     output_dir: Path | None = None,
     compliance_context: str | None = None,
 ) -> OracleSession:
-    """Run the full multi-oracle review loop."""
+    """Run the full multi-oracle review loop.
+
+    Dispatches up to max_rounds through _run_round(), checking convergence
+    after each.  Saves final_draft.md and session_summary.json on completion.
+    """
     session_id = datetime.now().strftime("%Y%m%d-%H%M%S")
     session = OracleSession(
         session_id=session_id,
@@ -984,126 +1230,11 @@ def run_review(
 
     for round_num in range(1, max_rounds + 1):
         LOGGER.info(f"\n{'='*60}\nRound {round_num}\n{'='*60}")
-
-        review_round = ReviewRound(round_number=round_num)
-
-        # Pull changed_sections and prior_decisions from last VALID round, not last round
-        last_valid = _last_valid_round(session)
-        changed_sections = last_valid.coordinator_decisions.get("revised_sections", []) if last_valid else None
-        prior_decisions = last_valid.coordinator_decisions if last_valid else None
-
-        # Collect prior issue ledger for Sonnet to reuse IDs on recurring issues
-        prior_issues = []
-        if last_valid:
-            prior_issues = last_valid.normalized_issues.get("normalized_issues", [])
-
-        # --- Round N: Blind review (Fran, Codex, Grok) — PARALLEL ---
-        review_msg = _build_review_message(
-            session.canonical_draft, round_num, changed_sections,
-            compliance_context=compliance_context,
-        )
-
-        required_reviewers = ("fran", "codex", "grok")
-        reviewer_failed = False
-
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
-        def _run_reviewer(key: str) -> tuple[str, dict]:
-            config = ORACLE_ROSTER[key]
-            try:
-                result = call_oracle(config, review_msg)
-                return config.name, result
-            except Exception as e:
-                LOGGER.error(f"[{config.name}] FAILED after retries: {e}")
-                return config.name, {
-                    "oracle_name": config.name,
-                    "error": str(e),
-                    "findings": [],
-                }
-
-        LOGGER.info(f"  Launching {len(required_reviewers)} reviewers in parallel...")
-        with ThreadPoolExecutor(max_workers=len(required_reviewers)) as pool:
-            futures = {pool.submit(_run_reviewer, key): key for key in required_reviewers}
-            for future in as_completed(futures):
-                name, result = future.result()
-                review_round.reviewer_outputs[name] = result
-                if "error" in result and not result.get("findings"):
-                    reviewer_failed = True
-
-        # Save reviewer outputs
-        for name, output in review_round.reviewer_outputs.items():
-            path = output_dir / f"round{round_num}_{name.lower()}.json"
-            path.write_text(encoding="utf-8", data=json.dumps(output, indent=2))
-
-        if reviewer_failed:
-            LOGGER.error(f"Round {round_num} INVALID: required reviewer failed.")
-            session.rounds.append(review_round)  # valid=False (default)
-            continue
-
-        # --- Round N.5: Sonnet normalizes (required) ---
-        referee_msg = _build_referee_message(
-            session.canonical_draft, review_round.reviewer_outputs,
-            round_number=round_num, prior_issues=prior_issues,
-        )
-        try:
-            normalized = call_oracle(ORACLE_ROSTER["sonnet"], referee_msg)
-        except Exception as e:
-            LOGGER.error(f"[Sonnet] FAILED after retries: {e}. Round invalid.")
-            session.rounds.append(review_round)
-            continue
-
-        review_round.normalized_issues = normalized
-        (output_dir / f"round{round_num}_sonnet_normalized.json").write_text(encoding="utf-8", data=
-            json.dumps(normalized, indent=2)
-        )
-
-        # --- Beth classifies and revises (required) ---
-        coord_msg = _build_coordinator_message(
-            session.canonical_draft, normalized, round_num,
-            prior_decisions=[prior_decisions] if prior_decisions else None,
-        )
-        try:
-            beth_response = call_oracle(ORACLE_ROSTER["beth"], coord_msg)
-        except Exception as e:
-            LOGGER.error(f"[Beth] FAILED after retries: {e}. Round invalid.")
-            session.rounds.append(review_round)
-            continue
-
-        review_round.coordinator_decisions = beth_response
-
-        # Extract revised draft from Beth's JSON (strict schema)
-        revised = beth_response.get("revised_draft")
-        if revised and isinstance(revised, str) and revised.strip():
-            session.canonical_draft = revised.strip()
-            review_round.revised_draft = session.canonical_draft
-            LOGGER.info(f"[Beth] Draft revised ({len(session.canonical_draft)} chars)")
-        else:
-            LOGGER.info("[Beth] No revision to draft this round")
-
-        # All 5 oracles succeeded — mark round as valid
-        review_round.valid = True
-
-        (output_dir / f"round{round_num}_beth_decisions.json").write_text(encoding="utf-8", data=
-            json.dumps(beth_response, indent=2)
-        )
-        if review_round.revised_draft:
-            (output_dir / f"round{round_num}_revised_draft.md").write_text(encoding="utf-8", data=
-                review_round.revised_draft
-            )
-
-        session.rounds.append(review_round)
-
-        # --- Convergence check ---
-        converged, reason = _check_convergence(session)
+        _, converged = _run_round(session, round_num, output_dir, compliance_context)
         if converged:
-            session.converged = True
-            session.convergence_reason = reason
-            LOGGER.info(f"\nConverged after round {round_num}: {reason}")
             break
-        else:
-            LOGGER.info(f"\nNot converged: {reason}")
 
-    # --- Save final state ---
+    # Save final state
     (output_dir / "final_draft.md").write_text(encoding="utf-8", data=session.canonical_draft)
     summary = {
         "session_id": session.session_id,

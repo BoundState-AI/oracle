@@ -1,12 +1,23 @@
 #!/usr/bin/env python3
 """
-Single-entry pipeline for building GPCM rule packs from standards PDFs.
+Module: oracle.build_gpcm_rulepack
+Purpose: Builds GPCM compliance rule packs from standards PDFs.
 
 Stage 1: shall_extractor.py logic to pull raw obligation statements from the PDF
 Stage 2: gpcm_rulepack_adapter.py logic to enrich and format the final rule pack
+
+__safety_critical__: bool = True — builds GPCM compliance packs used in review decisions
+
+BoundState AI 2026
+Classification: BoundState Proprietary
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+Co-Authored-By: Dr. Joseph Wilde, BoundState AI
 """
 
 from __future__ import annotations
+
+__safety_critical__: bool = True
 
 import argparse
 import logging
@@ -16,7 +27,7 @@ from oracle.gpcm_rulepack_adapter import default_output_json, infer_standard_id,
 from oracle.shall_extractor import detect_implicit_obligations, enrich_with_sonnet, extract_pass1, save_results
 
 
-logger = logging.getLogger(__name__)
+LOGGER = logging.getLogger(__name__)
 
 
 def filter_mandatory_only(result) -> None:
@@ -32,7 +43,7 @@ def filter_mandatory_only(result) -> None:
         result.by_type[statement.obligation_type] = (
             result.by_type.get(statement.obligation_type, 0) + 1
         )
-    logger.info(
+    LOGGER.info(
         "Filtered to mandatory/prohibition: %d -> %d",
         before,
         result.total_statements,
@@ -53,14 +64,14 @@ def run_pipeline(
     adapter_dpi: int,
     detect_implicit: bool = False,
 ) -> dict[str, Path]:
-    logger.info("Pipeline start: %s", pdf_path)
+    LOGGER.info("Pipeline start: %s", pdf_path)
     result = extract_pass1(pdf_path)
 
     if mandatory_only:
         filter_mandatory_only(result)
 
     extractor_paths = save_results(result, output_dir)
-    logger.info("Extractor JSON: %s", extractor_paths["json"])
+    LOGGER.info("Extractor JSON: %s", extractor_paths["json"])
 
     if extractor_sonnet:
         result = enrich_with_sonnet(
@@ -71,17 +82,17 @@ def run_pipeline(
             max_pages=extractor_max_pages,
         )
         extractor_paths = save_results(result, output_dir)
-        logger.info("Extractor Sonnet JSON: %s", extractor_paths["json"])
+        LOGGER.info("Extractor Sonnet JSON: %s", extractor_paths["json"])
 
     if detect_implicit:
-        logger.info("Pass 1c: Detecting implicit obligations...")
+        LOGGER.info("Pass 1c: Detecting implicit obligations...")
         result = detect_implicit_obligations(
             result,
             pdf_path,
             api_key=api_key,
         )
         extractor_paths = save_results(result, output_dir)
-        logger.info("Implicit detection complete: %s", extractor_paths["json"])
+        LOGGER.info("Implicit detection complete: %s", extractor_paths["json"])
 
     standard_id = infer_standard_id(pdf_path, extractor_paths["json"])
     if standard_id is None:
@@ -98,7 +109,7 @@ def run_pipeline(
         vision_dpi=adapter_dpi,
     )
 
-    logger.info("Rule pack JSON: %s", rulepack_path)
+    LOGGER.info("Rule pack JSON: %s", rulepack_path)
     return {
         "extract_json": extractor_paths["json"],
         "extract_summary": extractor_paths["summary"],

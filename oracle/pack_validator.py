@@ -163,6 +163,7 @@ FAR_SCHEMA: dict[str, Any] = {
                         "statement_text": {"type": "string"},
                         "subject": {"type": "string"},
                         "requirement": {"type": "string"},
+                        "justification": {"type": "string"},
                         "keywords": {"type": "array", "items": {"type": "string"}},
                         "applies_to": {"type": "array", "items": {"type": "string"}},
                     },
@@ -228,6 +229,7 @@ GENERIC_SCHEMA: dict[str, Any] = {
                     "subject": {"type": "string"},
                     "requirement": {"type": "string"},
                     "context": {"type": "string"},
+                    "justification": {"type": "string"},
                     "severity": {
                         "type": "string",
                         "enum": ["critical", "high", "medium", "low"],

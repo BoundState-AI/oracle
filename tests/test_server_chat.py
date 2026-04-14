@@ -1,8 +1,11 @@
+"""Tests for the /oracle/chat endpoint — grounded retrieval, multi-pack compare, streaming, and LLM fallback."""
 import json
+from typing import Any
 
 from fastapi.testclient import TestClient
 
 import server
+import oracle.chat_engine as chat_engine
 from oracle.cli import register_pack
 
 
@@ -53,10 +56,57 @@ def _chat_pack_payload(
     }
 
 
+def _chat_multi_rule_pack_payload(
+    *,
+    standard_id: str,
+    standard_title: str,
+    rules: list[dict[str, Any]],
+) -> dict:
+    return {
+        "schema_version": "oracle_generic/v1",
+        "rule_pack_id": f"{standard_id.lower()}-pack",
+        "standard_id": standard_id,
+        "standard_title": standard_title,
+        "version": "1.0.0",
+        "generated_at": "2026-04-08T00:00:00Z",
+        "source_document": f"{standard_id}.pdf",
+        "extraction_method": "test",
+        "extraction_status": "complete",
+        "total_source_pages": 10,
+        "extracted_pages": [4, 5, 6, 10],
+        "failed_page_ranges": [],
+        "chunk_failures": [],
+        "total_rules": len(rules),
+        "oracle_metadata": {
+            "name": standard_title,
+            "slug": standard_id.lower().replace("-", "_"),
+            "description": f"{standard_title} pack",
+            "status": "draft",
+            "added_at": "2026-04-08T00:00:00Z",
+        },
+        "rules": rules,
+    }
+
+
 def _register_pack(workspace_tmp_path, pack_dir, payload: dict, filename: str) -> str:
     source = workspace_tmp_path / filename
     source.write_text(json.dumps(payload), encoding="utf-8")
     return register_pack(source, pack_dir)
+
+
+def _write_secondary_rationale_corpus(workspace_tmp_path, statements: list[dict[str, Any]]) -> str:
+    path = workspace_tmp_path / "secondary_rationale.json"
+    path.write_text(
+        json.dumps(
+            {
+                "standard_id": "NASA-STD-6016C",
+                "source_file": "NASA-STD-6016C.pdf",
+                "statements": statements,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return str(path)
 
 
 def test_chat_requires_selected_pack(workspace_tmp_path, monkeypatch):
@@ -73,6 +123,79 @@ def test_chat_requires_selected_pack(workspace_tmp_path, monkeypatch):
     assert body["status"] == "INSUFFICIENT_DATA"
     assert "Select at least one authority pack" in body["response"]
     assert body["advisory_only"] is True
+
+
+def test_chat_review_only_mode_allows_packless_critique(workspace_tmp_path, monkeypatch):
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    server._chat_sessions.clear()
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/oracle/chat",
+        json={
+            "message": "The contractor shall provide appropriate support as needed.",
+            "review_only": True,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "PASS"
+    assert body["review_only"] is True
+    assert body["selected_packs"] == []
+    assert "Review-only assessment" in body["response"]
+    assert "measurable" in body["response"].lower()
+    assert any(citation.startswith("review-only/") for citation in body["citations"])
+
+
+def test_chat_explicit_empty_pack_selection_clears_session_scope(workspace_tmp_path, monkeypatch):
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    server._chat_sessions.clear()
+
+    slug = _register_pack(
+        workspace_tmp_path,
+        pack_dir,
+        _chat_pack_payload(
+            standard_id="NASA-STD-5009C",
+            standard_title="NASA Fracture Control Standard",
+            statement_text="Pure tin finishes shall not be used on mission hardware connectors.",
+            section="Table V Note 6",
+            page=42,
+            keywords=["pure tin", "connector plating"],
+        ),
+        "5009c.json",
+    )
+
+    client = TestClient(server.app)
+    first = client.post(
+        "/oracle/chat",
+        json={
+            "session_id": "chat-clear-scope",
+            "message": "What does the selected standard say about pure tin finishes?",
+            "selected_packs": [slug],
+        },
+    )
+    assert first.status_code == 200
+    assert first.json()["status"] == "PASS"
+
+    second = client.post(
+        "/oracle/chat",
+        json={
+            "session_id": "chat-clear-scope",
+            "message": "What does the standard say now?",
+            "selected_packs": [],
+        },
+    )
+
+    assert second.status_code == 200
+    body = second.json()
+    assert body["status"] == "INSUFFICIENT_DATA"
+    assert body["selected_packs"] == []
+    assert "Select at least one authority pack" in body["response"]
 
 
 def test_chat_returns_grounded_clause_for_selected_pack(workspace_tmp_path, monkeypatch):
@@ -110,6 +233,515 @@ def test_chat_returns_grounded_clause_for_selected_pack(workspace_tmp_path, monk
     assert "Pure tin finishes shall not be used" in body["response"]
     assert "NASA-STD-5009C" in body["citations"][0]
     assert body["selected_packs"] == [slug]
+
+
+def test_chat_matches_pure_sn_shorthand_to_pure_tin_rule(workspace_tmp_path, monkeypatch):
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    server._chat_sessions.clear()
+
+    slug = _register_pack(
+        workspace_tmp_path,
+        pack_dir,
+        _chat_pack_payload(
+            standard_id="MSFC-STD-3012A",
+            standard_title="EEE Parts Management Requirements",
+            statement_text="Pure tin finishes shall be prohibited unless mitigation controls are documented.",
+            section="5.4.5",
+            page=77,
+            keywords=["pure tin", "mitigation controls"],
+        ),
+        "3012a_pure_tin.json",
+    )
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/oracle/chat",
+        json={
+            "message": "I have a part w pure Sn, what should i do",
+            "selected_packs": [slug],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "PASS"
+    assert "Pure tin finishes shall be prohibited unless mitigation controls are documented." in body["response"]
+    assert "MSFC-STD-3012A section 5.4.5 (p. 77)" in body["citations"][0]
+
+
+def test_chat_synthesizes_pure_tin_workflow_from_multiple_3012a_rules(workspace_tmp_path, monkeypatch):
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    server._chat_sessions.clear()
+
+    slug = _register_pack(
+        workspace_tmp_path,
+        pack_dir,
+        _chat_multi_rule_pack_payload(
+            standard_id="MSFC-STD-3012A",
+            standard_title="EEE Parts Management Requirements",
+            rules=[
+                {
+                    "rule_id": "RULE-001",
+                    "section": "Table IV Item 5",
+                    "page": 30,
+                    "obligation_type": "prohibition",
+                    "obligation_keyword": "shall not",
+                    "statement_text": "Pure tin plated parts or hardware are prohibited except where specifically approved.",
+                    "subject": "Pure tin finish avoidance",
+                    "requirement": "Pure tin finish is defined as less than 3% lead by mass and shall not be used as-is where prohibited by the cited hazard-avoidance clause.",
+                    "keywords": ["pure tin", "3% lead", "hazard avoidance"],
+                    "applies_to": ["eee parts"],
+                },
+                {
+                    "rule_id": "RULE-002",
+                    "section": "5.3.2.1",
+                    "page": 28,
+                    "obligation_type": "mandatory",
+                    "obligation_keyword": "shall",
+                    "statement_text": "All DPA samples from non QPL/QML/QPD manufactured EEE part lots shall be tested internally and externally for pure tin.",
+                    "subject": "Lot pure tin screening",
+                    "requirement": "For non QPL/QML/QPD lots, DPA samples shall be tested internally and externally for pure tin.",
+                    "keywords": ["pure tin", "DPA", "non QPL/QML/QPD"],
+                    "applies_to": ["lot screening"],
+                },
+                {
+                    "rule_id": "RULE-003",
+                    "section": "5.4.4.1",
+                    "page": 31,
+                    "obligation_type": "mandatory",
+                    "obligation_keyword": "shall",
+                    "statement_text": "Any EEE part where pure tin finish is not precluded by the military QPL/QML/QPD, or specification control document, shall be tested internally and externally for pure tin.",
+                    "subject": "Pure tin finish avoidance",
+                    "requirement": "If pure tin is not already precluded by the governing spec or control document, the part shall be tested internally and externally for pure tin.",
+                    "keywords": ["pure tin", "tested internally and externally", "specification control document"],
+                    "applies_to": ["eee parts"],
+                },
+                {
+                    "rule_id": "RULE-004",
+                    "section": "5.4.4.1",
+                    "page": 31,
+                    "obligation_type": "mandatory",
+                    "obligation_keyword": "shall",
+                    "statement_text": "If parts fail to meet the 3% lead by mass requirement, the preferred method to mitigate pure tin risk is solder dip; if that is not practical, mitigation shall follow IPC J-STD-001ES.",
+                    "subject": "Pure tin mitigation",
+                    "requirement": "If the finish fails the 3% lead threshold, the preferred pure tin mitigation is solder dip, with IPC J-STD-001ES as the fallback path.",
+                    "keywords": ["pure tin", "3% lead", "solder dip", "IPC J-STD-001ES"],
+                    "applies_to": ["eee parts"],
+                },
+            ],
+        ),
+        "3012a_pure_tin_workflow.json",
+    )
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/oracle/chat",
+        json={
+            "message": "I have pure Sn, what should i do about it?",
+            "selected_packs": [slug],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "PASS"
+    assert "hazard-avoidance issue" in body["response"]
+    assert "test internally and externally for pure tin" in body["response"]
+    assert "solder dip" in body["response"]
+    assert any("MSFC-STD-3012A section 5.4.4.1" in citation for citation in body["citations"])
+    assert body["follow_ups"] == [
+        "Show me the pure tin avoidance clause in MSFC-STD-3012A.",
+        "List the test and mitigation steps for pure tin under MSFC-STD-3012A.",
+    ]
+
+
+def test_chat_expands_cd_alias_and_prefers_spaceflight_prohibition_reason(workspace_tmp_path, monkeypatch):
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    monkeypatch.setenv("ORACLE_SECONDARY_RATIONALE_JSON", "")
+    server._chat_sessions.clear()
+
+    slug = _register_pack(
+        workspace_tmp_path,
+        pack_dir,
+        _chat_multi_rule_pack_payload(
+            standard_id="MSFC-STD-3012A",
+            standard_title="EEE Parts Management Requirements",
+            rules=[
+                {
+                    "rule_id": "RULE-001",
+                    "section": "29/",
+                    "page": 79,
+                    "obligation_type": "prohibition",
+                    "obligation_keyword": "shall not",
+                    "statement_text": "Cadmium plated parts shall not be used where prohibited by the finish control table.",
+                    "subject": "Cadmium plated parts",
+                    "requirement": "Not be used.",
+                    "keywords": ["cadmium plated parts", "finish control"],
+                    "applies_to": ["eee parts"],
+                },
+                {
+                    "rule_id": "RULE-002",
+                    "section": "5.4.5.1",
+                    "page": 32,
+                    "obligation_type": "mandatory",
+                    "obligation_keyword": "shall",
+                    "statement_text": "Cadmium plated parts shall be inspected for verification of sufficient plating and lack of red plague.",
+                    "subject": "Cadmium plated parts",
+                    "requirement": "Be inspected for verification of sufficient plating and lack of red plague.",
+                    "keywords": ["cadmium plated parts", "red plague"],
+                    "applies_to": ["eee parts"],
+                },
+                {
+                    "rule_id": "RULE-003",
+                    "section": "14/",
+                    "page": 50,
+                    "obligation_type": "prohibition",
+                    "obligation_keyword": "must not",
+                    "statement_text": "Cadmium plated parts must not be used in space flight applications because cadmium can contaminate nearby surfaces in vacuum.",
+                    "subject": "Cadmium plated parts",
+                    "requirement": "Must not be used in space flight applications.",
+                    "keywords": ["cadmium plated parts", "space flight applications", "vacuum"],
+                    "applies_to": ["spaceflight hardware"],
+                },
+            ],
+        ),
+        "3012a_cadmium_spaceflight.json",
+    )
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/oracle/chat",
+        json={
+            "message": "why can't i use cadmium plated parts for spaceflight",
+            "selected_packs": [slug],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "PASS"
+    assert body["response"].startswith("No.\nIn the selected MSFC-STD-3012A clauses, cadmium plated parts must not be used in space flight applications.")
+    assert "The clause itself gives the reason: cadmium can contaminate nearby surfaces in vacuum." in body["response"]
+    assert body["citations"][0] == "MSFC-STD-3012A section 14/ (p. 50)"
+    assert "shall be inspected for verification" in body["response"]
+    assert "Citations:" not in body["response"]
+    assert "Next moves:" not in body["response"]
+
+
+def test_chat_returns_insufficient_data_when_cadmium_topic_has_no_cadmium_rule(workspace_tmp_path, monkeypatch):
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    monkeypatch.setenv("ORACLE_SECONDARY_RATIONALE_JSON", "")
+    server._chat_sessions.clear()
+
+    slug = _register_pack(
+        workspace_tmp_path,
+        pack_dir,
+        _chat_multi_rule_pack_payload(
+            standard_id="MSFC-STD-3012A",
+            standard_title="EEE Parts Management Requirements",
+            rules=[
+                {
+                    "rule_id": "RULE-001",
+                    "section": "6/",
+                    "page": 48,
+                    "obligation_type": "prohibition",
+                    "obligation_keyword": "shall not",
+                    "statement_text": "Termination Style W or Y shall not be used.",
+                    "subject": "Termination style restriction",
+                    "requirement": "Termination Style W or Y shall not be used.",
+                    "keywords": ["termination style", "style w", "style y"],
+                    "applies_to": ["eee parts"],
+                },
+                {
+                    "rule_id": "RULE-002",
+                    "section": "5.4.5.1",
+                    "page": 32,
+                    "obligation_type": "mandatory",
+                    "obligation_keyword": "shall",
+                    "statement_text": "Connector plating shall be inspected for verification of sufficient plating and lack of red plague.",
+                    "subject": "Connector plating inspection",
+                    "requirement": "Connector plating shall be inspected for sufficient plating and lack of red plague.",
+                    "keywords": ["connector plating", "red plague"],
+                    "applies_to": ["connectors"],
+                },
+            ],
+        ),
+        "3012a_no_cadmium.json",
+    )
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/oracle/chat",
+        json={
+            "message": "why can't i use Cd plated parts for spaceflight",
+            "selected_packs": [slug],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "INSUFFICIENT_DATA"
+    assert "did not find a grounded requirement match" in body["response"]
+
+
+def test_chat_uses_rule_justification_for_why_queries(workspace_tmp_path, monkeypatch):
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    monkeypatch.setenv("ORACLE_SECONDARY_RATIONALE_JSON", "")
+    server._chat_sessions.clear()
+
+    slug = _register_pack(
+        workspace_tmp_path,
+        pack_dir,
+        _chat_multi_rule_pack_payload(
+            standard_id="MSFC-STD-3012A",
+            standard_title="EEE Parts Management Requirements",
+            rules=[
+                {
+                    "rule_id": "RULE-001",
+                    "section": "14/",
+                    "page": 50,
+                    "obligation_type": "prohibition",
+                    "obligation_keyword": "must not",
+                    "statement_text": "Cadmium plated parts must not be used in space flight applications.",
+                    "subject": "Cadmium plated parts",
+                    "requirement": "Must not be used in space flight applications.",
+                    "justification": "Cadmium can sublime in vacuum and contaminate nearby surfaces.",
+                    "keywords": ["cadmium plated parts", "space flight applications", "vacuum"],
+                    "applies_to": ["spaceflight hardware"],
+                },
+                {
+                    "rule_id": "RULE-002",
+                    "section": "5.4.5.1",
+                    "page": 32,
+                    "obligation_type": "mandatory",
+                    "obligation_keyword": "shall",
+                    "statement_text": "Cadmium plated parts shall be inspected for verification of sufficient plating and lack of red plague.",
+                    "subject": "Cadmium plated parts",
+                    "requirement": "Be inspected for verification of sufficient plating and lack of red plague.",
+                    "keywords": ["cadmium plated parts", "red plague"],
+                    "applies_to": ["eee parts"],
+                },
+            ],
+        ),
+        "3012a_cadmium_justification.json",
+    )
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/oracle/chat",
+        json={
+            "message": "why can't we use cd on spaceflight parts",
+            "selected_packs": [slug],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "PASS"
+    assert body["response"].startswith("No.\nIn the selected MSFC-STD-3012A clauses, cadmium plated parts must not be used in space flight applications.")
+    assert (
+        "The selected clause gives the technical reason directly: Cadmium can sublime in vacuum and contaminate nearby surfaces."
+        in body["response"]
+    )
+    assert body["citations"][0] == "MSFC-STD-3012A section 14/ (p. 50)"
+    assert body["diagnostics"]["fallback_used"] is False
+
+
+def test_chat_says_when_selected_pack_only_contains_bare_prohibition(workspace_tmp_path, monkeypatch):
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    monkeypatch.setenv("ORACLE_SECONDARY_RATIONALE_JSON", "")
+    server._chat_sessions.clear()
+
+    slug = _register_pack(
+        workspace_tmp_path,
+        pack_dir,
+        _chat_multi_rule_pack_payload(
+            standard_id="MSFC-STD-3012A",
+            standard_title="EEE Parts Management Requirements",
+            rules=[
+                {
+                    "rule_id": "RULE-001",
+                    "section": "14/",
+                    "page": 50,
+                    "obligation_type": "prohibition",
+                    "obligation_keyword": "must not",
+                    "statement_text": "Cadmium, zinc, or anodized plated connectors and connector accessories must not be used in space flight applications.",
+                    "subject": "Connector accessory finish restriction",
+                    "requirement": "Cadmium, zinc, or anodized plated connectors and connector accessories must not be used in space flight applications.",
+                    "justification": "Material restrictions for space flight connectors.",
+                    "keywords": ["cadmium plated parts", "connector accessories", "space flight applications"],
+                    "applies_to": ["spaceflight hardware"],
+                },
+                {
+                    "rule_id": "RULE-002",
+                    "section": "7/",
+                    "page": 77,
+                    "obligation_type": "prohibition",
+                    "obligation_keyword": "shall not",
+                    "statement_text": "Cadmium, zinc, or anodized plated connectors and connector accessories shall not be used in space flight.",
+                    "subject": "Connector accessory finish restriction",
+                    "requirement": "Cadmium, zinc, or anodized plated connectors and connector accessories shall not be used in space flight.",
+                    "keywords": ["cadmium plated parts", "connector accessories", "space flight"],
+                    "applies_to": ["spaceflight hardware"],
+                },
+                {
+                    "rule_id": "RULE-003",
+                    "section": "Table VII Note 7",
+                    "page": 77,
+                    "obligation_type": "prohibition",
+                    "obligation_keyword": "shall not",
+                    "statement_text": "Cadmium, zinc, or anodized plated connectors and connector accessories (i.e., backshells, contacts, jam nuts, protective caps, jackscrews, etc.) shall not be used in space flight.",
+                    "subject": "Connector accessory finish restriction",
+                    "requirement": "Cadmium, zinc, or anodized plated connectors and connector accessories shall not be used in space flight.",
+                    "keywords": ["cadmium plated parts", "connector accessories", "backshells"],
+                    "applies_to": ["spaceflight hardware"],
+                },
+            ],
+        ),
+        "3012a_cadmium_bare_prohibition.json",
+    )
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/oracle/chat",
+        json={
+            "message": "why can't we use cd on spaceflight parts",
+            "selected_packs": [slug],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "PASS"
+    assert body["response"].startswith("No.")
+    assert "The selected MSFC-STD-3012A clauses do not explain why." in body["response"]
+    assert "The cited rationale is:" not in body["response"]
+    assert any(citation == "MSFC-STD-3012A section 14/ (p. 50)" for citation in body["citations"])
+
+
+def test_chat_adds_secondary_rationale_and_scope_note_for_broad_cadmium_why_query(
+    workspace_tmp_path,
+    monkeypatch,
+):
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    monkeypatch.setenv(
+        "ORACLE_SECONDARY_RATIONALE_JSON",
+        _write_secondary_rationale_corpus(
+            workspace_tmp_path,
+            statements=[
+                {
+                    "statement_text": (
+                        "All cleaning fluids used during titanium processing shall be verified "
+                        "to be compatible before use."
+                    ),
+                    "justification": (
+                        "Mercury, cadmium, silver, and gold can cause liquid-metal-induced "
+                        "embrittlement of titanium alloys."
+                    ),
+                    "section": "4.2.2.3.1",
+                    "page": 41,
+                    "keywords": ["titanium", "cadmium", "processing"],
+                    "applies_to": ["mission_critical"],
+                },
+                {
+                    "statement_text": "Cadmium shall not be used in crew or vacuum environments.",
+                    "justification": (
+                        "Cadmium is highly toxic, can sublime and cause outgassing contamination "
+                        "at elevated temperatures in vacuum, and can cause liquid metal embrittlement."
+                    ),
+                    "section": "4.2.2.6.a",
+                    "page": 43,
+                    "keywords": ["cadmium", "vacuum", "outgassing"],
+                    "applies_to": ["contamination_control"],
+                },
+            ],
+        ),
+    )
+    server._chat_sessions.clear()
+
+    slug = _register_pack(
+        workspace_tmp_path,
+        pack_dir,
+        _chat_multi_rule_pack_payload(
+            standard_id="MSFC-STD-3012A",
+            standard_title="EEE Parts Management Requirements",
+            rules=[
+                {
+                    "rule_id": "RULE-001",
+                    "section": "14/",
+                    "page": 50,
+                    "obligation_type": "prohibition",
+                    "obligation_keyword": "must not",
+                    "statement_text": (
+                        "Cadmium, zinc, or anodized plated connectors and connector accessories "
+                        "must not be used in space flight applications."
+                    ),
+                    "subject": "Connector accessory finish restriction",
+                    "requirement": (
+                        "Cadmium, zinc, or anodized plated connectors and connector accessories "
+                        "must not be used in space flight applications."
+                    ),
+                    "keywords": ["cadmium plated parts", "connector accessories", "space flight applications"],
+                    "applies_to": ["spaceflight hardware"],
+                },
+                {
+                    "rule_id": "RULE-002",
+                    "section": "7/",
+                    "page": 77,
+                    "obligation_type": "prohibition",
+                    "obligation_keyword": "shall not",
+                    "statement_text": (
+                        "Cadmium, zinc, or anodized plated connectors and connector accessories "
+                        "shall not be used in space flight."
+                    ),
+                    "subject": "Connector accessory finish restriction",
+                    "requirement": (
+                        "Cadmium, zinc, or anodized plated connectors and connector accessories "
+                        "shall not be used in space flight."
+                    ),
+                    "keywords": ["cadmium plated parts", "connector accessories", "space flight"],
+                    "applies_to": ["spaceflight hardware"],
+                },
+            ],
+        ),
+        "3012a_cadmium_scope.json",
+    )
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/oracle/chat",
+        json={
+            "message": "why can't we use cd in spaceflight applications",
+            "selected_packs": [slug],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "PASS"
+    assert body["response"].startswith(
+        "No.\nIn the selected MSFC-STD-3012A clauses, cadmium, zinc, or anodized plated connectors and connector accessories must not be used in space flight applications."
+    )
+    assert "Those MSFC-STD-3012A clauses are specific to connectors and connector accessories" in body["response"]
+    assert "they do not establish a blanket ban on all cadmium uses." in body["response"]
+    assert "The selected MSFC-STD-3012A clauses do not explain why." in body["response"]
+    assert "NASA-STD-6016C gives the technical reason:" in body["response"]
+    assert "Cadmium is highly toxic, can sublime and cause outgassing contamination" in body["response"]
+    assert "NASA-STD-6016C section 4.2.2.6.a (p. 43)" in body["citations"]
 
 
 def test_chat_compare_only_uses_multiple_packs(workspace_tmp_path, monkeypatch):
@@ -158,7 +790,9 @@ def test_chat_compare_only_uses_multiple_packs(workspace_tmp_path, monkeypatch):
     assert response.status_code == 200
     body = response.json()
     assert body["compare_only"] is True
-    assert "Oracle comparison across selected standards" in body["response"]
+    assert body["response"].startswith("Comparison across selected standards.")
+    assert "NASA-STD-5009C:" in body["response"]
+    assert "MSFC-STD-3012A:" in body["response"]
     assert len(body["selected_packs"]) == 2
     assert any("NASA-STD-5009C" in citation for citation in body["citations"])
     assert any("MSFC-STD-3012A" in citation for citation in body["citations"])
@@ -200,3 +834,382 @@ def test_chat_stream_returns_done_payload(workspace_tmp_path, monkeypatch):
     assert "event: text" in payload
     assert "event: done" in payload
     assert '"advisory_only": true' in payload
+    assert '"review_only": false' in payload
+    assert '"envelope_version": "1.0"' in payload
+
+
+def test_chat_stream_review_only_returns_done_payload(workspace_tmp_path, monkeypatch):
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    server._chat_sessions.clear()
+
+    client = TestClient(server.app)
+    with client.stream(
+        "POST",
+        "/oracle/chat/stream",
+        json={
+            "message": "The team will obtain approval before release.",
+            "review_only": True,
+        },
+    ) as response:
+        payload = b"".join(response.iter_bytes()).decode("utf-8")
+
+    assert response.status_code == 200
+    assert "event: meta" in payload
+    assert "event: done" in payload
+    assert '"review_only": true' in payload
+    assert "review-only/governance" in payload
+
+
+def test_chat_synthesizes_scope_and_funding_answer(workspace_tmp_path, monkeypatch):
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    server._chat_sessions.clear()
+
+    slug = _register_pack(
+        workspace_tmp_path,
+        pack_dir,
+        _chat_multi_rule_pack_payload(
+            standard_id="ESSCA-II-J-21",
+            standard_title="ESSCA II Attachment J-21",
+            rules=[
+                {
+                    "rule_id": "RULE-001",
+                    "section": "Fig J-21-1",
+                    "page": 10,
+                    "obligation_type": "mandatory",
+                    "obligation_keyword": "must",
+                    "statement_text": "Scope or POP change with cost impact triggers the standard TOCR flow.",
+                    "subject": "Scope change routing",
+                    "requirement": "Any change involving scope with cost impact must follow the TOCR flow, not an informal path.",
+                    "keywords": ["scope change", "cost impact", "TOCR flow"],
+                    "applies_to": ["scope_changes"],
+                },
+                {
+                    "rule_id": "RULE-002",
+                    "section": "1.1-SubTask(c)",
+                    "page": 5,
+                    "obligation_type": "mandatory",
+                    "obligation_keyword": "required",
+                    "statement_text": "CWBS, to include PSID, funding source, funding sub-source, and activity.",
+                    "subject": "Sub-task CWBS and funding",
+                    "requirement": "Each sub-task must have CWBS data with PSID and funding source information before the work can be authorized.",
+                    "keywords": ["CWBS", "PSID", "funding source", "charge code"],
+                    "applies_to": ["all_sub_tasks"],
+                },
+                {
+                    "rule_id": "RULE-003",
+                    "section": "1.1(k)",
+                    "page": 4,
+                    "obligation_type": "mandatory",
+                    "obligation_keyword": "must",
+                    "statement_text": "Summary of changes must include the description of change and cost impact.",
+                    "subject": "Summary of Changes",
+                    "requirement": "Every TOCR summary must include the change description and cost impact.",
+                    "keywords": ["summary of changes", "cost impact", "TOCR"],
+                    "applies_to": ["all_task_order_changes"],
+                },
+                {
+                    "rule_id": "RULE-004",
+                    "section": "1.1-SubTask(g)",
+                    "page": 5,
+                    "obligation_type": "mandatory",
+                    "obligation_keyword": "required",
+                    "statement_text": "Place of performance for the work if not onsite.",
+                    "subject": "Place of performance",
+                    "requirement": "Non-onsite work must specify place of performance.",
+                    "keywords": ["place of performance"],
+                    "applies_to": ["all_sub_tasks"],
+                },
+            ],
+        ),
+        "j21.json",
+    )
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/oracle/chat",
+        json={
+            "message": "if you insert scope and do not fund it, is that against the j21 rules?",
+            "selected_packs": [slug],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "PASS"
+    assert body["response"].startswith("ESSCA-II-J-21 routes this kind of scope-and-funding change into formal change control.")
+    assert "TOCR" in body["response"]
+    assert "funding" in body["response"].lower()
+    assert "place of performance" not in body["response"].lower()
+    assert len(body["citations"]) == 3
+
+
+def test_chat_uses_llm_summary_when_available(workspace_tmp_path, monkeypatch):
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    server._chat_sessions.clear()
+
+    slug = _register_pack(
+        workspace_tmp_path,
+        pack_dir,
+        _chat_pack_payload(
+            standard_id="NASA-STD-5009C",
+            standard_title="NASA Fracture Control Standard",
+            statement_text="Pure tin finishes shall not be used on mission hardware connectors.",
+            section="Table V Note 6",
+            page=42,
+            keywords=["pure tin", "connector plating"],
+        ),
+        "5009c.json",
+    )
+
+    monkeypatch.setattr(
+        chat_engine,
+        "_maybe_run_llm_reasoning",
+        lambda **kwargs: {
+            "provider": "test",
+            "model": "reasoner",
+            "direct_answer": "No.",
+            "bottom_line": "The retrieved rule prohibits pure tin on mission hardware connectors.",
+            "why": ["The retrieved clause is a direct prohibition."],
+            "gaps": [],
+            "governing_citations": ["NASA-STD-5009C section Table V Note 6 (p. 42)"],
+            "follow_ups": ["Show me the exact clause text."],
+            "per_pack_findings": [],
+        },
+    )
+    monkeypatch.setattr(
+        chat_engine,
+        "_maybe_run_llm_summary",
+        lambda **kwargs: {
+            "provider": "test",
+            "model": "summarizer",
+            "answer_text": "No. NASA-STD-5009C directly prohibits pure tin finishes on mission hardware connectors.",
+            "citations": ["NASA-STD-5009C section Table V Note 6 (p. 42)"],
+            "follow_ups": ["Show me the exact clause text."],
+        },
+    )
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/oracle/chat",
+        json={
+            "message": "Is pure tin allowed on mission hardware connectors?",
+            "selected_packs": [slug],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "PASS"
+    assert body["response"].startswith("No.")
+    assert body["citations"] == ["NASA-STD-5009C section Table V Note 6 (p. 42)"]
+    assert "Citations:" not in body["response"]
+    assert "Next moves:" not in body["response"]
+    assert body["stage_artifacts"]["summary"]["llm_model"] == "summarizer"
+
+
+def test_chat_returns_insufficient_data_for_weak_single_token_overlap(workspace_tmp_path, monkeypatch):
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    server._chat_sessions.clear()
+
+    slug = _register_pack(
+        workspace_tmp_path,
+        pack_dir,
+        _chat_multi_rule_pack_payload(
+            standard_id="NASA-STD-5009C",
+            standard_title="NASA Fracture Control Standard",
+            rules=[
+                {
+                    "rule_id": "RULE-001",
+                    "section": "4.1.4.2.2",
+                    "page": 19,
+                    "obligation_type": "mandatory",
+                    "obligation_keyword": "shall",
+                    "statement_text": "The final penetrant inspection can be performed prior to metal finishing operations such as buffing or sanding.",
+                    "subject": "Final penetrant inspection timing",
+                    "requirement": "The final penetrant inspection may occur before certain metal finishing operations.",
+                    "keywords": ["penetrant inspection", "metal finishing operations"],
+                    "applies_to": ["nde_process"],
+                },
+                {
+                    "rule_id": "RULE-002",
+                    "section": "4.1.5.5",
+                    "page": 24,
+                    "obligation_type": "mandatory",
+                    "obligation_keyword": "shall",
+                    "statement_text": "The process shall be subject to review and approval of the RFCB.",
+                    "subject": "Standard NDE review",
+                    "requirement": "The process requires RFCB review and approval.",
+                    "keywords": ["review", "approval", "NDE"],
+                    "applies_to": ["nde_process"],
+                },
+            ],
+        ),
+        "5009c_nde.json",
+    )
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/oracle/chat",
+        json={
+            "message": "What does the selected standard say about pure tin finishes?",
+            "selected_packs": [slug],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "INSUFFICIENT_DATA"
+    assert "did not find a grounded requirement match" in body["response"]
+    assert body["citations"] == ["NASA-STD-5009C"]
+
+
+def test_chat_stream_insufficient_data_payload_is_json_serializable(workspace_tmp_path, monkeypatch):
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    server._chat_sessions.clear()
+
+    slug = _register_pack(
+        workspace_tmp_path,
+        pack_dir,
+        _chat_multi_rule_pack_payload(
+            standard_id="NASA-STD-5009C",
+            standard_title="NASA Fracture Control Standard",
+            rules=[
+                {
+                    "rule_id": "RULE-001",
+                    "section": "4.1.4.2.2",
+                    "page": 19,
+                    "obligation_type": "mandatory",
+                    "obligation_keyword": "shall",
+                    "statement_text": "The final penetrant inspection can be performed prior to metal finishing operations such as buffing or sanding.",
+                    "subject": "Final penetrant inspection timing",
+                    "requirement": "The final penetrant inspection may occur before certain metal finishing operations.",
+                    "keywords": ["penetrant inspection", "metal finishing operations"],
+                    "applies_to": ["nde_process"],
+                }
+            ],
+        ),
+        "5009c_stream.json",
+    )
+
+    client = TestClient(server.app)
+    with client.stream(
+        "POST",
+        "/oracle/chat/stream",
+        json={
+            "message": "What does the selected standard say about pure tin finishes?",
+            "selected_packs": [slug],
+        },
+    ) as response:
+        payload = b"".join(response.iter_bytes()).decode("utf-8")
+
+    assert response.status_code == 200
+    assert "event: error" not in payload
+    assert "event: done" in payload
+
+    done_payload = payload.split("event: done\ndata: ", 1)[1].split("\n\n", 1)[0]
+    body = json.loads(done_payload)
+    assert body["status"] == "INSUFFICIENT_DATA"
+    assert body["stage_artifacts"]["retrieval"]["pack"]["standard_id"] == "NASA-STD-5009C"
+    assert body["stage_artifacts"]["retrieval"]["pack"]["rule_count"] == 1
+
+
+def test_chat_falls_back_when_summary_validation_fails(workspace_tmp_path, monkeypatch):
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    server._chat_sessions.clear()
+
+    slug = _register_pack(
+        workspace_tmp_path,
+        pack_dir,
+        _chat_multi_rule_pack_payload(
+            standard_id="ESSCA-II-J-21",
+            standard_title="ESSCA II Attachment J-21",
+            rules=[
+                {
+                    "rule_id": "RULE-001",
+                    "section": "Fig J-21-1",
+                    "page": 10,
+                    "obligation_type": "mandatory",
+                    "obligation_keyword": "must",
+                    "statement_text": "Scope or POP change with cost impact triggers the standard TOCR flow.",
+                    "subject": "Scope change routing",
+                    "requirement": "Any change involving scope with cost impact must follow the TOCR flow, not an informal path.",
+                    "keywords": ["scope change", "cost impact", "TOCR flow"],
+                    "applies_to": ["scope_changes"],
+                },
+                {
+                    "rule_id": "RULE-002",
+                    "section": "1.1-SubTask(c)",
+                    "page": 5,
+                    "obligation_type": "mandatory",
+                    "obligation_keyword": "required",
+                    "statement_text": "CWBS, to include PSID, funding source, funding sub-source, and activity.",
+                    "subject": "Sub-task CWBS and funding",
+                    "requirement": "Each sub-task must have CWBS data with PSID and funding source information before the work can be authorized.",
+                    "keywords": ["CWBS", "PSID", "funding source", "charge code"],
+                    "applies_to": ["all_sub_tasks"],
+                },
+            ],
+        ),
+        "j21.json",
+    )
+
+    monkeypatch.setattr(
+        chat_engine,
+        "_maybe_run_llm_reasoning",
+        lambda **kwargs: {
+            "provider": "test",
+            "model": "reasoner",
+            "direct_answer": "Likely yes.",
+            "bottom_line": "The retrieved rules point the change into TOCR handling.",
+            "why": ["The retrieved clauses require TOCR routing and funding data."],
+            "gaps": [],
+            "governing_citations": [
+                "ESSCA-II-J-21 section Fig J-21-1 (p. 10)",
+                "ESSCA-II-J-21 section 1.1-SubTask(c) (p. 5)",
+            ],
+            "follow_ups": ["Show me the exact clause text."],
+            "per_pack_findings": [],
+        },
+    )
+    monkeypatch.setattr(
+        chat_engine,
+        "_maybe_run_llm_summary",
+        lambda **kwargs: {
+            "provider": "test",
+            "model": "summarizer",
+            "answer_text": "Approved. This change is fine.",
+            "citations": ["ESSCA-II-J-21 section Fig J-21-1 (p. 10)"],
+            "follow_ups": ["Close this item."],
+        },
+    )
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/oracle/chat",
+        json={
+            "message": "if you insert scope and do not fund it, is that against the j21 rules?",
+            "selected_packs": [slug],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "PASS"
+    assert body["response"].startswith("Likely yes.")
+    assert body["diagnostics"]["fallback_used"] is True
+    assert body["diagnostics"]["fallback_reason"] == "stage_4_validation_failure"
+    assert "stage_4_prohibited_decision_language" in body["diagnostics"]["validation_failures"]
+    assert body["stage_artifacts"]["reasoning"]["llm_model"] == "reasoner"
+    assert "summary" not in body["stage_artifacts"]
