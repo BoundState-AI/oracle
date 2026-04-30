@@ -6,7 +6,7 @@
 import Link from "next/link";
 import { SignIn } from "@clerk/nextjs";
 import { ArrowLeft, ShieldCheck, Workflow } from "lucide-react";
-import { BoundStateLogo } from "@/components/BoundStateLogo";
+// import { BoundStateLogo } from "@/components/BoundStateLogo";
 
 export default function SignInPage() {
   return (
@@ -20,7 +20,7 @@ export default function SignInPage() {
         <div className="space-y-8">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <BoundStateLogo variant="full" size="sm" />
+              {/* <BoundStateLogo variant="full" size="sm" /> */}
               <div className="h-5 w-px bg-border" />
               <span className="text-[10px] font-semibold uppercase tracking-[0.3em] text-muted-foreground">
                 Oracle

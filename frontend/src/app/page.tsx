@@ -11,7 +11,7 @@ import {
   Sparkles,
   Workflow,
 } from "lucide-react";
-import { BoundStateLogo } from "@/components/BoundStateLogo";
+// import { BoundStateLogo } from "@/components/BoundStateLogo";
 
 const capabilities = [
   {
@@ -52,7 +52,7 @@ export default function OracleLandingPage() {
       <header className="border-b border-border/80 bg-background/70 backdrop-blur-sm">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
           <div className="flex items-center gap-3">
-            <BoundStateLogo variant="full" size="sm" />
+            {/* <BoundStateLogo variant="full" size="sm" /> */}
             <div className="h-5 w-px bg-border" />
             <span className="text-[10px] font-semibold uppercase tracking-[0.3em] text-muted-foreground">
               Oracle

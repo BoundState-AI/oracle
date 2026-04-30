@@ -11,7 +11,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { BoundStateLogo } from "@/components/BoundStateLogo";
+// import { BoundStateLogo } from "@/components/BoundStateLogo";
 import { OracleChatPanel } from "@/components/OracleChatPanel";
 import { ReviewTab } from "@/components/ReviewTab";
 import { PackLibraryTab } from "@/components/PackLibraryTab";
@@ -271,7 +271,7 @@ export function OracleWorkspace() {
       <header className="sticky top-0 z-50 border-b border-border bg-card/80 backdrop-blur-sm">
         <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-4">
           <div className="flex items-center gap-3">
-            <BoundStateLogo variant="full" size="sm" />
+            {/* <BoundStateLogo variant="full" size="sm" /> */}
             <div className="h-5 w-px bg-border" />
             <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
               Oracle
