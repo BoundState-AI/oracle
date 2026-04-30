@@ -762,6 +762,59 @@ async def session_status(request: Request, session_id: str):
     return _build_session_payload(session)
 
 
+@oracle_router.get("/sessions")
+async def list_sessions(request: Request, limit: int = 50):
+    """List recent sessions on disk so a user can recover after frontend state loss.
+
+    Scans SESSIONS_DIR directly rather than _sessions in-memory, because the
+    common recovery case (dyno restart, frontend crash, lost session_id) is
+    precisely when the in-memory dict is empty but the disk artifacts survive.
+    """
+    # Cap the response so a buggy or hostile client can't enumerate the full
+    # directory in one shot. 200 sits well above realistic UI needs.
+    limit = max(1, min(limit, 200))
+
+    if not SESSIONS_DIR.exists():
+        return {"sessions": [], "sessions_dir": str(SESSIONS_DIR), "total": 0}
+
+    entries: list[tuple[float, dict[str, Any]]] = []
+    for child in SESSIONS_DIR.iterdir():
+        if not child.is_dir():
+            continue
+        state_path = child / SESSION_STATE_FILE
+        if not state_path.exists():
+            continue
+        try:
+            data = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            LOGGER.warning("Skipping unreadable session state at %s", state_path)
+            continue
+
+        try:
+            updated_at = state_path.stat().st_mtime
+        except OSError:
+            updated_at = 0.0
+
+        summary = {
+            "session_id": child.name,
+            "status": data.get("status"),
+            "mode": data.get("mode"),
+            "job_type": data.get("job_type", "review"),
+            "original_name": data.get("original_name"),
+            "pack_names": data.get("pack_names", []),
+            "error": data.get("error"),
+            "updated_at": updated_at,
+        }
+        entries.append((updated_at, summary))
+
+    entries.sort(key=lambda item: item[0], reverse=True)
+    return {
+        "sessions": [summary for _, summary in entries[:limit]],
+        "sessions_dir": str(SESSIONS_DIR),
+        "total": len(entries),
+    }
+
+
 def _build_session_payload(session: dict[str, Any]) -> dict[str, Any]:
     """Build the JSON payload returned by done events and polling status."""
     session_id = session["session_id"]
