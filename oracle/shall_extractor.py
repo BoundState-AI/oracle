@@ -119,17 +119,22 @@ SECTION_PATTERN = re.compile(
 )
 
 # Tagged requirement extraction
-MPR_TAG_PATTERN = re.compile(r"\[(MPR|FCR|NER)\s*(\d+[a-z]?)\]", re.IGNORECASE)
+TAG_PREFIX_PATTERN = r"MPR|FCR|NER|AMR"
+TAG_BODY_PATTERN = rf"(?:{TAG_PREFIX_PATTERN})\s*[-\s]?\s*\d+[a-z]?"
+MPR_TAG_PATTERN = re.compile(
+    rf"\[\s*({TAG_PREFIX_PATTERN})\s*[-\s]?\s*(\d+[a-z]?)\s*\]",
+    re.IGNORECASE,
+)
 TAGGED_SECTION_PATTERN = re.compile(
     r"(?:^|\n)\s*"
     r"(\d+(?:\.\d+)*[a-z]?(?:\(\d+\))*)"
-    r"\s+\[(?:MPR|FCR|NER)\s*\d+[a-z]?\]",
+    rf"\s+\[\s*{TAG_BODY_PATTERN}\s*\]",
     re.IGNORECASE | re.MULTILINE,
 )
 
 # Justification/rationale markers
 RATIONALE_PATTERN = re.compile(
-    r"(?:Rationale|Note|Justification|Basis)\s*[:\-]\s*(.+?)(?=\n\s*\n|\n\s*\[(?:MPR|FCR|NER)|\n\s*\d+(?:\.\d+)+\s+[A-Z]|\Z)",
+    rf"(?:Rationale|Note|Justification|Basis)\s*[:\-]\s*(.+?)(?=\n\s*\n|\n\s*\[\s*{TAG_BODY_PATTERN}|\n\s*\d+(?:\.\d+)+\s+[A-Z]|\Z)",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -363,7 +368,7 @@ def _preprocess_page_text(raw_text: str) -> str:
         starts_new = bool(
             re.match(r"\s*\d+(?:\.\d+)+[a-z]?\s+[A-Z]", line)
             or re.match(r"\s*\d+(?:\.\d+)+[a-z]?(?:\(\d+\))?\s*$", line)
-            or re.match(r"\s*\[(?:MPR|FCR|NER)\s*\d+", line, re.IGNORECASE)
+            or re.match(rf"\s*\[\s*{TAG_BODY_PATTERN}", line, re.IGNORECASE)
         )
 
         if starts_new:

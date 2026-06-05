@@ -58,6 +58,21 @@ def test_extract_mpr_blocks_supports_ner_tags():
     assert blocks[0]["text"] == "Fracture-critical hardware shall be inspected before flight"
 
 
+def test_extract_mpr_blocks_supports_hyphenated_amr_tags():
+    text = """
+4.2 Additive Manufacturing
+[AMR-22] Engineering drawings shall specify additive manufacturing build orientation.
+
+[AMR-23] Process control records shall be retained for flight hardware.
+""".strip()
+
+    blocks = _extract_mpr_blocks(text, page=9)
+
+    assert len(blocks) == 2
+    assert blocks[0]["mpr_id"] == "AMR 22"
+    assert blocks[0]["text"] == "Engineering drawings shall specify additive manufacturing build orientation"
+
+
 def test_extract_mpr_block_drops_next_subitem_marker():
     text = """
 4.1.4.1.1 Eddy Current

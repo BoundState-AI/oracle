@@ -87,6 +87,11 @@ BUILTIN_PACK_SPECS: tuple[dict[str, str], ...] = (
         "name": "ESSCA J-21",
         "description": "Bundled ESSCA task order content requirements pack",
     },
+    {
+        "filename": "nasa_std_6030_rulepack.json",
+        "name": "NASA-STD-6030",
+        "description": "Bundled NASA additive manufacturing requirements pack",
+    },
 )
 
 # ---------------------------------------------------------------------------
@@ -122,7 +127,7 @@ def _builtin_pack_dir() -> Path:
 
 
 def _bootstrap_builtin_packs(pack_dir: Path) -> None:
-    """Seed an empty pack library with bundled starter packs."""
+    """Seed bundled starter packs into a new library and add missing builtins."""
     if os.environ.get("ORACLE_DISABLE_BOOTSTRAP_PACKS", "").lower() in {"1", "true", "yes"}:
         return
 
@@ -130,13 +135,19 @@ def _bootstrap_builtin_packs(pack_dir: Path) -> None:
     if not builtin_dir.exists():
         return
 
+    manifest_exists = _manifest_path(pack_dir).exists()
     existing_pack_files = [
         p for p in pack_dir.glob("*.json") if p.name != "manifest.json"
     ]
-    if _manifest_path(pack_dir).exists() or existing_pack_files:
+    if not manifest_exists and existing_pack_files:
         return
 
+    manifest = _load_manifest(pack_dir) if manifest_exists else {"packs": {}}
+
     for spec in BUILTIN_PACK_SPECS:
+        slug = _slugify(spec["name"])
+        if slug in manifest.get("packs", {}):
+            continue
         src = builtin_dir / spec["filename"]
         if not src.exists():
             LOGGER.warning("Builtin pack missing: %s", src)
@@ -714,11 +725,15 @@ def _detect_document_type(
     # WHY 3 separate patterns: each identifies a different regulatory document
     # family.  The detection heuristic counts matches per page — whichever
     # pattern dominates determines the extraction route:
-    #   tag_pattern → GPCM route (NASA tagged standards with [MPR N]/[FCR N])
+    #   tag_pattern → GPCM route (NASA tagged standards with tags like
+    #   [MPR N], [FCR N], [NER N], or NASA-STD-6030's [AMR-N])
     #   far_pattern → FAR route (federal acquisition regulations with Part.Section)
     #   cfr_pattern → Generic route (Code of Federal Regulations references)
     # If no pattern dominates, the generic Claude extraction route is used.
-    tag_pattern = re.compile(r"\[(MPR|FCR)\s+\d+\]", re.IGNORECASE)
+    tag_pattern = re.compile(
+        r"\[\s*(MPR|FCR|NER|AMR)\s*[-\s]?\s*\d+[a-z]?\s*\]",
+        re.IGNORECASE,
+    )
     far_pattern = re.compile(r"(?:FAR|DFARS|NFS|GSAM)\s+(?:Part\s+)?\d+\.\d+", re.IGNORECASE)
     cfr_pattern = re.compile(r"(?:\d+\s+CFR|Code of Federal Regulations)", re.IGNORECASE)
 
@@ -774,8 +789,21 @@ def _detect_document_type(
     doc.close()
 
     # --- Compute final scores ---
+    tagged_confidence = _confidence(tag_count, tag_pages, sampled_pages)
+    sampled_text = "\n".join(page_texts.values())
+    if (
+        tagged_confidence < 0.7
+        and tag_count >= 2
+        and tag_pages >= 2
+        and re.search(r"NASA[-_ ]STD[-_ ]\d{4}", sampled_text, re.IGNORECASE)
+    ):
+        # NASA tagged standards can have long front matter and sparse sampled
+        # body pages. Multiple pages with bracketed requirement tags are enough
+        # to choose the GPCM tagged-standard route over generic extraction.
+        tagged_confidence = 0.75
+
     scores: list[tuple[str, float]] = [
-        ("tagged_standard", _confidence(tag_count, tag_pages, sampled_pages)),
+        ("tagged_standard", tagged_confidence),
         ("far_style", _confidence(far_count, far_pages, sampled_pages)),
         ("cfr_style", _confidence(cfr_count, cfr_pages, sampled_pages)),
     ]
@@ -826,7 +854,7 @@ def _generate_pack_tagged_standard(
     use_vision: bool,
     detect_implicit: bool = False,
 ) -> Path:
-    """Route A: Generate pack from a tagged standard (MPR/FCR) via GPCM pipeline.
+    """Route A: Generate pack from a tagged standard via GPCM pipeline.
 
     Delegates to build_gpcm_rulepack.run_pipeline() which calls
     shall_extractor.extract_pass1() and gpcm_rulepack_adapter.run_adapter().

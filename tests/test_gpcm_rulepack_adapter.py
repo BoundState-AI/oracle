@@ -4,6 +4,11 @@ from oracle.gpcm_rulepack_adapter import (
     clean_justification,
     dedupe_requirements,
     derive_shall_text,
+    extract_tag,
+    infer_standard_id,
+    normalize_source_tag,
+    page_window_for_tag,
+    strip_leading_tag,
     vision_repair_reasons,
 )
 from oracle.shall_extractor import SECTION_PATTERN
@@ -24,6 +29,39 @@ def test_canonical_requirement_id_uses_tag_identity():
     assert canonical_requirement_id(statement, "MPR 3") == "3"
     assert canonical_requirement_id(statement, "NER 12") == "12"
     assert canonical_requirement_id(statement, "FCR 7") == "fcr-7"
+    assert canonical_requirement_id(statement, "AMR-22") == "amr-22"
+
+
+def test_amr_tag_normalization_accepts_hyphenated_source_tags():
+    text = "[AMR-22] Engineering drawings shall specify additive manufacturing build orientation."
+
+    assert extract_tag(text) == "AMR 22"
+    assert normalize_source_tag("AMR-22") == "AMR 22"
+    assert strip_leading_tag(text) == (
+        "Engineering drawings shall specify additive manufacturing build orientation."
+    )
+
+
+def test_page_window_for_tag_finds_hyphenated_amr_tag():
+    page_text = "\n".join(
+        [
+            "4.2 Additive Manufacturing",
+            "[AMR-22] Engineering drawings shall specify build orientation.",
+            "Records shall identify the machine serial number.",
+        ]
+    )
+
+    window = page_window_for_tag(page_text, "AMR 22", before=1, after=3)
+
+    assert "4.2 Additive Manufacturing" in window
+    assert "[AMR-22]" in window
+
+
+def test_infer_standard_id_accepts_unrevised_nasa_standard_names(tmp_path):
+    pdf = tmp_path / "2021-04-21_nasa-std-6030-approveddocx.pdf"
+    extractor_json = tmp_path / "2021-04-21_nasa-std-6030-approveddocx_shall_statements.json"
+
+    assert infer_standard_id(pdf, extractor_json) == "NASA-STD-6030"
 
 
 def test_dedupe_requirements_strips_tag_prefix_from_key():

@@ -33,25 +33,34 @@ from typing import Any
 
 import fitz  # PyMuPDF
 
-LOGGER = logging.getLogger(“oracle.gpcm_adapter”)
+LOGGER = logging.getLogger("oracle.gpcm_adapter")
 
-# WHY: Matches bracketed requirement tags like [MPR 12], [FCR 3a], [NER 7].
+# WHY: Matches bracketed requirement tags like [MPR 12], [FCR 3a],
+# [NER 7], and NASA-STD-6030's hyphenated [AMR-22] form.
 # These tags are the primary identifiers linking PDF text to specific compliance
 # requirements. Removing this breaks all tag-based requirement extraction and
 # cross-referencing between extractor output and source PDF blocks.
-TAG_RE = re.compile(r”\[(MPR|FCR|NER)\s+(\d+[a-z]?)\]”, re.IGNORECASE)
+TAG_PREFIX_PATTERN = r"MPR|FCR|NER|AMR"
+TAG_RE = re.compile(
+    rf"\[\s*({TAG_PREFIX_PATTERN})\s*[-\s]?\s*(\d+[a-z]?)\s*\]",
+    re.IGNORECASE,
+)
 
-# WHY: Matches unbracketed requirement tags like “MPR 12” or “FCR 3a” in
+# WHY: Matches unbracketed requirement tags like "MPR 12", "FCR 3a",
+# or "AMR-22" in
 # free-flowing text. Used as a fallback when tags appear without brackets
 # (e.g. in table cells or inline references). Removing this causes missed
 # tag normalization for requirements that lack bracket formatting.
-TAG_VALUE_RE = re.compile(r”\b(MPR|FCR|NER)\s+(\d+[a-z]?)\b”, re.IGNORECASE)
+TAG_VALUE_RE = re.compile(
+    rf"\b({TAG_PREFIX_PATTERN})[-\s]+(\d+[a-z]?)\b",
+    re.IGNORECASE,
+)
 
-# WHY: Matches hierarchical section numbers like “3.2.4” or “4.1.1a(2)”.
+# WHY: Matches hierarchical section numbers like "3.2.4" or "4.1.1a(2)".
 # Used to detect section headers in PDF text and associate requirements with
 # their containing section. Removing this breaks section assignment and causes
 # requirements to lose their structural location in the standard.
-SECTION_RE = re.compile(r”^\d+(?:\.\d+)*(?:[a-z](?:\(\d+\))?)?$”, re.IGNORECASE)
+SECTION_RE = re.compile(r"^\d+(?:\.\d+)*(?:[a-z](?:\(\d+\))?)?$", re.IGNORECASE)
 
 # WHY: Matches obligation keywords (shall, shall not, must, must not, required,
 # may not) that mark a line as an actual compliance requirement rather than
@@ -59,46 +68,46 @@ SECTION_RE = re.compile(r”^\d+(?:\.\d+)*(?:[a-z](?:\(\d+\))?)?$”, re.IGNOREC
 # non-requirement prose. Removing this causes the adapter to emit informational
 # text as requirements, polluting the rule pack with non-actionable entries.
 OBLIGATION_RE = re.compile(
-    r”\b(shall not|shall|must not|must|required|may not)\b”, re.IGNORECASE
+    r"\b(shall not|shall|must not|must|required|may not)\b", re.IGNORECASE
 )
 
 # WHY: Matches inline rationale annotations formatted as [Rationale: ...] in
 # NASA standard PDFs. These provide justification text co-located with the
 # requirement. Removing this loses inline rationale extraction, leaving many
 # requirements without justification even when the PDF contains one.
-RATIONALE_RE = re.compile(r”\[Rationale:\s*(.*?)\]”, re.IGNORECASE | re.DOTALL)
+RATIONALE_RE = re.compile(r"\[Rationale:\s*(.*?)\]", re.IGNORECASE | re.DOTALL)
 
 # WHY: Tuple of patterns matching recurring page headers, footers, and table
-# column headings from NASA standard PDFs (e.g. “NASA-STD-”, page numbers,
-# “Section Title”, “Requirement Statement”). These lines are noise that
+# column headings from NASA standard PDFs (e.g. "NASA-STD-", page numbers,
+# "Section Title", "Requirement Statement"). These lines are noise that
 # appears on every page. Removing this causes boilerplate header/footer text
 # to contaminate requirement extraction and inflate line counts.
 HEADER_PATTERNS = (
-    re.compile(r”^NASA-STD-”, re.IGNORECASE),
-    re.compile(r”^APPROVED FOR PUBLIC RELEASE”, re.IGNORECASE),
-    re.compile(r”^Controlled by:”, re.IGNORECASE),
-    re.compile(r”^\d+\s+of\s+\d+$”),
-    re.compile(r”^Section$”, re.IGNORECASE),
-    re.compile(r”^Section Title$”, re.IGNORECASE),
-    re.compile(r”^Requirement Statement$”, re.IGNORECASE),
-    re.compile(r”^Requirement in this Standard$”, re.IGNORECASE),
-    re.compile(r”^Justification$”, re.IGNORECASE),
-    re.compile(r”^Applicable\s+\(Yes or No\)$”, re.IGNORECASE),
-    re.compile(r”^If No, Enter Rationale$”, re.IGNORECASE),
-    re.compile(r”^Description$”, re.IGNORECASE),
+    re.compile(r"^NASA-STD-", re.IGNORECASE),
+    re.compile(r"^APPROVED FOR PUBLIC RELEASE", re.IGNORECASE),
+    re.compile(r"^Controlled by:", re.IGNORECASE),
+    re.compile(r"^\d+\s+of\s+\d+$"),
+    re.compile(r"^Section$", re.IGNORECASE),
+    re.compile(r"^Section Title$", re.IGNORECASE),
+    re.compile(r"^Requirement Statement$", re.IGNORECASE),
+    re.compile(r"^Requirement in this Standard$", re.IGNORECASE),
+    re.compile(r"^Justification$", re.IGNORECASE),
+    re.compile(r"^Applicable\s+\(Yes or No\)$", re.IGNORECASE),
+    re.compile(r"^If No, Enter Rationale$", re.IGNORECASE),
+    re.compile(r"^Description$", re.IGNORECASE),
 )
 
 # WHY: Patterns that identify meta-requirements -- sentences that describe HOW
-# requirements are written (e.g. “the word shall denotes...”) rather than actual
+# requirements are written (e.g. "the word shall denotes...") rather than actual
 # compliance obligations. These appear in introductory sections of NASA standards.
 # Removing this causes definitional boilerplate to be emitted as requirements,
 # producing false positives in compliance reviews.
 META_REQUIREMENT_PATTERNS = (
-    re.compile(r”\bword\s+[\””]?shall”, re.IGNORECASE),
-    re.compile(r”\bdenotes expected outcome\b”, re.IGNORECASE),
-    re.compile(r”\bthese requirements use the word\b”, re.IGNORECASE),
-    re.compile(r”\brecommended but not required\b”, re.IGNORECASE),
-    re.compile(r”\bat the time of publication\b”, re.IGNORECASE),
+    re.compile(r'\bword\s+["]?shall', re.IGNORECASE),
+    re.compile(r"\bdenotes expected outcome\b", re.IGNORECASE),
+    re.compile(r"\bthese requirements use the word\b", re.IGNORECASE),
+    re.compile(r"\brecommended but not required\b", re.IGNORECASE),
+    re.compile(r"\bat the time of publication\b", re.IGNORECASE),
 )
 
 # WHY: Domain-specific keyword patterns for aerospace M&P compliance topics.
@@ -107,48 +116,48 @@ META_REQUIREMENT_PATTERNS = (
 # Removing this eliminates keyword tagging, breaking topic-based requirement
 # filtering in the GPCM compliance review engine.
 KEYWORD_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    (“materials”, re.compile(r”\bmaterials?\b”, re.IGNORECASE)),
-    (“processes”, re.compile(r”\bprocess(?:es)?\b”, re.IGNORECASE)),
-    (“hardware”, re.compile(r”\bhardware\b”, re.IGNORECASE)),
-    (“spaceflight”, re.compile(r”\bspaceflight\b”, re.IGNORECASE)),
-    (“testing”, re.compile(r”\btest(?:ing|ed|s)?\b”, re.IGNORECASE)),
-    (“inspection”, re.compile(r”\binspect(?:ion|ed|ions)?\b”, re.IGNORECASE)),
-    (“verification”, re.compile(r”\bverif(?:y|ies|ication)\b”, re.IGNORECASE)),
-    (“compliance”, re.compile(r”\bcompli(?:ance|es|ed|y)\b”, re.IGNORECASE)),
-    (“corrosion”, re.compile(r”\bcorrosi(?:on|ve)\b”, re.IGNORECASE)),
-    (“hydrogen”, re.compile(r”\bhydrogen\b”, re.IGNORECASE)),
-    (“oxygen”, re.compile(r”\boxygen\b”, re.IGNORECASE)),
-    (“fracture”, re.compile(r”\bfracture\b”, re.IGNORECASE)),
-    (“welding”, re.compile(r”\bweld(?:ing|ed|s)?\b”, re.IGNORECASE)),
-    (“bonding”, re.compile(r”\bbond(?:ed|ing|s)?\b”, re.IGNORECASE)),
-    (“coating”, re.compile(r”\bcoatings?\b”, re.IGNORECASE)),
-    (“contamination”, re.compile(r”\bcontamin(?:ation|ants?)\b”, re.IGNORECASE)),
-    (“flammability”, re.compile(r”\bflammab(?:ility|le)\b”, re.IGNORECASE)),
-    (“embrittlement”, re.compile(r”\bembrittlement\b”, re.IGNORECASE)),
-    (“MUA”, re.compile(r”\bMUAs?\b”, re.IGNORECASE)),
-    (“MIUL”, re.compile(r”\bMIUL\b”, re.IGNORECASE)),
-    (“NDE”, re.compile(r”\bNDE\b”, re.IGNORECASE)),
-    (“COTS”, re.compile(r”\bCOTS\b”, re.IGNORECASE)),
-    (“drawing”, re.compile(r”\bdrawings?\b”, re.IGNORECASE)),
-    (“specification”, re.compile(r”\bspecifications?\b”, re.IGNORECASE)),
-    (“manufacturing”, re.compile(r”\bmanufactur(?:e|ing|ed)\b”, re.IGNORECASE)),
-    (“qualification”, re.compile(r”\bqualif(?:ication|y|ied)\b”, re.IGNORECASE)),
-    (“traceability”, re.compile(r”\btraceability\b”, re.IGNORECASE)),
+    ("materials", re.compile(r"\bmaterials?\b", re.IGNORECASE)),
+    ("processes", re.compile(r"\bprocess(?:es)?\b", re.IGNORECASE)),
+    ("hardware", re.compile(r"\bhardware\b", re.IGNORECASE)),
+    ("spaceflight", re.compile(r"\bspaceflight\b", re.IGNORECASE)),
+    ("testing", re.compile(r"\btest(?:ing|ed|s)?\b", re.IGNORECASE)),
+    ("inspection", re.compile(r"\binspect(?:ion|ed|ions)?\b", re.IGNORECASE)),
+    ("verification", re.compile(r"\bverif(?:y|ies|ication)\b", re.IGNORECASE)),
+    ("compliance", re.compile(r"\bcompli(?:ance|es|ed|y)\b", re.IGNORECASE)),
+    ("corrosion", re.compile(r"\bcorrosi(?:on|ve)\b", re.IGNORECASE)),
+    ("hydrogen", re.compile(r"\bhydrogen\b", re.IGNORECASE)),
+    ("oxygen", re.compile(r"\boxygen\b", re.IGNORECASE)),
+    ("fracture", re.compile(r"\bfracture\b", re.IGNORECASE)),
+    ("welding", re.compile(r"\bweld(?:ing|ed|s)?\b", re.IGNORECASE)),
+    ("bonding", re.compile(r"\bbond(?:ed|ing|s)?\b", re.IGNORECASE)),
+    ("coating", re.compile(r"\bcoatings?\b", re.IGNORECASE)),
+    ("contamination", re.compile(r"\bcontamin(?:ation|ants?)\b", re.IGNORECASE)),
+    ("flammability", re.compile(r"\bflammab(?:ility|le)\b", re.IGNORECASE)),
+    ("embrittlement", re.compile(r"\bembrittlement\b", re.IGNORECASE)),
+    ("MUA", re.compile(r"\bMUAs?\b", re.IGNORECASE)),
+    ("MIUL", re.compile(r"\bMIUL\b", re.IGNORECASE)),
+    ("NDE", re.compile(r"\bNDE\b", re.IGNORECASE)),
+    ("COTS", re.compile(r"\bCOTS\b", re.IGNORECASE)),
+    ("drawing", re.compile(r"\bdrawings?\b", re.IGNORECASE)),
+    ("specification", re.compile(r"\bspecifications?\b", re.IGNORECASE)),
+    ("manufacturing", re.compile(r"\bmanufactur(?:e|ing|ed)\b", re.IGNORECASE)),
+    ("qualification", re.compile(r"\bqualif(?:ication|y|ied)\b", re.IGNORECASE)),
+    ("traceability", re.compile(r"\btraceability\b", re.IGNORECASE)),
 ]
 
 # WHY: Program applicability classifiers that tag requirements by domain scope
 # (human-rated, mission-critical, oxygen/hydrogen systems, fracture-critical,
 # composite/bonded, metallic). Used to route requirements to the correct
 # compliance review context. Removing this causes all requirements to fall back
-# to “all_programs”, losing program-specific filtering in downstream reviews.
+# to "all_programs", losing program-specific filtering in downstream reviews.
 APPLIES_RULES: list[tuple[str, re.Pattern[str]]] = [
-    (“human_rated”, re.compile(r”\bhuman[- ]rated\b”, re.IGNORECASE)),
-    (“mission_critical”, re.compile(r”\bmission[- ]critical\b”, re.IGNORECASE)),
-    (“oxygen_systems”, re.compile(r”\boxygen\b”, re.IGNORECASE)),
-    (“hydrogen_systems”, re.compile(r”\bhydrogen\b”, re.IGNORECASE)),
-    (“fracture_critical”, re.compile(r”\bfracture\b”, re.IGNORECASE)),
-    (“composite_bonded”, re.compile(r”\b(composite|bonded)\b”, re.IGNORECASE)),
-    (“metallic”, re.compile(r”\bmetallic\b”, re.IGNORECASE)),
+    ("human_rated", re.compile(r"\bhuman[- ]rated\b", re.IGNORECASE)),
+    ("mission_critical", re.compile(r"\bmission[- ]critical\b", re.IGNORECASE)),
+    ("oxygen_systems", re.compile(r"\boxygen\b", re.IGNORECASE)),
+    ("hydrogen_systems", re.compile(r"\bhydrogen\b", re.IGNORECASE)),
+    ("fracture_critical", re.compile(r"\bfracture\b", re.IGNORECASE)),
+    ("composite_bonded", re.compile(r"\b(composite|bonded)\b", re.IGNORECASE)),
+    ("metallic", re.compile(r"\bmetallic\b", re.IGNORECASE)),
 ]
 
 VISION_MODEL = "claude-sonnet-4-5-20250929"
@@ -253,7 +262,7 @@ def strip_leading_tag(text: str) -> str:
 def extract_tag_number(tag: str | None) -> int:
     if not tag:
         return 0
-    match = re.search(r"(\d+)$", tag)
+    match = re.search(r"(\d+)(?:[a-z])?$", tag, re.IGNORECASE)
     return int(match.group(1)) if match else 0
 
 
@@ -939,8 +948,9 @@ def build_vision_prompt(
 
 def page_window_for_tag(page_text: str, tag: str, before: int = 4, after: int = 14) -> str:
     lines = [normalize_space(line) for line in page_text.splitlines()]
+    tag_type, tag_num = tag.split()
     tag_re = re.compile(
-        rf"\[{re.escape(tag.split()[0])}\s+{re.escape(tag.split()[1])}\]",
+        rf"\[\s*{re.escape(tag_type)}\s*[-\s]?\s*{re.escape(tag_num)}\s*\]",
         re.IGNORECASE,
     )
     windows: list[str] = []
@@ -957,8 +967,9 @@ def local_tag_window(page_text: str, tag: str, after: int = 8) -> str:
 
 
 def select_tag_pages_for_vision(doc: fitz.Document, tag: str, max_pages: int = 3) -> tuple[list[int], int | None]:
+    tag_type, tag_num = tag.split()
     tag_re = re.compile(
-        rf"\[{re.escape(tag.split()[0])}\s+{re.escape(tag.split()[1])}\]",
+        rf"\[\s*{re.escape(tag_type)}\s*[-\s]?\s*{re.escape(tag_num)}\s*\]",
         re.IGNORECASE,
     )
     candidates: list[tuple[int, int]] = []
@@ -1383,9 +1394,10 @@ def infer_standard_id(source_pdf: Path | None, input_json: Path) -> str | None:
     candidates.append(input_json.name)
 
     for text in candidates:
-        match = re.search(r"NASA[-_ ]STD[-_ ](\d{4})([A-Z])", text, re.IGNORECASE)
+        match = re.search(r"NASA[-_ ]STD[-_ ](\d{4})([A-Z])?\b", text, re.IGNORECASE)
         if match:
-            return f"NASA-STD-{match.group(1)}{match.group(2).upper()}"
+            suffix = match.group(2).upper() if match.group(2) else ""
+            return f"NASA-STD-{match.group(1)}{suffix}"
 
         match = re.search(r"\b(\d{4})\s*rev\s*([A-Z])\b", text, re.IGNORECASE)
         if match:
