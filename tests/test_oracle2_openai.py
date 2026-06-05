@@ -1,11 +1,12 @@
-"""Tests for OpenAI provider integration — strict schema enforcement, refusal handling, and empty response errors."""
+"""Tests for provider integrations — strict schema enforcement and API error handling."""
 from __future__ import annotations
 
 from types import SimpleNamespace
 
+import httpx
 import openai
 
-from oracle.oracle2 import _call_openai, OracleConfig
+from oracle.oracle2 import _call_gemini, _call_openai, OracleConfig
 
 
 def _make_response(
@@ -117,3 +118,83 @@ def test_call_openai_returns_empty_response_error(monkeypatch):
     assert result["oracle_name"] == "Fran"
     assert result["error"] == "Empty response (finish_reason=length)"
 
+
+def test_call_gemini_uses_generate_content_json_mode(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class DummyResponse:
+        status_code = 200
+
+        def json(self):
+            return {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "text": (
+                                        '{"oracle_name":"Gemini","role":"domain_context",'
+                                        '"document_type":"spec","overall_verdict":"revise",'
+                                        '"findings":[],"top_3_must_fix":[]}'
+                                    )
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+
+    class DummyClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def post(self, url, *, headers, json):
+            captured["url"] = url
+            captured["headers"] = headers
+            captured["json"] = json
+            return DummyResponse()
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(httpx, "Client", DummyClient)
+
+    config = OracleConfig(
+        name="Gemini",
+        role="domain_context",
+        provider="gemini",
+        model="gemini-2.5-pro",
+        system_prompt="Return JSON only.",
+        max_tokens=8192,
+    )
+
+    result = _call_gemini(config, "review this")
+
+    assert result["oracle_name"] == "Gemini"
+    assert result["findings"] == []
+    assert "gemini-2.5-pro:generateContent" in captured["url"]
+    assert captured["headers"]["x-goog-api-key"] == "test-key"
+    assert captured["json"]["generationConfig"]["responseMimeType"] == "application/json"
+
+
+def test_call_gemini_returns_missing_key_error(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+
+    config = OracleConfig(
+        name="Gemini",
+        role="domain_context",
+        provider="gemini",
+        model="gemini-2.5-pro",
+        system_prompt="Return JSON only.",
+    )
+
+    result = _call_gemini(config, "review this")
+
+    assert result["oracle_name"] == "Gemini"
+    assert result["error"] == "GEMINI_API_KEY or GOOGLE_API_KEY not set"
+    assert result["findings"] == []

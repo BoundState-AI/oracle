@@ -166,6 +166,8 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "gpt-5.4-mini": 128_000,
     "grok-4.20": 131_072,
     "grok-4": 131_072,
+    "gemini-2.5-pro": 1_048_576,
+    "gemini-2.5-flash": 1_048_576,
 }
 
 
@@ -1653,6 +1655,7 @@ def _compute_token_budget(
         ("ORACLE_FRAN_MODEL", "gpt-5.4"),
         ("ORACLE_CODEX_MODEL", "gpt-5.4"),
         ("ORACLE_GROK_MODEL", "grok-4.20"),
+        ("ORACLE_GEMINI_MODEL", "gemini-2.5-pro"),
     ]
 
     max_context_env = os.environ.get("ORACLE_MAX_CONTEXT_TOKENS")
@@ -2518,6 +2521,8 @@ Examples:
                 missing.append("OPENAI_API_KEY")
             if not os.environ.get("XAI_API_KEY"):
                 missing.append("XAI_API_KEY")
+            if not (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")):
+                missing.append("GEMINI_API_KEY or GOOGLE_API_KEY")
             if missing:
                 LOGGER.error(f"Missing API keys for review: {', '.join(missing)}")
                 sys.exit(1)

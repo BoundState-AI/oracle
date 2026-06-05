@@ -5,7 +5,7 @@ Purpose: Multi-oracle review system for specs, plans, and architecture docs.
 
 Flow:
   Round 0: Beth (Opus 4.6) writes or accepts the canonical draft
-  Round 1: Fran (GPT-5.4), Codex (GPT-5.4), Grok (xAI) review independently (blind)
+  Round 1: Fran (GPT-5.4), Codex (GPT-5.4), Grok (xAI), Gemini review independently (blind)
   Round 1.5: Sonnet (Claude Sonnet 4.6) normalizes/deduplicates findings
   Round 2: Beth classifies findings, revises draft
   Round 3+: Re-review changed sections until convergence
@@ -237,6 +237,27 @@ Find what the others may miss because they accepted the frame too early.
 Return JSON only.\
 """
 
+GEMINI_REVIEWER_PROMPT = """\
+You are Gemini, the broad-context review oracle.
+
+Primary job:
+Review the document from the perspective of cross-domain fit, workflow realism,
+scientific/technical assumptions, operational edge cases, and places where the
+spec may be locally coherent but globally wrong.
+
+Focus:
+- domain fit and missing real-world constraints
+- overlooked stakeholder workflows
+- scale and integration assumptions
+- places where the plan relies on ideal data, ideal users, or ideal model behavior
+- ambiguity that would cause different implementers to build different systems
+- major omissions that other reviewers may miss because they accepted the frame
+
+Do not behave like an editor.
+Do not duplicate obvious concerns unless the draft still materially fails.
+Return JSON only.\
+"""
+
 SONNET_REFEREE_PROMPT = """\
 You are Sonnet, the referee oracle.
 
@@ -346,6 +367,7 @@ REQUIRED_SCHEMA: dict[str, dict[str, type]] = {
     "adversarial_logic": {"findings": list},
     "implementation_feasibility": {"findings": list},
     "contrarian": {"findings": list},
+    "domain_context": {"findings": list},
     "referee": {"normalized_issues": list},
 }
 
@@ -355,7 +377,7 @@ class OracleConfig:
     """Configuration for one oracle."""
     name: str
     role: str
-    provider: str       # "anthropic" | "openai" | "xai"
+    provider: str       # "anthropic" | "openai" | "xai" | "gemini"
     model: str
     system_prompt: str
     temperature: float = 0.0
@@ -400,6 +422,14 @@ ORACLE_ROSTER: dict[str, OracleConfig] = {
         provider="xai",
         model=os.environ.get("ORACLE_GROK_MODEL", "grok-4.20"),
         system_prompt=GROK_CONTRARIAN_PROMPT,
+    ),
+    "gemini": OracleConfig(
+        name="Gemini",
+        role="domain_context",
+        provider="gemini",
+        model=os.environ.get("ORACLE_GEMINI_MODEL", "gemini-2.5-pro"),
+        system_prompt=GEMINI_REVIEWER_PROMPT,
+        max_tokens=int(os.environ.get("ORACLE_GEMINI_MAX_TOKENS", "8192")),
     ),
     "sonnet": OracleConfig(
         name="Sonnet",
@@ -612,10 +642,90 @@ def _call_xai(config: OracleConfig, user_message: str) -> dict:
     return _parse_json(text, config.name)
 
 
+def _call_gemini(config: OracleConfig, user_message: str) -> dict:
+    """Call Google Gemini generateContent REST API."""
+    import httpx
+
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        return {
+            "oracle_name": config.name,
+            "error": "GEMINI_API_KEY or GOOGLE_API_KEY not set",
+            "findings": [],
+        }
+
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{config.model}:generateContent"
+    )
+    payload = {
+        "systemInstruction": {
+            "parts": [{"text": config.system_prompt}],
+        },
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": user_message}],
+            }
+        ],
+        "generationConfig": {
+            "temperature": config.temperature,
+            "maxOutputTokens": config.max_tokens,
+            "responseMimeType": "application/json",
+        },
+    }
+
+    with httpx.Client(timeout=httpx.Timeout(config.timeout, connect=10.0)) as client:
+        response = client.post(
+            url,
+            headers={
+                "x-goog-api-key": api_key,
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+
+    if response.status_code >= 400:
+        return {
+            "oracle_name": config.name,
+            "error": f"Gemini API error {response.status_code}",
+            "raw": response.text[:2000],
+            "findings": [],
+        }
+
+    data = response.json()
+    candidates = data.get("candidates") or []
+    if not candidates:
+        return {
+            "oracle_name": config.name,
+            "error": "Gemini returned no candidates",
+            "raw": json.dumps(data)[:2000],
+            "findings": [],
+        }
+
+    parts = candidates[0].get("content", {}).get("parts", [])
+    text = "\n".join(
+        str(part.get("text") or "")
+        for part in parts
+        if isinstance(part, dict) and part.get("text")
+    ).strip()
+    if not text:
+        finish_reason = candidates[0].get("finishReason", "unknown")
+        return {
+            "oracle_name": config.name,
+            "error": f"Gemini returned empty content (finishReason={finish_reason})",
+            "raw": json.dumps(data)[:2000],
+            "findings": [],
+        }
+
+    return _parse_json(text, config.name)
+
+
 PROVIDER_DISPATCH = {
     "anthropic": _call_anthropic,
     "openai": _call_openai,
     "xai": _call_xai,
+    "gemini": _call_gemini,
 }
 
 
@@ -703,7 +813,12 @@ def _validate_schema(result: dict, config: OracleConfig) -> str | None:
             if not dec.get("decision"):
                 return f"revision_decisions[{i}]: missing decision"
 
-    if config.role in ("adversarial_logic", "implementation_feasibility", "contrarian"):
+    if config.role in (
+        "adversarial_logic",
+        "implementation_feasibility",
+        "contrarian",
+        "domain_context",
+    ):
         for i, finding in enumerate(result.get("findings", [])):
             if not isinstance(finding, dict):
                 return f"findings[{i}]: expected dict, got {type(finding).__name__}"
@@ -893,7 +1008,7 @@ def _recover_truncated_json(text: str, oracle_name: str) -> dict:
         "revised_sections",         # Beth (coordinator)
         "open_questions",           # Beth (coordinator)
         "normalized_issues",        # Sonnet (referee)
-        "findings",                 # Fran / Codex / Grok (reviewers)
+        "findings",                 # Fran / Codex / Grok / Gemini (reviewers)
     ):
         recovered = _recover_array_field(text, field)
         if recovered is not None:
@@ -1122,13 +1237,13 @@ def _run_round(
     prior_decisions = last_valid.coordinator_decisions if last_valid else None
     prior_issues = last_valid.normalized_issues.get("normalized_issues", []) if last_valid else []
 
-    # --- Parallel blind review (Fran, Codex, Grok) ---
+    # --- Parallel blind review (Fran, Codex, Grok, Gemini) ---
     review_msg = _build_review_message(
         session.canonical_draft, round_num, changed_sections,
         compliance_context=compliance_context,
     )
 
-    required_reviewers = ("fran", "codex", "grok")
+    required_reviewers = ("fran", "codex", "grok", "gemini")
     reviewer_failed = False
 
     def _call_reviewer(key: str) -> tuple[str, dict]:
@@ -1363,11 +1478,13 @@ Environment variables:
   ANTHROPIC_API_KEY   — Required for Beth (Opus) and Sonnet
   OPENAI_API_KEY      — Required for Fran and Codex (GPT-5.4)
   XAI_API_KEY         — Required for Grok
+  GEMINI_API_KEY      — Required for Gemini (GOOGLE_API_KEY also accepted)
 
   ORACLE_BETH_MODEL   — Override Beth model  (default: claude-opus-4-6)
   ORACLE_FRAN_MODEL   — Override Fran model  (default: gpt-5.4)
   ORACLE_CODEX_MODEL  — Override Codex model (default: gpt-5.4)
   ORACLE_GROK_MODEL   — Override Grok model  (default: grok-4)
+  ORACLE_GEMINI_MODEL — Override Gemini model (default: gemini-2.5-pro)
   ORACLE_SONNET_MODEL — Override Sonnet model (default: claude-sonnet-4-6)
 
 Examples:
@@ -1441,6 +1558,8 @@ Examples:
         missing.append("OPENAI_API_KEY")
     if not os.environ.get("XAI_API_KEY"):
         missing.append("XAI_API_KEY")
+    if not (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")):
+        missing.append("GEMINI_API_KEY or GOOGLE_API_KEY")
     if missing:
         LOGGER.error(f"Missing API keys: {', '.join(missing)}")
         sys.exit(1)

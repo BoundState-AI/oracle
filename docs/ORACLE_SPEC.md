@@ -39,6 +39,7 @@ oracle.py (unified CLI)
     │     ├── Fran (GPT-5.4) — adversarial logic
     │     ├── Codex (GPT-5.4) — implementation feasibility
     │     ├── Grok (xAI) — contrarian
+    │     ├── Gemini — broad-context review
     │     └── Sonnet (Claude Sonnet 4.6) — referee/normalizer
     │
     ├── oracle2_adapter.py (return contract adapter — NEW)
@@ -876,11 +877,13 @@ Global:
 | `ANTHROPIC_API_KEY` | All oracle calls + generic extraction | (none) |
 | `OPENAI_API_KEY` | Review (Fran, Codex) | (none) |
 | `XAI_API_KEY` | Review (Grok) | (none) |
+| `GEMINI_API_KEY` / `GOOGLE_API_KEY` | Review (Gemini) | (none) |
 | `ORACLE_BETH_MODEL` | Review | `claude-opus-4-6` |
 | `ORACLE_SONNET_MODEL` | Review | `claude-sonnet-4-6` |
 | `ORACLE_FRAN_MODEL` | Review | `gpt-5.4` |
 | `ORACLE_CODEX_MODEL` | Review | `gpt-5.4` |
 | `ORACLE_GROK_MODEL` | Review | `grok-4.20` |
+| `ORACLE_GEMINI_MODEL` | Review | `gemini-2.5-pro` |
 | `ORACLE_VISION_MODEL` | Generic extraction | `claude-sonnet-4-6` |
 | `ORACLE_TIMEOUT_SECONDS` | All calls | `600` |
 | `ORACLE_PACK_DIR` | Pack library location | `~/.oracle/packs/` |
@@ -896,8 +899,9 @@ The token budget calculation (Section 7.2) requires the context-window size for 
 | `claude-sonnet-4-6` | 200,000 | Sonnet (referee), Vision extraction |
 | `gpt-5.4` | 128,000 | Fran (adversarial), Codex (feasibility) |
 | `grok-4.20` | 131,072 | Grok (contrarian) |
+| `gemini-2.5-pro` | 1,048,576 | Gemini (broad-context reviewer) |
 
-The minimum context window across all configured reviewer models determines the effective budget. For the default configuration, this is `min(200000, 200000, 128000, 128000, 131072) = 128,000` tokens.
+The minimum context window across all configured reviewer models determines the effective budget. For the default configuration, this is `min(200000, 200000, 128000, 128000, 131072, 1048576) = 128,000` tokens.
 
 **Unknown Model Handling:** If a configured model name (via environment variable) is not present in this table, the behavior depends on `ORACLE_MAX_CONTEXT_TOKENS`:
 - If `ORACLE_MAX_CONTEXT_TOKENS` is explicitly set: the fixed cap is used as the total budget, bypassing per-model lookup. A warning is emitted: `"Unknown model [name]. Using ORACLE_MAX_CONTEXT_TOKENS (N) as fixed budget."`
