@@ -802,6 +802,17 @@ PROVIDER_DISPATCH = {
 
 MAX_RETRIES = 3
 RETRY_BACKOFF = (2, 4, 8)  # seconds
+GEMINI_FALLBACK_ERROR_STATUSES = ("429", "500", "502", "503", "504")
+
+
+def _should_fallback_gemini(config: OracleConfig, last_error: str | None) -> bool:
+    """Use Flash when Gemini Pro is quota-blocked or temporarily unavailable."""
+    if config.provider != "gemini" or not last_error:
+        return False
+    fallback_model = os.environ.get("ORACLE_GEMINI_FALLBACK_MODEL", "gemini-2.5-flash")
+    if not fallback_model or fallback_model == config.model:
+        return False
+    return any(f"Gemini API error {status}" in last_error for status in GEMINI_FALLBACK_ERROR_STATUSES)
 
 
 def call_oracle(config: OracleConfig, user_message: str) -> dict:
@@ -844,6 +855,33 @@ def call_oracle(config: OracleConfig, user_message: str) -> dict:
             elapsed = time.time() - t0
             LOGGER.error(f"[{config.name}] Failed in {elapsed:.1f}s: {e}")
             last_error = str(e)
+
+    if _should_fallback_gemini(config, last_error):
+        fallback_model = os.environ.get("ORACLE_GEMINI_FALLBACK_MODEL", "gemini-2.5-flash")
+        fallback_tokens = int(
+            os.environ.get("ORACLE_GEMINI_FALLBACK_MAX_TOKENS", str(config.max_tokens))
+        )
+        fallback_config = OracleConfig(
+            name=config.name,
+            role=config.role,
+            provider=config.provider,
+            model=fallback_model,
+            system_prompt=config.system_prompt,
+            temperature=config.temperature,
+            max_tokens=fallback_tokens,
+            timeout=config.timeout,
+        )
+        LOGGER.warning(
+            "[%s] Primary Gemini model %s failed after retries (%s); falling back to %s",
+            config.name,
+            config.model,
+            last_error,
+            fallback_model,
+        )
+        result = call_oracle(fallback_config, user_message)
+        result["primary_model_error"] = last_error
+        result["fallback_model_used"] = fallback_model
+        return result
 
     # All retries exhausted
     raise RuntimeError(f"[{config.name}] Failed after {MAX_RETRIES} attempts: {last_error}")

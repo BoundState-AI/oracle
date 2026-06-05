@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import httpx
 import openai
 
-from oracle.oracle2 import _call_gemini, _call_openai, OracleConfig
+from oracle.oracle2 import _call_gemini, _call_openai, call_oracle, OracleConfig, PROVIDER_DISPATCH
 
 
 def _make_response(
@@ -198,3 +198,49 @@ def test_call_gemini_returns_missing_key_error(monkeypatch):
     assert result["oracle_name"] == "Gemini"
     assert result["error"] == "GEMINI_API_KEY or GOOGLE_API_KEY not set"
     assert result["findings"] == []
+
+
+def test_call_oracle_falls_back_to_gemini_flash_after_pro_503(monkeypatch):
+    calls: list[str] = []
+
+    def fake_dispatch(config: OracleConfig, user_message: str) -> dict:
+        calls.append(config.model)
+        if config.model == "gemini-2.5-pro":
+            return {
+                "oracle_name": "Gemini",
+                "error": "Gemini API error 503",
+                "raw": '{"error":{"status":"UNAVAILABLE"}}',
+                "findings": [],
+            }
+        return {
+            "oracle_name": "Gemini",
+            "role": "domain_context",
+            "document_type": "spec",
+            "overall_verdict": "revise",
+            "findings": [],
+            "top_3_must_fix": [],
+        }
+
+    monkeypatch.setitem(PROVIDER_DISPATCH, "gemini", fake_dispatch)
+    monkeypatch.setattr("oracle.oracle2.time.sleep", lambda _seconds: None)
+    monkeypatch.setenv("ORACLE_GEMINI_FALLBACK_MODEL", "gemini-2.5-flash")
+
+    config = OracleConfig(
+        name="Gemini",
+        role="domain_context",
+        provider="gemini",
+        model="gemini-2.5-pro",
+        system_prompt="Return JSON only.",
+    )
+
+    result = call_oracle(config, "review this")
+
+    assert calls == [
+        "gemini-2.5-pro",
+        "gemini-2.5-pro",
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+    ]
+    assert result["oracle_name"] == "Gemini"
+    assert result["fallback_model_used"] == "gemini-2.5-flash"
+    assert result["primary_model_error"] == "Gemini API error 503"
