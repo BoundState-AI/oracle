@@ -35,12 +35,12 @@ ORACLE unifies the existing oracle2 review engine, shall_extractor extraction pi
 oracle.py (unified CLI)
     │
     ├── oracle2.py (review engine — unchanged)
-    │     ├── Beth (Opus 4.6) — coordinator
+    │     ├── Beth (Opus 4.8 high) — normalizer / bundler / spec revisor
     │     ├── Fran (GPT-5.4) — adversarial logic
     │     ├── Codex (GPT-5.4) — implementation feasibility
     │     ├── Grok (xAI) — contrarian
     │     ├── Gemini — broad-context review
-    │     └── Sonnet (Claude Sonnet 4.6) — referee/normalizer
+    │     └── Sonnet (Claude Sonnet 4.6) — legacy ledger referee (`--workflow ledger`)
     │
     ├── oracle2_adapter.py (return contract adapter — NEW)
     │     └── Parses oracle2 output files into ReviewResult schema
@@ -878,7 +878,8 @@ Global:
 | `OPENAI_API_KEY` | Review (Fran, Codex) | (none) |
 | `XAI_API_KEY` | Review (Grok) | (none) |
 | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | Review (Gemini) | (none) |
-| `ORACLE_BETH_MODEL` | Review | `claude-opus-4-6` |
+| `ORACLE_WORKFLOW` | Review workflow | `manual` |
+| `ORACLE_BETH_MODEL` | Review | `claude-opus-4-8` |
 | `ORACLE_SONNET_MODEL` | Review | `claude-sonnet-4-6` |
 | `ORACLE_FRAN_MODEL` | Review | `gpt-5.4` |
 | `ORACLE_CODEX_MODEL` | Review | `gpt-5.4` |
@@ -895,7 +896,8 @@ The token budget calculation (Section 7.2) requires the context-window size for 
 
 | Model ID | Context Window (tokens) | Used By |
 |----------|------------------------|---------|
-| `claude-opus-4-6` | 200,000 | Beth (coordinator) |
+| `claude-opus-4-8` | 200,000 | Beth (manual normalizer / coordinator) |
+| `claude-opus-4-6` | 200,000 | Beth fallback |
 | `claude-sonnet-4-6` | 200,000 | Sonnet (referee), Vision extraction |
 | `gpt-5.4` | 128,000 | Fran (adversarial), Codex (feasibility) |
 | `grok-4.20` | 131,072 | Grok (contrarian) |

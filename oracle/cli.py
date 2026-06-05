@@ -160,6 +160,7 @@ def _bootstrap_builtin_packs(pack_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    "claude-opus-4-8": 200_000,
     "claude-opus-4-6": 200_000,
     "claude-sonnet-4-6": 200_000,
     "gpt-5.4": 128_000,
@@ -1650,7 +1651,7 @@ def _compute_token_budget(
 
     # Determine minimum context window across configured models
     model_vars = [
-        ("ORACLE_BETH_MODEL", "claude-opus-4-6"),
+        ("ORACLE_BETH_MODEL", "claude-opus-4-8"),
         ("ORACLE_SONNET_MODEL", "claude-sonnet-4-6"),
         ("ORACLE_FRAN_MODEL", "gpt-5.4"),
         ("ORACLE_CODEX_MODEL", "gpt-5.4"),
@@ -1833,9 +1834,10 @@ def run_review(
     pack_names: list[str],
     pack_dir: Path,
     pack_parts: dict[str, list[int]] | None = None,
-    max_rounds: int = 3,
+    max_rounds: int = 4,
     output_dir: Path | None = None,
     force_text_only: bool = False,
+    workflow: str = "manual",
 ) -> Any:
     """Run oracle2 review against selected rule packs.
 
@@ -1972,6 +1974,7 @@ def run_review(
         max_rounds=max_rounds,
         output_dir=output_dir,
         compliance_context=compliance_context,
+        workflow=workflow,
     )
 
     # --- Save audit artifacts (Section 7.4) ---
@@ -2212,6 +2215,7 @@ def cmd_review(args: argparse.Namespace) -> None:
         max_rounds=args.max_rounds,
         output_dir=output_dir,
         force_text_only=getattr(args, 'force_text_only', False),
+        workflow=getattr(args, "workflow", "manual"),
     )
 
     # Generate findings report
@@ -2426,7 +2430,9 @@ Examples:
     p_review.add_argument("--packs", nargs="+", default=[], help="Pack names from library")
     p_review.add_argument("--pack-parts", action="append", default=[],
                           help="Per-pack part scoping: --pack-parts far=15,19 --pack-parts dfars=252")
-    p_review.add_argument("--max-rounds", type=int, default=3, help="Maximum review rounds (default: 3)")
+    p_review.add_argument("--max-rounds", type=int, default=4, help="Maximum review rounds (default: 4)")
+    p_review.add_argument("--workflow", choices=["manual", "ledger"], default=os.environ.get("ORACLE_WORKFLOW", "manual"),
+                          help="Review workflow: manual=Beth bundles raw reviews, ledger=Sonnet issue ledger")
     p_review.add_argument("--output-dir", type=str, default=None, help="Output directory")
     p_review.add_argument("--force-text-only", action="store_true",
                           help="Proceed with low-quality PDF text extraction")

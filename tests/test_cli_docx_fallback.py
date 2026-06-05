@@ -50,6 +50,7 @@ def test_run_review_falls_back_to_builtin_docx_reader(monkeypatch):
 
         def fake_oracle2_run_review(**kwargs):
             captured["draft"] = kwargs["draft"]
+            captured["workflow"] = kwargs["workflow"]
             return types.SimpleNamespace(session_id="session-123")
 
         fake_oracle2 = types.ModuleType("oracle.oracle2")
@@ -67,3 +68,4 @@ def test_run_review_falls_back_to_builtin_docx_reader(monkeypatch):
 
         assert session.session_id == "session-123"
         assert "Fracture control shall be verified." in captured["draft"]
+        assert captured["workflow"] == "manual"

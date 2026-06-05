@@ -160,6 +160,75 @@ Output JSON only:
 }\
 """
 
+BETH_MANUAL_SYNTHESIS_PROMPT = """\
+You are Beth on Opus 4.8 high, acting as BoundState's normalizer, bundler,
+and spec revisor.
+
+You are replicating Joe's manual Oracle workflow:
+1. Joe and Beth develop a preliminary spec.
+2. Blind outside reviewers each review the spec independently.
+3. Beth reads the raw review bundle, applies judgment, revises the spec,
+   and decides whether another round is worth it.
+
+Your job:
+- Identify serious, non-duplicative issues from the blind reviews.
+- Bundle related feedback into a small number of themes.
+- Reject weak, speculative, stylistic, preference-only, or low-risk nitpicks.
+- Preserve the spec's core intent unless a reviewer found a real blocker.
+- Revise the spec only where the change improves correctness, clarity,
+  feasibility, compliance, product fit, or implementation readiness.
+- Decide whether the review loop is converging or drifting.
+
+Convergence policy:
+- Favor convergence once serious defects are resolved.
+- Round 1-2 may accept broad fixes.
+- Round 3+ should treat new comments as blockers only if they are material.
+- By Round 4, recommend either LOCK or HUMAN_REVIEW.
+- Do not keep the loop alive for low-risk polish or model taste differences.
+
+Recommendation values:
+- LOCK: spec is good enough to proceed.
+- ONE_MORE_ROUND: one more blind review is likely to improve material quality.
+- HUMAN_REVIEW: judgment, domain authority, or product direction is needed.
+
+Markdown formatting rules for the revised_draft:
+- Tables MUST use GitHub-flavored pipe-table syntax with a delimiter row.
+- Code, schema, CLI, or copy-paste literal text MUST be wrapped in fences.
+- Headings use ATX style (# / ## / ###); keep depth at or below ###.
+- Bullet lists use "- ", numbered lists use "1. ".
+
+Output JSON only:
+{
+  "oracle_name": "Beth",
+  "role": "coordinator",
+  "revision_decisions": [
+    {
+      "issue_id": "BETH-R1-ISSUE-001",
+      "decision": "accepted_defect|rejected_claim|preference_only|unresolved_question",
+      "reason": "..."
+    }
+  ],
+  "serious_issues": [
+    {
+      "issue_id": "BETH-R1-ISSUE-001",
+      "title": "...",
+      "severity": "critical|high|medium|low",
+      "source_reviewers": ["Fran", "Gemini"],
+      "summary": "...",
+      "resolution": "..."
+    }
+  ],
+  "feedback_themes": ["..."],
+  "architectural_risks_remaining": ["..."],
+  "revised_sections": ["..."],
+  "open_questions": ["..."],
+  "convergence_status": "converging|drifting|blocked",
+  "recommendation": "LOCK|ONE_MORE_ROUND|HUMAN_REVIEW",
+  "recommendation_reason": "...",
+  "revised_draft": "Full revised document text here, or null if no changes needed"
+}\
+"""
+
 FRAN_ADVERSARIAL_PROMPT = """\
 You are Fran, the adversarial logic reviewer.
 
@@ -355,6 +424,8 @@ SONNET_REFEREE_MAX_TOKENS = int(
 # lower effort risks missed findings on nuanced regulatory language.
 OPENAI_REASONING_EFFORT = os.environ.get("ORACLE_OPENAI_REASONING_EFFORT", "high")
 OPENAI_VERBOSITY = os.environ.get("ORACLE_OPENAI_VERBOSITY", "low")
+DEFAULT_WORKFLOW = os.environ.get("ORACLE_WORKFLOW", "manual").strip().lower() or "manual"
+VALID_WORKFLOWS = {"manual", "ledger"}
 
 # Required fields per oracle role — field name -> expected type
 REQUIRED_SCHEMA: dict[str, dict[str, type]] = {
@@ -391,7 +462,7 @@ ORACLE_ROSTER: dict[str, OracleConfig] = {
         name="Beth",
         role="coordinator",
         provider="anthropic",
-        model=os.environ.get("ORACLE_BETH_MODEL", "claude-opus-4-6"),
+        model=os.environ.get("ORACLE_BETH_MODEL", "claude-opus-4-8"),
         system_prompt=BETH_COORDINATOR_PROMPT,
         temperature=0.0,
         max_tokens=BETH_COORDINATOR_MAX_TOKENS,
@@ -1083,6 +1154,20 @@ class OracleSession:
     convergence_reason: str = ""
 
 
+def _with_system_prompt(config: OracleConfig, system_prompt: str) -> OracleConfig:
+    """Return a copy of an oracle config with a one-off system prompt."""
+    return OracleConfig(
+        name=config.name,
+        role=config.role,
+        provider=config.provider,
+        model=config.model,
+        system_prompt=system_prompt,
+        temperature=config.temperature,
+        max_tokens=config.max_tokens,
+        timeout=config.timeout,
+    )
+
+
 def _build_review_message(
     draft: str,
     round_number: int,
@@ -1110,6 +1195,71 @@ def _build_review_message(
     return msg
 
 
+def _reviewer_contract_json_schema() -> str:
+    """Compact reviewer output contract for manual workflow."""
+    return """
+Return JSON only:
+{
+  "oracle_name": "...",
+  "role": "...",
+  "document_type": "...",
+  "overall_verdict": "approve_with_minor_changes | revise | major_revision",
+  "findings": [
+    {
+      "title": "...",
+      "severity": "critical|high|medium|low",
+      "category": "ambiguity|contradiction|omission|feasibility|testability|security|performance|governance|scope|data_model|api_contract|operational_risk|domain_fit|other",
+      "location": "Section ...",
+      "evidence": "...",
+      "problem": "...",
+      "why_it_matters": "...",
+      "proposed_fix": "...",
+      "confidence": 0.0
+    }
+  ],
+  "top_3_must_fix": ["...", "...", "..."]
+}
+""".strip()
+
+
+def _build_manual_review_message(
+    draft: str,
+    round_number: int,
+    compliance_context: str | None = None,
+) -> str:
+    """Build the simple blind-review prompt that mirrors Joe's manual flow."""
+    if round_number <= 2:
+        task = (
+            "Please review this spec. Be direct. Point out real problems, "
+            "especially compliance, edge cases, feasibility, scalability, "
+            "domain fit, and production risk. Suggest fixes. Keep it concise. "
+            "If there are fewer than three real problems, return fewer than three."
+        )
+    else:
+        task = (
+            "Please review this revised spec for remaining blockers or regressions only. "
+            "Do not raise low-risk nitpicks, stylistic preferences, or already-resolved "
+            "concerns. Keep it concise."
+        )
+
+    msg = task
+    if compliance_context:
+        msg += (
+            "\n\n---\n\n"
+            "## Compliance Rule Pack\n\n"
+            "Use these requirements as authoritative context. Raise compliance "
+            "findings only when the spec fails, contradicts, or materially "
+            "underspecifies a requirement.\n\n"
+            f"{compliance_context}"
+        )
+
+    msg += (
+        f"\n\n---\n\n## Spec for Blind Review (Round {round_number})\n\n{draft}"
+        f"\n\n---\n\n{_reviewer_contract_json_schema()}"
+    )
+    return msg
+
+
 def _build_referee_message(
     draft: str,
     reviews: dict[str, dict],
@@ -1130,6 +1280,42 @@ def _build_referee_message(
             f"## Prior Round Normalized Issues (reuse issue_id for recurring issues)\n"
             f"```json\n{json.dumps(summary, indent=2)}\n```\n\n"
         )
+    return msg
+
+
+def _build_manual_beth_message(
+    draft: str,
+    reviews: dict[str, dict],
+    round_number: int,
+    max_rounds: int,
+    prior_beth_decisions: list[dict] | None = None,
+) -> str:
+    """Build Beth's raw-review bundle for the manual workflow."""
+    msg = (
+        f"## Current Spec\n\n{draft}\n\n"
+        f"## Round Context\n\n"
+        f"- Current round: {round_number}\n"
+        f"- Hard cap: {max_rounds} rounds\n"
+        f"- Round 3+ policy: only material blockers or regressions should keep the loop open.\n"
+        f"- Final round policy: recommend LOCK or HUMAN_REVIEW, not ONE_MORE_ROUND.\n\n"
+        "## Blind Review Bundle\n\n"
+    )
+    for name, output in reviews.items():
+        msg += f"### {name}\n```json\n{json.dumps(output, indent=2)}\n```\n\n"
+
+    if prior_beth_decisions:
+        msg += (
+            "## Prior Beth Decisions\n"
+            f"```json\n{json.dumps(prior_beth_decisions, indent=2)}\n```\n\n"
+            "Do not re-accept issues already resolved. If they recur, decide whether "
+            "that means the fix failed or the reviewer is nitpicking."
+        )
+
+    msg += (
+        "\n\n## Your Task\n"
+        "Normalize and bundle the reviews yourself. Revise the spec only for serious "
+        "issues. Recommend LOCK, ONE_MORE_ROUND, or HUMAN_REVIEW."
+    )
     return msg
 
 
@@ -1211,6 +1397,140 @@ def _check_convergence(session: OracleSession) -> tuple[bool, str]:
         return True, f"Converged (repeated tradeoffs: {repeated})"
 
     return True, f"Converged: {len(high)} high, issue overlap {overlap:.0%}"
+
+
+def _run_manual_round(
+    session: OracleSession,
+    round_num: int,
+    max_rounds: int,
+    output_dir: Path,
+    compliance_context: str | None,
+) -> tuple[ReviewRound, bool]:
+    """Execute one manual-style round: blind reviewers -> Beth directly.
+
+    This mirrors Joe's manual process. Reviewers stay blind; Beth receives the
+    raw bundle and acts as normalizer, bundler, spec revisor, and stop-signal.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    review_round = ReviewRound(round_number=round_num)
+    review_msg = _build_manual_review_message(
+        session.canonical_draft,
+        round_num,
+        compliance_context=compliance_context,
+    )
+
+    required_reviewers = ("fran", "codex", "grok", "gemini")
+    reviewer_failed = False
+
+    def _call_reviewer(key: str) -> tuple[str, dict]:
+        config = ORACLE_ROSTER[key]
+        try:
+            result = call_oracle(config, review_msg)
+            return config.name, result
+        except Exception as e:
+            LOGGER.error(f"[{config.name}] FAILED after retries: {e}")
+            return config.name, {"oracle_name": config.name, "error": str(e), "findings": []}
+
+    LOGGER.info(f"  Launching {len(required_reviewers)} blind reviewers in parallel...")
+    with ThreadPoolExecutor(max_workers=len(required_reviewers)) as pool:
+        futures = {pool.submit(_call_reviewer, key): key for key in required_reviewers}
+        for future in as_completed(futures):
+            name, result = future.result()
+            review_round.reviewer_outputs[name] = result
+            if "error" in result and not result.get("findings"):
+                reviewer_failed = True
+
+    for name, output in review_round.reviewer_outputs.items():
+        (output_dir / f"round{round_num}_{name.lower()}.json").write_text(
+            encoding="utf-8", data=json.dumps(output, indent=2)
+        )
+
+    if reviewer_failed:
+        LOGGER.error(f"Round {round_num} INVALID: required reviewer failed.")
+        session.rounds.append(review_round)
+        return review_round, False
+
+    prior_decisions = [
+        r.coordinator_decisions
+        for r in session.rounds
+        if r.valid and r.coordinator_decisions
+    ]
+    beth_msg = _build_manual_beth_message(
+        session.canonical_draft,
+        review_round.reviewer_outputs,
+        round_number=round_num,
+        max_rounds=max_rounds,
+        prior_beth_decisions=prior_decisions or None,
+    )
+    beth_config = _with_system_prompt(
+        ORACLE_ROSTER["beth"],
+        BETH_MANUAL_SYNTHESIS_PROMPT,
+    )
+
+    try:
+        beth_response = call_oracle(beth_config, beth_msg)
+    except Exception as e:
+        LOGGER.error(f"[Beth] FAILED after retries: {e}. Round invalid.")
+        session.rounds.append(review_round)
+        return review_round, False
+
+    review_round.coordinator_decisions = beth_response
+    serious_issues = beth_response.get("serious_issues", [])
+    review_round.normalized_issues = {
+        "oracle_name": "Beth",
+        "role": "manual_normalizer",
+        "normalized_issues": serious_issues if isinstance(serious_issues, list) else [],
+    }
+
+    revised = beth_response.get("revised_draft")
+    if revised and isinstance(revised, str) and revised.strip():
+        session.canonical_draft = revised.strip()
+        review_round.revised_draft = session.canonical_draft
+        LOGGER.info(f"[Beth] Draft revised ({len(session.canonical_draft)} chars)")
+    else:
+        LOGGER.info("[Beth] No revision to draft this round")
+
+    review_round.valid = True
+
+    (output_dir / f"round{round_num}_beth_decisions.json").write_text(
+        encoding="utf-8", data=json.dumps(beth_response, indent=2)
+    )
+    (output_dir / f"round{round_num}_beth_normalized.json").write_text(
+        encoding="utf-8", data=json.dumps(review_round.normalized_issues, indent=2)
+    )
+    if review_round.revised_draft:
+        (output_dir / f"round{round_num}_revised_draft.md").write_text(
+            encoding="utf-8", data=review_round.revised_draft
+        )
+
+    session.rounds.append(review_round)
+
+    recommendation = str(beth_response.get("recommendation") or "").strip().upper()
+    reason = str(beth_response.get("recommendation_reason") or "").strip()
+
+    if recommendation == "LOCK":
+        session.converged = True
+        session.convergence_reason = reason or "Beth recommended LOCK"
+        LOGGER.info(f"\nLocked after round {round_num}: {session.convergence_reason}")
+        return review_round, True
+
+    if recommendation == "HUMAN_REVIEW":
+        session.converged = False
+        session.convergence_reason = reason or "Beth recommended HUMAN_REVIEW"
+        LOGGER.info(f"\nStopping for human review after round {round_num}: {session.convergence_reason}")
+        return review_round, True
+
+    if round_num >= max_rounds:
+        session.converged = False
+        session.convergence_reason = (
+            reason or f"Reached max rounds ({max_rounds}) without LOCK"
+        )
+        LOGGER.info(f"\nStopping at max rounds: {session.convergence_reason}")
+        return review_round, True
+
+    LOGGER.info(f"\nBeth recommended one more round: {reason or 'no reason provided'}")
+    return review_round, False
 
 
 def _run_round(
@@ -1339,15 +1659,21 @@ def _run_round(
 def run_review(
     draft: str,
     document_path: str = "",
-    max_rounds: int = 3,
+    max_rounds: int = 4,
     output_dir: Path | None = None,
     compliance_context: str | None = None,
+    workflow: str = DEFAULT_WORKFLOW,
 ) -> OracleSession:
     """Run the full multi-oracle review loop.
 
-    Dispatches up to max_rounds through _run_round(), checking convergence
-    after each.  Saves final_draft.md and session_summary.json on completion.
+    Default workflow is "manual": blind reviewers -> Beth directly.  The
+    legacy "ledger" workflow keeps the older Sonnet-normalized issue ledger.
+    Saves final_draft.md and session_summary.json on completion.
     """
+    workflow = workflow.strip().lower()
+    if workflow not in VALID_WORKFLOWS:
+        raise ValueError(f"Unknown workflow '{workflow}'. Expected one of {sorted(VALID_WORKFLOWS)}")
+
     session_id = datetime.now().strftime("%Y%m%d-%H%M%S")
     session = OracleSession(
         session_id=session_id,
@@ -1362,8 +1688,17 @@ def run_review(
 
     for round_num in range(1, max_rounds + 1):
         LOGGER.info(f"\n{'='*60}\nRound {round_num}\n{'='*60}")
-        _, converged = _run_round(session, round_num, output_dir, compliance_context)
-        if converged:
+        if workflow == "manual":
+            _, should_stop = _run_manual_round(
+                session,
+                round_num,
+                max_rounds,
+                output_dir,
+                compliance_context,
+            )
+        else:
+            _, should_stop = _run_round(session, round_num, output_dir, compliance_context)
+        if should_stop:
             break
 
     # Save final state
@@ -1371,6 +1706,7 @@ def run_review(
     summary = {
         "session_id": session.session_id,
         "document_path": session.document_path,
+        "workflow": workflow,
         "total_rounds": len(session.rounds),
         "converged": session.converged,
         "convergence_reason": session.convergence_reason,
@@ -1475,12 +1811,13 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 Environment variables:
-  ANTHROPIC_API_KEY   — Required for Beth (Opus) and Sonnet
+  ANTHROPIC_API_KEY   — Required for Beth (and Sonnet in ledger workflow)
   OPENAI_API_KEY      — Required for Fran and Codex (GPT-5.4)
   XAI_API_KEY         — Required for Grok
   GEMINI_API_KEY      — Required for Gemini (GOOGLE_API_KEY also accepted)
 
-  ORACLE_BETH_MODEL   — Override Beth model  (default: claude-opus-4-6)
+  ORACLE_WORKFLOW     — manual | ledger (default: manual)
+  ORACLE_BETH_MODEL   — Override Beth model  (default: claude-opus-4-8)
   ORACLE_FRAN_MODEL   — Override Fran model  (default: gpt-5.4)
   ORACLE_CODEX_MODEL  — Override Codex model (default: gpt-5.4)
   ORACLE_GROK_MODEL   — Override Grok model  (default: grok-4)
@@ -1497,8 +1834,9 @@ Examples:
 """,
     )
     parser.add_argument("document", help="Path to the document to review")
-    parser.add_argument("--max-rounds", type=int, default=3, help="Maximum review rounds (default: 3)")
+    parser.add_argument("--max-rounds", type=int, default=4, help="Maximum review rounds (default: 4)")
     parser.add_argument("--output-dir", type=str, default=None, help="Output directory (default: oracle_reviews/<timestamp>)")
+    parser.add_argument("--workflow", choices=sorted(VALID_WORKFLOWS), default=DEFAULT_WORKFLOW, help="Review workflow (default: manual)")
     parser.add_argument("--rulepack", type=str, nargs="+", default=None, help="Path(s) to rule pack JSON (e.g., far_rulepack.json nfs_rulepack.json)")
     parser.add_argument("--parts", type=str, default=None, help="Comma-separated Part numbers for Tier 2 detail (e.g., 15,19,52,1852)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
@@ -1571,6 +1909,7 @@ Examples:
         max_rounds=args.max_rounds,
         output_dir=output_dir,
         compliance_context=compliance_context,
+        workflow=args.workflow,
     )
 
     metrics = compute_metrics(session)
