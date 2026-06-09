@@ -1,0 +1,30 @@
+{
+  "case": "seeded_payment_spec",
+  "description": "Spec with 4 deliberately planted defects. A trustworthy review must raise all of them. Keywords are distinctive fragments of each defect; min_severity is the floor a competent reviewer should assign.",
+  "expected_defects": [
+    {
+      "id": "DEFECT-RETRY",
+      "summary": "Unbounded immediate retries with no idempotency key -> duplicate charges + retry storm",
+      "required_keywords": ["idempotency"],
+      "min_severity": "high"
+    },
+    {
+      "id": "DEFECT-AUTH",
+      "summary": "Unauthenticated admin endpoint",
+      "required_keywords": ["admin", "authentication"],
+      "min_severity": "critical"
+    },
+    {
+      "id": "DEFECT-ROLLBACK",
+      "summary": "No rollback procedure; auto-migrations at start make forward-only deploys destructive",
+      "required_keywords": ["rollback"],
+      "min_severity": "high"
+    },
+    {
+      "id": "DEFECT-PAN-LOGGING",
+      "summary": "Card numbers logged at INFO (PCI violation)",
+      "required_keywords": ["card", "log"],
+      "min_severity": "high"
+    }
+  ]
+}
