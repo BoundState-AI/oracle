@@ -1398,6 +1398,68 @@ def _build_coordinator_message(
     return msg
 
 
+def _reviewer_verdicts(review_round: ReviewRound) -> dict[str, str]:
+    """Map oracle name -> overall_verdict for a round's reviewer outputs.
+
+    Outputs without a verdict (errored reviewers, models that omitted the
+    field) are excluded — absence of a verdict is not a verdict.
+    """
+    verdicts: dict[str, str] = {}
+    for name, output in review_round.reviewer_outputs.items():
+        verdict = str(output.get("overall_verdict") or "").strip().lower()
+        if verdict:
+            verdicts[name] = verdict
+    return verdicts
+
+
+def _apply_verdict_consistency(
+    review_round: ReviewRound,
+    converged: bool,
+    consensus_type: str,
+    reason: str,
+) -> tuple[bool, str, str]:
+    """Cross-check a consensus claim against final-round reviewer verdicts.
+
+    WHY: reviewers emit overall_verdict in every response, but no code read
+    it — a coordinator LOCK could silently override four major_revision
+    verdicts (AUDIT A3). Policy (Phase 2 handoff, Q1):
+      - UNANIMOUS major_revision from every reviewer that reported a
+        verdict (and every reviewer reported one) -> hard block: the run
+        escalates to human review instead of reporting consensus.
+        Unanimity is the one case where "the coordinator knows better
+        than all reviewers" has no defensible reading.
+      - PARTIAL major_revision dissent -> consensus stands, but the
+        override is disclosed in the convergence reason and the outcome
+        is downgraded to stable_with_notes. The system discloses who
+        decided; it does not re-decide.
+    Returns possibly-modified (converged, consensus_type, reason).
+    """
+    if not converged:
+        return converged, consensus_type, reason
+
+    verdicts = _reviewer_verdicts(review_round)
+    majors = sorted(name for name, v in verdicts.items() if v == "major_revision")
+    all_reported = len(verdicts) == len(review_round.reviewer_outputs) and bool(verdicts)
+
+    if majors and all_reported and len(majors) == len(verdicts):
+        return (
+            False,
+            "blocked",
+            f"Coordinator reported consensus but ALL reviewers returned "
+            f"verdict major_revision ({', '.join(majors)}) — escalating to "
+            f"human review instead of overriding a unanimous verdict",
+        )
+
+    if majors:
+        disclosure = (
+            f" | Reviewer verdict override disclosed: {', '.join(majors)} "
+            f"returned major_revision and were overridden by the coordinator"
+        )
+        return True, "stable_with_notes", reason + disclosure
+
+    return converged, consensus_type, reason
+
+
 def _check_convergence(session: OracleSession) -> tuple[bool, bool, str, str]:
     """Check if the review loop should stop, and whether stopping means consensus.
 
@@ -1595,13 +1657,26 @@ def _run_manual_round(
     reason = str(beth_response.get("recommendation_reason") or "").strip()
 
     if recommendation == "LOCK":
-        session.converged = True
         # LOCK with open questions is agreement-with-residue, not full
         # agreement — the distinction must survive to the report (AUDIT A2/A4).
         open_questions = beth_response.get("open_questions") or []
-        session.consensus_type = "stable_with_notes" if open_questions else "full_agreement"
-        session.convergence_reason = reason or "Beth recommended LOCK"
-        LOGGER.info(f"\nLocked after round {round_num}: {session.convergence_reason}")
+        consensus_type = "stable_with_notes" if open_questions else "full_agreement"
+        converged, consensus_type, lock_reason = _apply_verdict_consistency(
+            review_round,
+            True,
+            consensus_type,
+            reason or "Beth recommended LOCK",
+        )
+        session.converged = converged
+        session.consensus_type = consensus_type
+        session.convergence_reason = lock_reason
+        if converged:
+            LOGGER.info(f"\nLocked after round {round_num}: {session.convergence_reason}")
+        else:
+            LOGGER.warning(
+                f"\nLOCK blocked by reviewer verdicts after round {round_num}: "
+                f"{session.convergence_reason}"
+            )
         return review_round, True
 
     if recommendation == "HUMAN_REVIEW":
@@ -1738,6 +1813,9 @@ def _run_round(
 
     stop, converged, consensus_type, reason = _check_convergence(session)
     if stop:
+        converged, consensus_type, reason = _apply_verdict_consistency(
+            review_round, converged, consensus_type, reason
+        )
         session.converged = converged
         session.consensus_type = consensus_type
         session.convergence_reason = reason

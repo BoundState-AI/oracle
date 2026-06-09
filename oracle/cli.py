@@ -2055,6 +2055,40 @@ def _issue_sources(issue: dict) -> list[str]:
     return sources
 
 
+def _format_reviewer_verdicts(session: Any) -> list[str]:
+    """Render the final valid round's per-reviewer verdicts.
+
+    WHY: each reviewer's overall_verdict is its headline stance on the
+    whole document. It was collected in every response and read by
+    nothing (AUDIT A3) — the reader could not see when the coordinator's
+    consensus claim diverged from the reviewers' own verdicts.
+    """
+    for r in reversed(session.rounds):
+        if not r.valid:
+            continue
+        verdicts = {
+            name: str(out.get("overall_verdict") or "").strip()
+            for name, out in r.reviewer_outputs.items()
+            if str(out.get("overall_verdict") or "").strip()
+        }
+        if not verdicts:
+            return []
+        lines = ["## Reviewer Verdicts (final round)", ""]
+        for name in sorted(verdicts):
+            lines.append(f"- **{name}**: {verdicts[name]}")
+        majors = sorted(n for n, v in verdicts.items() if v == "major_revision")
+        if majors and session.converged:
+            lines.append("")
+            lines.append(
+                f"> **Warning:** consensus was reported although "
+                f"{', '.join(majors)} returned verdict `major_revision`. "
+                f"The override is the coordinator's judgment — see Dissent Summary."
+            )
+        lines.append("")
+        return lines
+    return []
+
+
 def _format_dissent_summary(session: Any) -> list[str]:
     """Render every rejected/unresolved finding with full coordinator reasoning.
 
@@ -2240,8 +2274,9 @@ def format_findings_report(
         "",
     ])
 
-    # --- Dissent Summary (AUDIT A1) — before per-round detail so dissent
-    # is impossible to miss in a skim read ---
+    # --- Reviewer verdicts + Dissent Summary (AUDIT A3 + A1) — before
+    # per-round detail so dissent is impossible to miss in a skim read ---
+    lines.extend(_format_reviewer_verdicts(session))
     lines.extend(_format_dissent_summary(session))
     lines.extend(_format_referee_drops(session))
 
