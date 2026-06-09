@@ -1,0 +1,95 @@
+{
+  "case": "g4_adapter_sync",
+  "description": "Manual workflow run with one accepted CRITICAL defect. The adapter must reconstruct the same severity from the session directory — not silently downgrade it because the normalized-issues filename differs between workflows (AUDIT F1).",
+  "workflow": "manual",
+  "document": "# Telemetry Spec\n\nDevice telemetry is stored with no failover region.\n",
+  "rounds": [
+    {
+      "Fran": {
+        "oracle_name": "Fran",
+        "role": "adversarial_logic",
+        "document_type": "spec",
+        "overall_verdict": "revise",
+        "findings": [
+          {
+            "title": "Single-region storage loses telemetry on regional outage",
+            "severity": "critical",
+            "category": "operational_risk",
+            "location": "Section 1",
+            "evidence": "no failover region",
+            "problem": "A regional outage permanently drops in-flight telemetry.",
+            "why_it_matters": "Data loss is unrecoverable.",
+            "proposed_fix": "Add cross-region replication.",
+            "confidence": 0.9
+          }
+        ],
+        "top_3_must_fix": ["Single-region storage loses telemetry on regional outage"]
+      },
+      "Codex": {
+        "oracle_name": "Codex",
+        "role": "implementation_feasibility",
+        "document_type": "spec",
+        "overall_verdict": "revise",
+        "findings": [
+          {
+            "title": "No failover region defined for the telemetry store",
+            "severity": "critical",
+            "category": "operational_risk",
+            "location": "Section 1",
+            "evidence": "no failover region",
+            "problem": "Disaster recovery is unimplementable as specified.",
+            "why_it_matters": "RPO/RTO targets cannot be met.",
+            "proposed_fix": "Specify the failover region and replication mode.",
+            "confidence": 0.9
+          }
+        ],
+        "top_3_must_fix": ["No failover region defined for the telemetry store"]
+      },
+      "Grok": {
+        "oracle_name": "Grok",
+        "role": "contrarian",
+        "document_type": "spec",
+        "overall_verdict": "approve_with_minor_changes",
+        "findings": [],
+        "top_3_must_fix": []
+      },
+      "Gemini": {
+        "oracle_name": "Gemini",
+        "role": "domain_context",
+        "document_type": "spec",
+        "overall_verdict": "approve_with_minor_changes",
+        "findings": [],
+        "top_3_must_fix": []
+      },
+      "Beth": {
+        "oracle_name": "Beth",
+        "role": "coordinator",
+        "revision_decisions": [
+          {
+            "issue_id": "BETH-R1-ISSUE-001",
+            "decision": "accepted_defect",
+            "reason": "Real data-loss risk; replication added."
+          }
+        ],
+        "serious_issues": [
+          {
+            "issue_id": "BETH-R1-ISSUE-001",
+            "title": "Single-region telemetry storage has no failover",
+            "severity": "critical",
+            "source_reviewers": ["Fran", "Codex"],
+            "summary": "Regional outage permanently loses telemetry.",
+            "resolution": "Accepted; spec revised to add cross-region replication."
+          }
+        ],
+        "feedback_themes": ["disaster recovery"],
+        "architectural_risks_remaining": [],
+        "revised_sections": ["Section 1"],
+        "open_questions": [],
+        "convergence_status": "converging",
+        "recommendation": "LOCK",
+        "recommendation_reason": "The single serious defect is fixed.",
+        "revised_draft": "# Telemetry Spec\n\nDevice telemetry is stored with synchronous cross-region replication to a failover region.\n"
+      }
+    }
+  ]
+}

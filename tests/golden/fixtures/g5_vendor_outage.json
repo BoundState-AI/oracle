@@ -1,0 +1,47 @@
+{
+  "case": "g5_vendor_outage",
+  "description": "Grok's vendor is hard-down for the entire run, so every round is invalid and the 'final draft' is the unreviewed input. The run must explain itself, and the server must refuse to generate a polished deliverable from it (AUDIT C2 + F2).",
+  "workflow": "manual",
+  "document": "# Unreviewed Spec\n\nThis document never actually got reviewed.\n",
+  "rounds": [
+    {
+      "Fran": {
+        "oracle_name": "Fran",
+        "role": "adversarial_logic",
+        "document_type": "spec",
+        "overall_verdict": "revise",
+        "findings": [
+          {
+            "title": "Placeholder finding",
+            "severity": "low",
+            "category": "other",
+            "location": "Section 1",
+            "evidence": "n/a",
+            "problem": "Round is invalid anyway; this must not leak into results.",
+            "why_it_matters": "n/a",
+            "proposed_fix": "n/a",
+            "confidence": 0.5
+          }
+        ],
+        "top_3_must_fix": []
+      },
+      "Codex": {
+        "oracle_name": "Codex",
+        "role": "implementation_feasibility",
+        "document_type": "spec",
+        "overall_verdict": "revise",
+        "findings": [],
+        "top_3_must_fix": []
+      },
+      "Grok": "__FAIL__",
+      "Gemini": {
+        "oracle_name": "Gemini",
+        "role": "domain_context",
+        "document_type": "spec",
+        "overall_verdict": "revise",
+        "findings": [],
+        "top_3_must_fix": []
+      }
+    }
+  ]
+}
