@@ -855,6 +855,10 @@ def call_oracle(config: OracleConfig, user_message: str) -> dict:
                 continue
 
             findings_count = len(result.get("findings", result.get("normalized_issues", [])))
+            if result.get("recovered_partial"):
+                LOGGER.warning(
+                    f"[{config.name}] DEGRADED: {result.get('recovery_note', 'partial recovery')}"
+                )
             LOGGER.info(f"[{config.name}] Done in {elapsed:.1f}s — {findings_count} findings")
             return result
 
@@ -1152,6 +1156,24 @@ def _recover_truncated_json(text: str, oracle_name: str) -> dict:
         LOGGER.error(f"[{oracle_name}] Could not recover any content from malformed response")
         result["error"] = "Malformed JSON, no recoverable content"
         result["raw"] = text[:2000]
+    else:
+        # WHY flag the salvage: a partially recovered response used to be
+        # indistinguishable from a complete one, so a reviewer whose last
+        # N findings were truncated participated in convergence as if it
+        # had said everything it had to say (AUDIT B2). The flag persists
+        # into the round files and surfaces in the findings report.
+        result["recovered_partial"] = True
+        salvaged: dict[str, int] = {
+            f: len(result[f])
+            for f in ("revision_decisions", "normalized_issues", "findings")
+            if result.get(f)
+        }
+        if "revised_draft" in result and isinstance(result["revised_draft"], str):
+            salvaged["revised_draft_chars"] = len(result["revised_draft"])
+        result["recovery_note"] = (
+            f"Response was malformed/truncated; salvaged {salvaged}. "
+            f"The full response may have contained more content."
+        )
 
     return result
 

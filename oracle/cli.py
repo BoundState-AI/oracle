@@ -2321,6 +2321,24 @@ def format_findings_report(
         lines.append(f"## Round {r.round_number}")
         lines.append("")
 
+        # Degraded-data disclosure (AUDIT B2): a truncated response that
+        # was partially salvaged means this round's finding set may be
+        # incomplete — the reader must know, not just the logs.
+        degraded = sorted(
+            name
+            for name, out in r.reviewer_outputs.items()
+            if isinstance(out, dict) and out.get("recovered_partial")
+        )
+        if r.coordinator_decisions.get("recovered_partial"):
+            degraded.append("Beth (coordinator)")
+        if degraded:
+            lines.append(
+                f"> **Degraded data:** the response(s) from "
+                f"{', '.join(degraded)} were truncated or malformed and only "
+                f"partially recovered. This round's finding set may be incomplete."
+            )
+            lines.append("")
+
         # Normalized issues
         issues = r.normalized_issues.get("normalized_issues", [])
         if issues:
