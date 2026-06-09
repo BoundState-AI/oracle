@@ -1,0 +1,198 @@
+{
+  "case": "g3_repeated_tradeoff",
+  "description": "Ledger workflow. The same open tradeoff survives two consecutive rounds with a stable issue set. The loop should stop, but a standing disagreement must NOT be reported as convergence (AUDIT A2).",
+  "workflow": "ledger",
+  "document": "# Ingestion Pipeline Spec\n\nEvents are ingested and processed for reporting.\n",
+  "rounds": [
+    {
+      "Fran": {
+        "oracle_name": "Fran",
+        "role": "adversarial_logic",
+        "document_type": "spec",
+        "overall_verdict": "revise",
+        "findings": [
+          {
+            "title": "Ingestion mode is undefined",
+            "severity": "medium",
+            "category": "ambiguity",
+            "location": "Section 1",
+            "evidence": "Events are ingested and processed",
+            "problem": "Batch vs streaming is never chosen.",
+            "why_it_matters": "The two designs have incompatible failure semantics.",
+            "proposed_fix": "Pick one and specify backpressure behavior.",
+            "confidence": 0.8
+          }
+        ],
+        "top_3_must_fix": ["Ingestion mode is undefined"]
+      },
+      "Codex": {
+        "oracle_name": "Codex",
+        "role": "implementation_feasibility",
+        "document_type": "spec",
+        "overall_verdict": "revise",
+        "findings": [
+          {
+            "title": "Cannot size infrastructure without an ingestion mode",
+            "severity": "medium",
+            "category": "feasibility",
+            "location": "Section 1",
+            "evidence": "Events are ingested and processed",
+            "problem": "Batch and streaming imply different infra.",
+            "why_it_matters": "Costing and capacity planning blocked.",
+            "proposed_fix": "Decide batch vs streaming.",
+            "confidence": 0.8
+          }
+        ],
+        "top_3_must_fix": ["Cannot size infrastructure without an ingestion mode"]
+      },
+      "Grok": {
+        "oracle_name": "Grok",
+        "role": "contrarian",
+        "document_type": "spec",
+        "overall_verdict": "revise",
+        "findings": [],
+        "top_3_must_fix": []
+      },
+      "Gemini": {
+        "oracle_name": "Gemini",
+        "role": "domain_context",
+        "document_type": "spec",
+        "overall_verdict": "revise",
+        "findings": [],
+        "top_3_must_fix": []
+      },
+      "Sonnet": {
+        "oracle_name": "Sonnet",
+        "role": "referee",
+        "normalized_issues": [
+          {
+            "issue_id": "R1-ISSUE-001",
+            "title": "Ingestion mode (batch vs streaming) is undecided",
+            "severity": "medium",
+            "category": "ambiguity",
+            "merged_from": [
+              {"oracle": "Fran", "title": "Ingestion mode is undefined"},
+              {"oracle": "Codex", "title": "Cannot size infrastructure without an ingestion mode"}
+            ],
+            "core_problem": "The spec never chooses batch or streaming ingestion.",
+            "best_evidence": "Events are ingested and processed",
+            "recommended_fix": "Decide the ingestion mode and specify failure semantics.",
+            "conflict_flag": false,
+            "weak_signal": false
+          }
+        ],
+        "dropped_findings": []
+      },
+      "Beth": {
+        "oracle_name": "Beth",
+        "role": "coordinator",
+        "revision_decisions": [
+          {
+            "issue_id": "R1-ISSUE-001",
+            "decision": "unresolved_question",
+            "reason": "Batch vs streaming is a product-level tradeoff; both designs are sound."
+          }
+        ],
+        "architectural_risks_remaining": [],
+        "revised_sections": [],
+        "open_questions": ["Should ingestion be batch or streaming?"],
+        "revised_draft": null
+      }
+    },
+    {
+      "Fran": {
+        "oracle_name": "Fran",
+        "role": "adversarial_logic",
+        "document_type": "spec",
+        "overall_verdict": "revise",
+        "findings": [
+          {
+            "title": "Ingestion mode is still undefined",
+            "severity": "medium",
+            "category": "ambiguity",
+            "location": "Section 1",
+            "evidence": "Events are ingested and processed",
+            "problem": "Batch vs streaming remains unchosen.",
+            "why_it_matters": "Unchanged from round 1.",
+            "proposed_fix": "Pick one.",
+            "confidence": 0.8
+          }
+        ],
+        "top_3_must_fix": ["Ingestion mode is still undefined"]
+      },
+      "Codex": {
+        "oracle_name": "Codex",
+        "role": "implementation_feasibility",
+        "document_type": "spec",
+        "overall_verdict": "revise",
+        "findings": [
+          {
+            "title": "Infrastructure sizing still blocked",
+            "severity": "medium",
+            "category": "feasibility",
+            "location": "Section 1",
+            "evidence": "Events are ingested and processed",
+            "problem": "Same blocker as round 1.",
+            "why_it_matters": "Unchanged.",
+            "proposed_fix": "Decide batch vs streaming.",
+            "confidence": 0.8
+          }
+        ],
+        "top_3_must_fix": ["Infrastructure sizing still blocked"]
+      },
+      "Grok": {
+        "oracle_name": "Grok",
+        "role": "contrarian",
+        "document_type": "spec",
+        "overall_verdict": "revise",
+        "findings": [],
+        "top_3_must_fix": []
+      },
+      "Gemini": {
+        "oracle_name": "Gemini",
+        "role": "domain_context",
+        "document_type": "spec",
+        "overall_verdict": "revise",
+        "findings": [],
+        "top_3_must_fix": []
+      },
+      "Sonnet": {
+        "oracle_name": "Sonnet",
+        "role": "referee",
+        "normalized_issues": [
+          {
+            "issue_id": "R1-ISSUE-001",
+            "title": "Ingestion mode (batch vs streaming) is undecided",
+            "severity": "medium",
+            "category": "ambiguity",
+            "merged_from": [
+              {"oracle": "Fran", "title": "Ingestion mode is still undefined"},
+              {"oracle": "Codex", "title": "Infrastructure sizing still blocked"}
+            ],
+            "core_problem": "The spec still never chooses batch or streaming ingestion.",
+            "best_evidence": "Events are ingested and processed",
+            "recommended_fix": "Decide the ingestion mode and specify failure semantics.",
+            "conflict_flag": false,
+            "weak_signal": false
+          }
+        ],
+        "dropped_findings": []
+      },
+      "Beth": {
+        "oracle_name": "Beth",
+        "role": "coordinator",
+        "revision_decisions": [
+          {
+            "issue_id": "R1-ISSUE-001",
+            "decision": "unresolved_question",
+            "reason": "Still a product-level tradeoff; no new evidence either way."
+          }
+        ],
+        "architectural_risks_remaining": [],
+        "revised_sections": [],
+        "open_questions": ["Should ingestion be batch or streaming?"],
+        "revised_draft": null
+      }
+    }
+  ]
+}

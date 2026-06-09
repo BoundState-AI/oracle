@@ -1,0 +1,110 @@
+{
+  "case": "g1_unanimous_critical",
+  "description": "All four reviewers return a critical finding and verdict major_revision; Beth nonetheless recommends LOCK. The system must hard-block: a unanimous major_revision verdict cannot be silently overridden by the coordinator (AUDIT A3 / philosophy rule 4).",
+  "workflow": "manual",
+  "document": "# Payment Service Spec\n\nThe service retries failed charges indefinitely with no idempotency key.\n",
+  "rounds": [
+    {
+      "Fran": {
+        "oracle_name": "Fran",
+        "role": "adversarial_logic",
+        "document_type": "spec",
+        "overall_verdict": "major_revision",
+        "findings": [
+          {
+            "title": "Unbounded retry without idempotency causes duplicate charges",
+            "severity": "critical",
+            "category": "feasibility",
+            "location": "Section 1",
+            "evidence": "retries failed charges indefinitely with no idempotency key",
+            "problem": "Every retry can double-charge the customer.",
+            "why_it_matters": "Financial loss and regulatory exposure.",
+            "proposed_fix": "Add idempotency keys and a bounded retry budget.",
+            "confidence": 0.95
+          }
+        ],
+        "top_3_must_fix": ["Unbounded retry without idempotency causes duplicate charges"]
+      },
+      "Codex": {
+        "oracle_name": "Codex",
+        "role": "implementation_feasibility",
+        "document_type": "spec",
+        "overall_verdict": "major_revision",
+        "findings": [
+          {
+            "title": "No idempotency contract makes the charge API unbuildable safely",
+            "severity": "critical",
+            "category": "api_contract",
+            "location": "Section 1",
+            "evidence": "no idempotency key",
+            "problem": "Implementers cannot deduplicate retried requests.",
+            "why_it_matters": "Duplicate side effects are guaranteed under network flap.",
+            "proposed_fix": "Specify an idempotency-key header and server-side dedup window.",
+            "confidence": 0.9
+          }
+        ],
+        "top_3_must_fix": ["No idempotency contract makes the charge API unbuildable safely"]
+      },
+      "Grok": {
+        "oracle_name": "Grok",
+        "role": "contrarian",
+        "document_type": "spec",
+        "overall_verdict": "major_revision",
+        "findings": [
+          {
+            "title": "Infinite retry is a self-inflicted denial of service",
+            "severity": "critical",
+            "category": "operational_risk",
+            "location": "Section 1",
+            "evidence": "retries failed charges indefinitely",
+            "problem": "A downstream outage turns into an unbounded retry storm.",
+            "why_it_matters": "The service amplifies any payment-provider outage.",
+            "proposed_fix": "Exponential backoff with a hard retry cap.",
+            "confidence": 0.9
+          }
+        ],
+        "top_3_must_fix": ["Infinite retry is a self-inflicted denial of service"]
+      },
+      "Gemini": {
+        "oracle_name": "Gemini",
+        "role": "domain_context",
+        "document_type": "spec",
+        "overall_verdict": "major_revision",
+        "findings": [
+          {
+            "title": "Card-network rules prohibit unbounded reauthorization attempts",
+            "severity": "critical",
+            "category": "governance",
+            "location": "Section 1",
+            "evidence": "retries failed charges indefinitely",
+            "problem": "Network rules cap retry attempts; violations incur fines.",
+            "why_it_matters": "Compliance break with the card networks.",
+            "proposed_fix": "Cap retries per network rules and document the limit.",
+            "confidence": 0.85
+          }
+        ],
+        "top_3_must_fix": ["Card-network rules prohibit unbounded reauthorization attempts"]
+      },
+      "Beth": {
+        "oracle_name": "Beth",
+        "role": "coordinator",
+        "revision_decisions": [
+          {
+            "issue_id": "BETH-R1-ISSUE-001",
+            "decision": "rejected_claim",
+            "reason": "Retry behavior is acceptable for the MVP."
+          }
+        ],
+        "serious_issues": [],
+        "feedback_themes": ["retry semantics"],
+        "architectural_risks_remaining": [],
+        "revised_sections": [],
+        "open_questions": [],
+        "convergence_status": "converging",
+        "recommendation": "LOCK",
+        "recommendation_reason": "Spec is good enough to proceed.",
+        "revised_draft": null
+      }
+    }
+  ]
+}

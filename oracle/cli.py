@@ -489,12 +489,23 @@ def register_pack(
     return slug
 
 
-def load_pack(pack_name: str, pack_dir: Path) -> tuple[dict, str]:
+def load_pack(pack_name: str, pack_dir: Path, verify: bool = True) -> tuple[dict, str]:
     """Load a rule pack by name from the library.
 
     Returns (pack_data, resolved_slug).
     Supports fuzzy name matching (Section 6.3).
+
+    WHY verify at load time: packs were previously validated only at
+    generate/import time (AUDIT B1). A pack file edited or corrupted on
+    disk after registration — including a promoted one — would feed the
+    review's compliance context unchecked. Both checks fail closed:
+      - the file's content hash must match the manifest entry recorded
+        at registration/promotion time (tamper and corruption detection;
+        legacy manifest entries without a hash skip this check)
+      - the pack must still validate against its JSON schema
     """
+    from oracle.pack_validator import validate_pack
+
     manifest = _load_manifest(pack_dir)
     resolved = _resolve_pack_name(pack_name, manifest)
     entry = manifest["packs"][resolved]
@@ -503,7 +514,29 @@ def load_pack(pack_name: str, pack_dir: Path) -> tuple[dict, str]:
     if not pack_path.exists():
         raise FileNotFoundError(f"Pack file missing: {pack_path}")
 
+    if verify:
+        expected_hash = entry.get("content_hash", "")
+        if expected_hash:
+            actual_hash = _compute_content_hash(pack_path)
+            if actual_hash != expected_hash:
+                raise ValueError(
+                    f"Pack '{resolved}' has been modified on disk since it was "
+                    f"registered (content hash mismatch). Re-register it with "
+                    f"add-pack --overwrite (and re-promote if needed) before "
+                    f"using it for review."
+                )
+
     pack_data = json.loads(pack_path.read_text(encoding="utf-8"))
+
+    if verify:
+        errors = validate_pack(pack_data)
+        if errors:
+            preview = "; ".join(errors[:5])
+            raise ValueError(
+                f"Pack '{resolved}' failed schema validation at load time "
+                f"({len(errors)} error(s)): {preview}"
+            )
+
     return pack_data, resolved
 
 
@@ -2038,6 +2071,147 @@ def run_review(
 # Findings Report (Section 8)
 # ---------------------------------------------------------------------------
 
+def _issue_sources(issue: dict) -> list[str]:
+    """Source-oracle attribution for a normalized issue, both workflow shapes.
+
+    Ledger (Sonnet referee) nests sources in merged_from dicts; the manual
+    workflow (Beth) lists names in source_reviewers.
+    """
+    sources: list[str] = []
+    for merged in issue.get("merged_from", []) or []:
+        if isinstance(merged, dict) and merged.get("oracle"):
+            if merged["oracle"] not in sources:
+                sources.append(merged["oracle"])
+    for reviewer in issue.get("source_reviewers", []) or []:
+        if isinstance(reviewer, str) and reviewer and reviewer not in sources:
+            sources.append(reviewer)
+    return sources
+
+
+def _format_reviewer_verdicts(session: Any) -> list[str]:
+    """Render the final valid round's per-reviewer verdicts.
+
+    WHY: each reviewer's overall_verdict is its headline stance on the
+    whole document. It was collected in every response and read by
+    nothing (AUDIT A3) — the reader could not see when the coordinator's
+    consensus claim diverged from the reviewers' own verdicts.
+    """
+    for r in reversed(session.rounds):
+        if not r.valid:
+            continue
+        verdicts = {
+            name: str(out.get("overall_verdict") or "").strip()
+            for name, out in r.reviewer_outputs.items()
+            if str(out.get("overall_verdict") or "").strip()
+        }
+        if not verdicts:
+            return []
+        lines = ["## Reviewer Verdicts (final round)", ""]
+        for name in sorted(verdicts):
+            lines.append(f"- **{name}**: {verdicts[name]}")
+        majors = sorted(n for n, v in verdicts.items() if v == "major_revision")
+        if majors and session.converged:
+            lines.append("")
+            lines.append(
+                f"> **Warning:** consensus was reported although "
+                f"{', '.join(majors)} returned verdict `major_revision`. "
+                f"The override is the coordinator's judgment — see Dissent Summary."
+            )
+        lines.append("")
+        return lines
+    return []
+
+
+def _format_dissent_summary(session: Any) -> list[str]:
+    """Render every rejected/unresolved finding with full coordinator reasoning.
+
+    WHY this section exists: the coordinator decides what enters the
+    revised draft, but dissent it declines must remain visible to the
+    reader with full fidelity — a rejection count is not dissent
+    (AUDIT A1, philosophy rule 4). Reasons are NOT truncated here.
+    """
+    entries: list[tuple[int, dict, dict | None]] = []
+    for r in session.rounds:
+        if not r.valid:
+            continue
+        issues_by_id = {
+            i.get("issue_id"): i
+            for i in r.normalized_issues.get("normalized_issues", [])
+            if i.get("issue_id")
+        }
+        for d in r.coordinator_decisions.get("revision_decisions", []):
+            if d.get("decision") in ("rejected_claim", "unresolved_question"):
+                entries.append((r.round_number, d, issues_by_id.get(d.get("issue_id"))))
+
+    if not entries:
+        return []
+
+    lines = [
+        "## Dissent Summary",
+        "",
+        "> The findings below were raised by reviewer oracles and NOT accepted "
+        "into the revised draft. The coordinator's reasoning is recorded in "
+        "full. A rejection is the coordinator's judgment, not a consensus "
+        "verdict — readers should weigh the reviewer's position themselves.",
+        "",
+    ]
+    for round_num, decision, issue in entries:
+        iid = decision.get("issue_id", "?")
+        label = (
+            "REJECTED BY COORDINATOR"
+            if decision.get("decision") == "rejected_claim"
+            else "UNRESOLVED QUESTION"
+        )
+        title = (issue or {}).get("title", "") or iid
+        lines.append(f"### [{label}] {title} ({iid}, round {round_num})")
+        if issue:
+            lines.append(f"**Severity (as raised):** {issue.get('severity', '?')}")
+            sources = _issue_sources(issue)
+            if sources:
+                lines.append(f"**Raised by:** {', '.join(sources)}")
+            if issue.get("conflict_flag"):
+                lines.append("**⚠ Direct conflict between reviewers on this issue**")
+        reason = decision.get("reason", "")
+        if reason:
+            lines.append(f"**Coordinator reasoning (full):** {reason}")
+        lines.append("")
+    return lines
+
+
+def _format_referee_drops(session: Any) -> list[str]:
+    """List reviewer findings the referee excluded before coordination.
+
+    WHY: dropped findings previously survived only as aggregate rates;
+    the findings themselves vanished (AUDIT A8). Listing them keeps the
+    referee's filtering auditable.
+    """
+    drops: list[tuple[int, dict]] = []
+    for r in session.rounds:
+        if not r.valid:
+            continue
+        for d in r.normalized_issues.get("dropped_findings", []):
+            if isinstance(d, dict):
+                drops.append((r.round_number, d))
+
+    if not drops:
+        return []
+
+    lines = [
+        "## Findings Dropped by Referee",
+        "",
+        "> The referee oracle excluded these reviewer findings before they "
+        "reached the coordinator. Listed for dissent fidelity.",
+        "",
+    ]
+    for round_num, d in drops:
+        lines.append(
+            f"- Round {round_num} — **{d.get('oracle', '?')}**: "
+            f"{d.get('title', '?')} (drop reason: {d.get('reason', '?')})"
+        )
+    lines.append("")
+    return lines
+
+
 def format_findings_report(
     session: Any,
     pack_dir: Path,
@@ -2077,6 +2251,18 @@ def format_findings_report(
         f"**Converged:** {'Yes' if session.converged else 'No'}",
         "",
     ]
+
+    # consensus_type distinguishes full agreement from agreement-with-residue
+    # and from a blocked stop (AUDIT A2) — getattr for pre-A2 session objects.
+    consensus_type = getattr(session, "consensus_type", "")
+    if consensus_type:
+        label = {
+            "full_agreement": "Full agreement",
+            "stable_with_notes": "Stable, with unresolved notes",
+            "blocked": "BLOCKED — stopped without consensus",
+        }.get(consensus_type, consensus_type)
+        lines.append(f"**Consensus:** {label}")
+        lines.append("")
 
     if session.convergence_reason:
         lines.append(f"**Convergence Reason:** {session.convergence_reason}")
@@ -2121,6 +2307,12 @@ def format_findings_report(
         "",
     ])
 
+    # --- Reviewer verdicts + Dissent Summary (AUDIT A3 + A1) — before
+    # per-round detail so dissent is impossible to miss in a skim read ---
+    lines.extend(_format_reviewer_verdicts(session))
+    lines.extend(_format_dissent_summary(session))
+    lines.extend(_format_referee_drops(session))
+
     # --- Per-Round Detail ---
     for r in session.rounds:
         if not r.valid:
@@ -2128,6 +2320,24 @@ def format_findings_report(
 
         lines.append(f"## Round {r.round_number}")
         lines.append("")
+
+        # Degraded-data disclosure (AUDIT B2): a truncated response that
+        # was partially salvaged means this round's finding set may be
+        # incomplete — the reader must know, not just the logs.
+        degraded = sorted(
+            name
+            for name, out in r.reviewer_outputs.items()
+            if isinstance(out, dict) and out.get("recovered_partial")
+        )
+        if r.coordinator_decisions.get("recovered_partial"):
+            degraded.append("Beth (coordinator)")
+        if degraded:
+            lines.append(
+                f"> **Degraded data:** the response(s) from "
+                f"{', '.join(degraded)} were truncated or malformed and only "
+                f"partially recovered. This round's finding set may be incomplete."
+            )
+            lines.append("")
 
         # Normalized issues
         issues = r.normalized_issues.get("normalized_issues", [])
@@ -2163,7 +2373,10 @@ def format_findings_report(
             lines.append("")
 
     # --- Open Questions ---
-    for r in session.rounds:
+    # Iterate newest-first: the LAST valid round's open questions are the
+    # freshest unresolved dissent. (Iterating oldest-first showed round 1's
+    # questions and dropped the final round's — AUDIT A10.)
+    for r in reversed(session.rounds):
         if not r.valid:
             continue
         open_qs = r.coordinator_decisions.get("open_questions", [])
@@ -2176,7 +2389,7 @@ def format_findings_report(
                 else:
                     lines.append(f"- {q}")
             lines.append("")
-            break  # Only show from the last valid round
+            break  # Only show the last valid round's open questions
 
     report = "\n".join(lines)
 

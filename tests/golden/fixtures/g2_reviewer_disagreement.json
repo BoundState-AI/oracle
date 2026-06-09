@@ -1,0 +1,108 @@
+{
+  "case": "g2_reviewer_disagreement",
+  "description": "Fran raises a critical finding that Beth rejects, and Grok raises a question Beth leaves unresolved. Neither may vanish: the findings report must carry a Dissent Summary with full attribution and Beth's untruncated reasoning (AUDIT A1).",
+  "workflow": "manual",
+  "document": "# Session Store Spec\n\nSessions are sticky to one app server. Failover loses active sessions.\n",
+  "rounds": [
+    {
+      "Fran": {
+        "oracle_name": "Fran",
+        "role": "adversarial_logic",
+        "document_type": "spec",
+        "overall_verdict": "revise",
+        "findings": [
+          {
+            "title": "Sticky sessions make failover lossy by design",
+            "severity": "critical",
+            "category": "operational_risk",
+            "location": "Section 1",
+            "evidence": "Failover loses active sessions.",
+            "problem": "Any single-server failure logs out every user pinned to it.",
+            "why_it_matters": "Availability target cannot be met with lossy failover.",
+            "proposed_fix": "Externalize session state to a shared store.",
+            "confidence": 0.9
+          }
+        ],
+        "top_3_must_fix": ["Sticky sessions make failover lossy by design"]
+      },
+      "Codex": {
+        "oracle_name": "Codex",
+        "role": "implementation_feasibility",
+        "document_type": "spec",
+        "overall_verdict": "approve_with_minor_changes",
+        "findings": [],
+        "top_3_must_fix": []
+      },
+      "Grok": {
+        "oracle_name": "Grok",
+        "role": "contrarian",
+        "document_type": "spec",
+        "overall_verdict": "revise",
+        "findings": [
+          {
+            "title": "Stateless tokens would remove the session store entirely",
+            "severity": "medium",
+            "category": "scope",
+            "location": "Section 1",
+            "evidence": "Sessions are sticky to one app server.",
+            "problem": "The spec assumes server-side sessions without justifying them over stateless tokens.",
+            "why_it_matters": "A simpler architecture may be being ruled out by default.",
+            "proposed_fix": "Document why server-side sessions were chosen.",
+            "confidence": 0.6
+          }
+        ],
+        "top_3_must_fix": ["Stateless tokens would remove the session store entirely"]
+      },
+      "Gemini": {
+        "oracle_name": "Gemini",
+        "role": "domain_context",
+        "document_type": "spec",
+        "overall_verdict": "approve_with_minor_changes",
+        "findings": [],
+        "top_3_must_fix": []
+      },
+      "Beth": {
+        "oracle_name": "Beth",
+        "role": "coordinator",
+        "revision_decisions": [
+          {
+            "issue_id": "BETH-R1-ISSUE-001",
+            "decision": "rejected_claim",
+            "reason": "Fran's failover-loss claim is real but out of scope for this revision: the deployment topology pins one server per tenant, so a server loss already implies tenant downtime regardless of session storage, and the customer has accepted session loss during failover in the signed SLA addendum dated 2026-03-02. Externalizing the store would add a hard dependency without changing the user-visible outcome."
+          },
+          {
+            "issue_id": "BETH-R1-ISSUE-002",
+            "decision": "unresolved_question",
+            "reason": "Stateless tokens vs server-side sessions is a genuine tradeoff the product owner must decide; both are viable."
+          }
+        ],
+        "serious_issues": [
+          {
+            "issue_id": "BETH-R1-ISSUE-001",
+            "title": "Sticky sessions make failover lossy by design",
+            "severity": "critical",
+            "source_reviewers": ["Fran"],
+            "summary": "Failover drops active sessions for users pinned to the failed server.",
+            "resolution": "Rejected: accepted SLA tradeoff, see decision reason."
+          },
+          {
+            "issue_id": "BETH-R1-ISSUE-002",
+            "title": "Stateless tokens would remove the session store entirely",
+            "severity": "medium",
+            "source_reviewers": ["Grok"],
+            "summary": "Server-side sessions are assumed, not justified.",
+            "resolution": "Escalated as an open product question."
+          }
+        ],
+        "feedback_themes": ["session architecture"],
+        "architectural_risks_remaining": [],
+        "revised_sections": [],
+        "open_questions": ["Should sessions be stateless tokens or server-side state?"],
+        "convergence_status": "converging",
+        "recommendation": "LOCK",
+        "recommendation_reason": "No accepted defects remain.",
+        "revised_draft": null
+      }
+    }
+  ]
+}

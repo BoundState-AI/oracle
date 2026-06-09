@@ -60,11 +60,12 @@ class PackCitation:
 
 @dataclass
 class NormalizedIssue:
-    """A single finding from Sonnet's normalization pass.
+    """A single normalized finding.
 
-    Maps from oracle2's round*_sonnet_normalized.json → normalized_issues[].
-    The evidence_text field preserves citation-bearing prose for pack_citation
-    extraction.
+    Maps from oracle2's round*_sonnet_normalized.json (ledger workflow,
+    Sonnet referee shape) or round*_beth_normalized.json (manual workflow,
+    Beth serious_issues shape) → normalized_issues[]. The evidence_text
+    field preserves citation-bearing prose for pack_citation extraction.
     """
     issue_id: str                   # e.g., "R1-ISSUE-003"
     title: str
@@ -130,6 +131,10 @@ class ReviewResult:
     converged: bool                     # Whether review reached convergence
     total_rounds: int
     metrics: MetricsSummary             # Aggregated metrics for findings report
+    # full_agreement | stable_with_notes | blocked | "" (pre-A2 sessions).
+    # Carried so deliverable labels can distinguish agreement from a
+    # blocked stop instead of collapsing both into one bool (AUDIT A2/F2).
+    consensus_type: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +147,8 @@ def verify_session_dir(session_dir: Path) -> list[str]:
     Returns a list of error messages. Empty list = preflight passed.
     Checks for:
       1. session_summary.json with session_id and total_rounds
-      2. At least one round*_sonnet_normalized.json
+      2. At least one normalized-issues file: round*_sonnet_normalized.json
+         (ledger workflow) or round*_beth_normalized.json (manual workflow)
       3. final_draft.md
     """
     errors: list[str] = []
@@ -162,10 +168,18 @@ def verify_session_dir(session_dir: Path) -> list[str]:
         except json.JSONDecodeError as e:
             errors.append(f"session_summary.json is not valid JSON: {e}")
 
-    # 2. At least one normalized file
-    normalized_files = sorted(session_dir.glob("round*_sonnet_normalized.json"))
+    # 2. At least one normalized file. The filename differs by workflow:
+    # the ledger workflow's referee writes *_sonnet_normalized.json, the
+    # manual (default) workflow writes *_beth_normalized.json. Globbing
+    # only one of them silently dropped every normalized issue from the
+    # default workflow (AUDIT F1) — both spellings are first-class.
+    normalized_files = sorted(session_dir.glob("round*_sonnet_normalized.json")) + sorted(
+        session_dir.glob("round*_beth_normalized.json")
+    )
     if not normalized_files:
-        errors.append("No round*_sonnet_normalized.json files found")
+        errors.append(
+            "No round*_sonnet_normalized.json or round*_beth_normalized.json files found"
+        )
 
     # 3. final_draft.md
     if not (session_dir / "final_draft.md").exists():
@@ -174,7 +188,7 @@ def verify_session_dir(session_dir: Path) -> list[str]:
     if errors:
         LOGGER.error(
             f"oracle2 session directory structure is incompatible.\n"
-            f"  Expected: session_summary.json, round*_sonnet_normalized.json, final_draft.md\n"
+            f"  Expected: session_summary.json, round*_{{sonnet,beth}}_normalized.json, final_draft.md\n"
             f"  Found: {', '.join(actual_files[:20])}\n"
             f"  Errors: {'; '.join(errors)}\n"
             f"  The oracle2_adapter may need updating for this version of oracle2."
@@ -248,8 +262,13 @@ def _parse_normalized_issues(
     file_path: Path,
     compliance_context: str | None = None,
 ) -> list[NormalizedIssue]:
-    """Parse a round*_sonnet_normalized.json into NormalizedIssue objects.
+    """Parse a normalized-issues round file into NormalizedIssue objects.
 
+    Accepts both per-workflow shapes:
+      - ledger (Sonnet referee): core_problem / best_evidence /
+        recommended_fix / merged_from=[{oracle, title}]
+      - manual (Beth serious_issues): summary / resolution /
+        source_reviewers=["Fran", ...]
     Handles both the nested {"normalized_issues": [...]} format and
     bare list format.
     """
@@ -273,25 +292,32 @@ def _parse_normalized_issues(
         if not isinstance(item, dict):
             continue
 
-        # evidence_text: prefer best_evidence, fall back to core_problem + recommended_fix
+        core_problem = item.get("core_problem") or item.get("summary", "")
+        recommended_fix = item.get("recommended_fix") or item.get("resolution", "")
+
+        # evidence_text: prefer best_evidence, fall back to problem + fix prose
         evidence = item.get("best_evidence", "")
         if not evidence:
-            evidence = f"{item.get('core_problem', '')} {item.get('recommended_fix', '')}"
+            evidence = f"{core_problem} {recommended_fix}".strip()
 
-        # Extract source oracles from merged_from list
+        # Source oracles: ledger shape nests them in merged_from dicts,
+        # manual shape lists names directly in source_reviewers.
         source_oracles: list[str] = []
         for merged in item.get("merged_from", []):
-            oracle_name = merged.get("oracle", "")
+            oracle_name = merged.get("oracle", "") if isinstance(merged, dict) else ""
             if oracle_name and oracle_name not in source_oracles:
                 source_oracles.append(oracle_name)
+        for reviewer in item.get("source_reviewers", []):
+            if isinstance(reviewer, str) and reviewer and reviewer not in source_oracles:
+                source_oracles.append(reviewer)
 
         issue = NormalizedIssue(
             issue_id=item.get("issue_id", "UNKNOWN"),
             title=item.get("title", "Untitled"),
             severity=item.get("severity", "medium"),
             category=item.get("category", ""),
-            core_problem=item.get("core_problem", ""),
-            recommended_fix=item.get("recommended_fix", ""),
+            core_problem=core_problem,
+            recommended_fix=recommended_fix,
             source_oracles=source_oracles,
             evidence_text=evidence,
             pack_citations=extract_pack_citations(evidence, compliance_context),
@@ -374,6 +400,25 @@ def build_review_result(
     total_rounds = summary.get("total_rounds", 0)
     converged = summary.get("converged", False)
 
+    # Fail hard on the out-of-sync signature (AUDIT F1): a session that
+    # claims convergence must have produced normalized-issue files. If it
+    # converged and none are readable, the adapter no longer understands
+    # this oracle2 version's output — continuing would silently report
+    # zero issues and unknown severities for a "successful" review.
+    # Non-converged sessions (e.g., every round invalid after a vendor
+    # outage) legitimately have no normalized files and parse to rounds=[].
+    has_normalized_files = any(
+        (session_dir / f"round{n}_{source}_normalized.json").exists()
+        for n in range(1, total_rounds + 1)
+        for source in ("sonnet", "beth")
+    )
+    if converged and total_rounds > 0 and not has_normalized_files:
+        raise ValueError(
+            "Session reports convergence but contains no normalized issue "
+            "files (round*_sonnet_normalized.json / round*_beth_normalized.json) "
+            "— oracle2_adapter is out of sync with the workflow output."
+        )
+
     # --- Final draft ---
     final_draft_path = session_dir / "final_draft.md"
     final_draft = final_draft_path.read_text(encoding="utf-8")
@@ -381,8 +426,10 @@ def build_review_result(
     # --- Build rounds ---
     rounds: list[RoundData] = []
     for round_num in range(1, total_rounds + 1):
-        # Normalized issues
+        # Normalized issues — ledger filename first, then manual
         norm_path = session_dir / f"round{round_num}_sonnet_normalized.json"
+        if not norm_path.exists():
+            norm_path = session_dir / f"round{round_num}_beth_normalized.json"
         normalized = _parse_normalized_issues(norm_path, compliance_context) if norm_path.exists() else []
 
         # Coordinator decisions
@@ -413,6 +460,7 @@ def build_review_result(
         converged=converged,
         total_rounds=total_rounds,
         metrics=metrics,
+        consensus_type=summary.get("consensus_type", ""),
     )
 
 
@@ -444,7 +492,18 @@ def _compute_metrics(rounds: list[RoundData]) -> MetricsSummary:
         for dec in rd.coordinator_decisions:
             if dec.decision == "accepted_defect":
                 total_accepted += 1
-                sev = severity_map.get(dec.issue_id, "medium")
+                # WHY "unknown": defaulting a missing severity to "medium"
+                # silently downgraded accepted criticals whenever the
+                # decision's issue_id had no matching normalized issue
+                # (AUDIT F1). An unmatched ID is a data problem to surface,
+                # not a severity to invent.
+                sev = severity_map.get(dec.issue_id)
+                if sev is None:
+                    LOGGER.warning(
+                        "Accepted defect %s has no matching normalized issue; "
+                        "severity recorded as unknown", dec.issue_id,
+                    )
+                    sev = "unknown"
                 accepted_by_severity[sev] = accepted_by_severity.get(sev, 0) + 1
 
                 # Track last round with critical/high acceptance

@@ -10,11 +10,12 @@ Flow:
   Round 2: Beth classifies findings, revises draft
   Round 3+: Re-review changed sections until convergence
 
-Convergence:
-  - No new critical findings
-  - New high findings <= 1
-  - Delta in accepted defects < 10%
-  - Same unresolved tradeoff repeats twice
+Convergence (ledger workflow):
+  - No critical findings remain
+  - High findings <= 1
+  - Issue set stable (>80% issue_id overlap between valid rounds)
+  - A tradeoff repeating unresolved across rounds STOPS the loop but is
+    reported as blocked, never as consensus (consensus_type="blocked")
 
 __safety_critical__: bool = True — multi-oracle compliance review engine
 
@@ -802,6 +803,12 @@ PROVIDER_DISPATCH = {
 
 MAX_RETRIES = 3
 RETRY_BACKOFF = (2, 4, 8)  # seconds
+# WHY 2: one invalid round can be a transient blip (rate limit, brief
+# outage); two in a row means a vendor is systemically down and further
+# rounds only burn spend on the healthy vendors (AUDIT C2).
+MAX_CONSECUTIVE_INVALID_ROUNDS = int(
+    os.environ.get("ORACLE_MAX_CONSECUTIVE_INVALID_ROUNDS", "2")
+)
 GEMINI_FALLBACK_ERROR_STATUSES = ("429", "500", "502", "503", "504")
 
 
@@ -848,6 +855,10 @@ def call_oracle(config: OracleConfig, user_message: str) -> dict:
                 continue
 
             findings_count = len(result.get("findings", result.get("normalized_issues", [])))
+            if result.get("recovered_partial"):
+                LOGGER.warning(
+                    f"[{config.name}] DEGRADED: {result.get('recovery_note', 'partial recovery')}"
+                )
             LOGGER.info(f"[{config.name}] Done in {elapsed:.1f}s — {findings_count} findings")
             return result
 
@@ -1145,6 +1156,24 @@ def _recover_truncated_json(text: str, oracle_name: str) -> dict:
         LOGGER.error(f"[{oracle_name}] Could not recover any content from malformed response")
         result["error"] = "Malformed JSON, no recoverable content"
         result["raw"] = text[:2000]
+    else:
+        # WHY flag the salvage: a partially recovered response used to be
+        # indistinguishable from a complete one, so a reviewer whose last
+        # N findings were truncated participated in convergence as if it
+        # had said everything it had to say (AUDIT B2). The flag persists
+        # into the round files and surfaces in the findings report.
+        result["recovered_partial"] = True
+        salvaged: dict[str, int] = {
+            f: len(result[f])
+            for f in ("revision_decisions", "normalized_issues", "findings")
+            if result.get(f)
+        }
+        if "revised_draft" in result and isinstance(result["revised_draft"], str):
+            salvaged["revised_draft_chars"] = len(result["revised_draft"])
+        result["recovery_note"] = (
+            f"Response was malformed/truncated; salvaged {salvaged}. "
+            f"The full response may have contained more content."
+        )
 
     return result
 
@@ -1190,6 +1219,15 @@ class OracleSession:
     rounds: list[ReviewRound] = field(default_factory=list)
     converged: bool = False
     convergence_reason: str = ""
+    # WHY consensus_type: "converged: bool" alone cannot distinguish
+    # "everyone agrees" from "the loop stopped on a standing disagreement".
+    # Collapsing those was AUDIT finding A2 (false consensus). Values:
+    #   full_agreement    — converged, no outstanding high findings
+    #   stable_with_notes — converged, but open questions / 1 high remain
+    #   blocked           — stopped WITHOUT consensus (repeated tradeoff,
+    #                       human-review escalation, or exhausted rounds)
+    #   ""                — loop has not stopped yet
+    consensus_type: str = ""
 
 
 def _with_system_prompt(config: OracleConfig, system_prompt: str) -> OracleConfig:
@@ -1382,32 +1420,103 @@ def _build_coordinator_message(
     return msg
 
 
-def _check_convergence(session: OracleSession) -> tuple[bool, str]:
-    """Check if the review loop should stop.
+def _reviewer_verdicts(review_round: ReviewRound) -> dict[str, str]:
+    """Map oracle name -> overall_verdict for a round's reviewer outputs.
+
+    Outputs without a verdict (errored reviewers, models that omitted the
+    field) are excluded — absence of a verdict is not a verdict.
+    """
+    verdicts: dict[str, str] = {}
+    for name, output in review_round.reviewer_outputs.items():
+        verdict = str(output.get("overall_verdict") or "").strip().lower()
+        if verdict:
+            verdicts[name] = verdict
+    return verdicts
+
+
+def _apply_verdict_consistency(
+    review_round: ReviewRound,
+    converged: bool,
+    consensus_type: str,
+    reason: str,
+) -> tuple[bool, str, str]:
+    """Cross-check a consensus claim against final-round reviewer verdicts.
+
+    WHY: reviewers emit overall_verdict in every response, but no code read
+    it — a coordinator LOCK could silently override four major_revision
+    verdicts (AUDIT A3). Policy (Phase 2 handoff, Q1):
+      - UNANIMOUS major_revision from every reviewer that reported a
+        verdict (and every reviewer reported one) -> hard block: the run
+        escalates to human review instead of reporting consensus.
+        Unanimity is the one case where "the coordinator knows better
+        than all reviewers" has no defensible reading.
+      - PARTIAL major_revision dissent -> consensus stands, but the
+        override is disclosed in the convergence reason and the outcome
+        is downgraded to stable_with_notes. The system discloses who
+        decided; it does not re-decide.
+    Returns possibly-modified (converged, consensus_type, reason).
+    """
+    if not converged:
+        return converged, consensus_type, reason
+
+    verdicts = _reviewer_verdicts(review_round)
+    majors = sorted(name for name, v in verdicts.items() if v == "major_revision")
+    all_reported = len(verdicts) == len(review_round.reviewer_outputs) and bool(verdicts)
+
+    if majors and all_reported and len(majors) == len(verdicts):
+        return (
+            False,
+            "blocked",
+            f"Coordinator reported consensus but ALL reviewers returned "
+            f"verdict major_revision ({', '.join(majors)}) — escalating to "
+            f"human review instead of overriding a unanimous verdict",
+        )
+
+    if majors:
+        disclosure = (
+            f" | Reviewer verdict override disclosed: {', '.join(majors)} "
+            f"returned major_revision and were overridden by the coordinator"
+        )
+        return True, "stable_with_notes", reason + disclosure
+
+    return converged, consensus_type, reason
+
+
+def _check_convergence(session: OracleSession) -> tuple[bool, bool, str, str]:
+    """Check if the review loop should stop, and whether stopping means consensus.
+
+    Returns (stop, converged, consensus_type, reason).
+
+    WHY stop != converged: a tradeoff that repeats unresolved across two
+    valid rounds means further rounds will not settle it — the loop must
+    stop — but that outcome is a standing DISAGREEMENT. Reporting it as
+    convergence was AUDIT finding A2 (false consensus). The repeated
+    tradeoff stops the loop with converged=False / consensus_type="blocked".
 
     Only compares valid rounds. Invalid rounds are skipped entirely.
 
-    Convergence criteria:
+    Criteria:
     1. No critical findings remain
     2. High findings <= 1
     3. Issue set stability: >80% of issue_ids overlap between rounds
-    4. Any single unresolved tradeoff appears in 2+ consecutive valid rounds
+    4. Any unresolved tradeoff repeating in 2+ consecutive valid rounds
+       stops the loop as blocked (NOT as convergence)
     """
     previous, current = _last_two_valid_rounds(session)
     if previous is None or current is None:
-        return False, "Need at least 2 valid rounds"
+        return False, False, "", "Need at least 2 valid rounds"
 
     issues = current.normalized_issues.get("normalized_issues", [])
 
     # 1. No critical findings
     critical = [i for i in issues if i.get("severity") == "critical"]
     if critical:
-        return False, f"{len(critical)} critical findings remain"
+        return False, False, "", f"{len(critical)} critical findings remain"
 
     # 2. High findings <= 1
     high = [i for i in issues if i.get("severity") == "high"]
     if len(high) > 1:
-        return False, f"{len(high)} high findings remain"
+        return False, False, "", f"{len(high)} high findings remain"
 
     # 3. Issue set stability (by issue_id, not count)
     current_ids = {i.get("issue_id") for i in issues if i.get("issue_id")}
@@ -1416,7 +1525,7 @@ def _check_convergence(session: OracleSession) -> tuple[bool, str]:
     if current_ids and prev_ids:
         overlap = len(current_ids & prev_ids) / max(len(current_ids | prev_ids), 1)
         if overlap < 0.8:
-            return False, f"Issue set unstable: {overlap:.0%} overlap ({len(current_ids)} vs {len(prev_ids)})"
+            return False, False, "", f"Issue set unstable: {overlap:.0%} overlap ({len(current_ids)} vs {len(prev_ids)})"
     elif not current_ids and not prev_ids:
         overlap = 1.0  # Both empty = stable
     elif not current_ids and prev_ids:
@@ -1424,17 +1533,39 @@ def _check_convergence(session: OracleSession) -> tuple[bool, str]:
         overlap = 1.0
     else:
         # No prior issues but new ones appeared — not stable
-        overlap = 0.0
-        return False, f"Issue set unstable: new issues appeared ({len(current_ids)} vs {len(prev_ids)})"
+        return False, False, "", f"Issue set unstable: new issues appeared ({len(current_ids)} vs {len(prev_ids)})"
 
-    # 4. Same unresolved tradeoff repeats across valid rounds
+    # 4. Same unresolved tradeoff repeats across valid rounds: STOP as
+    # blocked. Further automated rounds cannot resolve a question the
+    # coordinator has twice declined to decide — but that is dissent to
+    # surface, not consensus to report.
     current_open = set(current.coordinator_decisions.get("open_questions", []))
     prev_open = set(previous.coordinator_decisions.get("open_questions", []))
     repeated = current_open & prev_open
     if repeated:
-        return True, f"Converged (repeated tradeoffs: {repeated})"
+        return (
+            True,
+            False,
+            "blocked",
+            f"Blocked: unresolved tradeoff(s) repeated across rounds, "
+            f"needs human decision: {sorted(repeated)}",
+        )
 
-    return True, f"Converged: {len(high)} high, issue overlap {overlap:.0%}"
+    # WHY stable_with_notes: converging with an outstanding high finding
+    # or open questions is agreement-with-residue, and the report must
+    # not present it as full agreement (AUDIT finding A4).
+    if high or current_open:
+        consensus_type = "stable_with_notes"
+        residue = []
+        if high:
+            residue.append(
+                "unresolved high: " + "; ".join(str(i.get("title", i.get("issue_id", "?"))) for i in high)
+            )
+        if current_open:
+            residue.append(f"open questions: {sorted(current_open)}")
+        return True, True, consensus_type, f"Converged with notes — {' | '.join(residue)}"
+
+    return True, True, "full_agreement", f"Converged: 0 high, issue overlap {overlap:.0%}"
 
 
 def _run_manual_round(
@@ -1548,19 +1679,38 @@ def _run_manual_round(
     reason = str(beth_response.get("recommendation_reason") or "").strip()
 
     if recommendation == "LOCK":
-        session.converged = True
-        session.convergence_reason = reason or "Beth recommended LOCK"
-        LOGGER.info(f"\nLocked after round {round_num}: {session.convergence_reason}")
+        # LOCK with open questions is agreement-with-residue, not full
+        # agreement — the distinction must survive to the report (AUDIT A2/A4).
+        open_questions = beth_response.get("open_questions") or []
+        consensus_type = "stable_with_notes" if open_questions else "full_agreement"
+        converged, consensus_type, lock_reason = _apply_verdict_consistency(
+            review_round,
+            True,
+            consensus_type,
+            reason or "Beth recommended LOCK",
+        )
+        session.converged = converged
+        session.consensus_type = consensus_type
+        session.convergence_reason = lock_reason
+        if converged:
+            LOGGER.info(f"\nLocked after round {round_num}: {session.convergence_reason}")
+        else:
+            LOGGER.warning(
+                f"\nLOCK blocked by reviewer verdicts after round {round_num}: "
+                f"{session.convergence_reason}"
+            )
         return review_round, True
 
     if recommendation == "HUMAN_REVIEW":
         session.converged = False
+        session.consensus_type = "blocked"
         session.convergence_reason = reason or "Beth recommended HUMAN_REVIEW"
         LOGGER.info(f"\nStopping for human review after round {round_num}: {session.convergence_reason}")
         return review_round, True
 
     if round_num >= max_rounds:
         session.converged = False
+        session.consensus_type = "blocked"
         session.convergence_reason = (
             reason or f"Reached max rounds ({max_rounds}) without LOCK"
         )
@@ -1683,15 +1833,22 @@ def _run_round(
 
     session.rounds.append(review_round)
 
-    converged, reason = _check_convergence(session)
-    if converged:
-        session.converged = True
+    stop, converged, consensus_type, reason = _check_convergence(session)
+    if stop:
+        converged, consensus_type, reason = _apply_verdict_consistency(
+            review_round, converged, consensus_type, reason
+        )
+        session.converged = converged
+        session.consensus_type = consensus_type
         session.convergence_reason = reason
-        LOGGER.info(f"\nConverged after round {round_num}: {reason}")
+        if converged:
+            LOGGER.info(f"\nConverged after round {round_num}: {reason}")
+        else:
+            LOGGER.warning(f"\nStopped WITHOUT consensus after round {round_num}: {reason}")
     else:
         LOGGER.info(f"\nNot converged: {reason}")
 
-    return review_round, converged
+    return review_round, stop
 
 
 def run_review(
@@ -1724,6 +1881,7 @@ def run_review(
         output_dir = Path("oracle_reviews") / session_id
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    consecutive_invalid = 0
     for round_num in range(1, max_rounds + 1):
         LOGGER.info(f"\n{'='*60}\nRound {round_num}\n{'='*60}")
         if workflow == "manual":
@@ -1739,6 +1897,36 @@ def run_review(
         if should_stop:
             break
 
+        # WHY abort on consecutive invalid rounds: with a vendor hard-down,
+        # every retry of the round re-pays the three healthy vendors and
+        # still produces nothing. Two consecutive invalid rounds means the
+        # failure is systemic, not transient — burning the remaining round
+        # budget cannot help (AUDIT C2).
+        if session.rounds and not session.rounds[-1].valid:
+            consecutive_invalid += 1
+        else:
+            consecutive_invalid = 0
+        if consecutive_invalid >= MAX_CONSECUTIVE_INVALID_ROUNDS:
+            session.converged = False
+            session.consensus_type = "blocked"
+            session.convergence_reason = (
+                f"Aborted after {consecutive_invalid} consecutive invalid rounds "
+                f"(oracle failures) — the document was NOT fully reviewed"
+            )
+            LOGGER.error(f"\n{session.convergence_reason}")
+            break
+
+    # A run must never end without explaining its outcome — an empty
+    # reason on a non-converged session previously left readers unable to
+    # tell a failed run from a quietly stopped one (AUDIT C2/F2).
+    if not session.converged and not session.convergence_reason:
+        valid_rounds = sum(1 for r in session.rounds if r.valid)
+        session.consensus_type = session.consensus_type or "blocked"
+        session.convergence_reason = (
+            f"Stopped at max rounds ({max_rounds}) without convergence "
+            f"({valid_rounds}/{len(session.rounds)} rounds valid)"
+        )
+
     # Save final state
     (output_dir / "final_draft.md").write_text(encoding="utf-8", data=session.canonical_draft)
     summary = {
@@ -1747,6 +1935,7 @@ def run_review(
         "workflow": workflow,
         "total_rounds": len(session.rounds),
         "converged": session.converged,
+        "consensus_type": session.consensus_type,
         "convergence_reason": session.convergence_reason,
         "total_findings_by_round": [
             {
@@ -1836,6 +2025,7 @@ def compute_metrics(session: OracleSession) -> dict:
         "rounds_to_stability": len(session.rounds),
         "valid_rounds": valid_rounds,
         "converged": session.converged,
+        "consensus_type": session.consensus_type,
     }
 
 
