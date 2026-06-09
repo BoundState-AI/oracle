@@ -489,12 +489,23 @@ def register_pack(
     return slug
 
 
-def load_pack(pack_name: str, pack_dir: Path) -> tuple[dict, str]:
+def load_pack(pack_name: str, pack_dir: Path, verify: bool = True) -> tuple[dict, str]:
     """Load a rule pack by name from the library.
 
     Returns (pack_data, resolved_slug).
     Supports fuzzy name matching (Section 6.3).
+
+    WHY verify at load time: packs were previously validated only at
+    generate/import time (AUDIT B1). A pack file edited or corrupted on
+    disk after registration — including a promoted one — would feed the
+    review's compliance context unchecked. Both checks fail closed:
+      - the file's content hash must match the manifest entry recorded
+        at registration/promotion time (tamper and corruption detection;
+        legacy manifest entries without a hash skip this check)
+      - the pack must still validate against its JSON schema
     """
+    from oracle.pack_validator import validate_pack
+
     manifest = _load_manifest(pack_dir)
     resolved = _resolve_pack_name(pack_name, manifest)
     entry = manifest["packs"][resolved]
@@ -503,7 +514,29 @@ def load_pack(pack_name: str, pack_dir: Path) -> tuple[dict, str]:
     if not pack_path.exists():
         raise FileNotFoundError(f"Pack file missing: {pack_path}")
 
+    if verify:
+        expected_hash = entry.get("content_hash", "")
+        if expected_hash:
+            actual_hash = _compute_content_hash(pack_path)
+            if actual_hash != expected_hash:
+                raise ValueError(
+                    f"Pack '{resolved}' has been modified on disk since it was "
+                    f"registered (content hash mismatch). Re-register it with "
+                    f"add-pack --overwrite (and re-promote if needed) before "
+                    f"using it for review."
+                )
+
     pack_data = json.loads(pack_path.read_text(encoding="utf-8"))
+
+    if verify:
+        errors = validate_pack(pack_data)
+        if errors:
+            preview = "; ".join(errors[:5])
+            raise ValueError(
+                f"Pack '{resolved}' failed schema validation at load time "
+                f"({len(errors)} error(s)): {preview}"
+            )
+
     return pack_data, resolved
 
 
