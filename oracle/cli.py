@@ -2212,6 +2212,36 @@ def _format_referee_drops(session: Any) -> list[str]:
     return lines
 
 
+def _format_drift_section(session: Any) -> list[str]:
+    """Render abandoned-finding drift events (AUDIT A5).
+
+    Disclosure only: drift detection is heuristic and never gates
+    convergence — the reader weighs it, the system does not act on it.
+    """
+    from oracle.drift import detect_drift
+
+    events = detect_drift(session)
+    if not events:
+        return []
+
+    lines = [
+        "## Position Changes (Drift Watch)",
+        "",
+        "> A reviewer abandoned a critical/high finding between rounds even "
+        "though the draft text it pointed to did not change. This is a "
+        "possible sycophancy signal to weigh, not a verdict — detection is "
+        "heuristic and report-only.",
+        "",
+    ]
+    for e in events:
+        lines.append(
+            f"- Round {e.round_from}→{e.round_to} — **{e.oracle}** dropped "
+            f"[{e.severity.upper()}] \"{e.title}\" — {e.reason}"
+        )
+    lines.append("")
+    return lines
+
+
 def format_findings_report(
     session: Any,
     pack_dir: Path,
@@ -2306,6 +2336,7 @@ def format_findings_report(
     lines.extend(_format_reviewer_verdicts(session))
     lines.extend(_format_dissent_summary(session))
     lines.extend(_format_referee_drops(session))
+    lines.extend(_format_drift_section(session))
 
     # --- Per-Round Detail ---
     for r in session.rounds:
