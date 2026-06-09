@@ -10,11 +10,12 @@ Flow:
   Round 2: Beth classifies findings, revises draft
   Round 3+: Re-review changed sections until convergence
 
-Convergence:
-  - No new critical findings
-  - New high findings <= 1
-  - Delta in accepted defects < 10%
-  - Same unresolved tradeoff repeats twice
+Convergence (ledger workflow):
+  - No critical findings remain
+  - High findings <= 1
+  - Issue set stable (>80% issue_id overlap between valid rounds)
+  - A tradeoff repeating unresolved across rounds STOPS the loop but is
+    reported as blocked, never as consensus (consensus_type="blocked")
 
 __safety_critical__: bool = True — multi-oracle compliance review engine
 
@@ -1190,6 +1191,15 @@ class OracleSession:
     rounds: list[ReviewRound] = field(default_factory=list)
     converged: bool = False
     convergence_reason: str = ""
+    # WHY consensus_type: "converged: bool" alone cannot distinguish
+    # "everyone agrees" from "the loop stopped on a standing disagreement".
+    # Collapsing those was AUDIT finding A2 (false consensus). Values:
+    #   full_agreement    — converged, no outstanding high findings
+    #   stable_with_notes — converged, but open questions / 1 high remain
+    #   blocked           — stopped WITHOUT consensus (repeated tradeoff,
+    #                       human-review escalation, or exhausted rounds)
+    #   ""                — loop has not stopped yet
+    consensus_type: str = ""
 
 
 def _with_system_prompt(config: OracleConfig, system_prompt: str) -> OracleConfig:
@@ -1382,32 +1392,41 @@ def _build_coordinator_message(
     return msg
 
 
-def _check_convergence(session: OracleSession) -> tuple[bool, str]:
-    """Check if the review loop should stop.
+def _check_convergence(session: OracleSession) -> tuple[bool, bool, str, str]:
+    """Check if the review loop should stop, and whether stopping means consensus.
+
+    Returns (stop, converged, consensus_type, reason).
+
+    WHY stop != converged: a tradeoff that repeats unresolved across two
+    valid rounds means further rounds will not settle it — the loop must
+    stop — but that outcome is a standing DISAGREEMENT. Reporting it as
+    convergence was AUDIT finding A2 (false consensus). The repeated
+    tradeoff stops the loop with converged=False / consensus_type="blocked".
 
     Only compares valid rounds. Invalid rounds are skipped entirely.
 
-    Convergence criteria:
+    Criteria:
     1. No critical findings remain
     2. High findings <= 1
     3. Issue set stability: >80% of issue_ids overlap between rounds
-    4. Any single unresolved tradeoff appears in 2+ consecutive valid rounds
+    4. Any unresolved tradeoff repeating in 2+ consecutive valid rounds
+       stops the loop as blocked (NOT as convergence)
     """
     previous, current = _last_two_valid_rounds(session)
     if previous is None or current is None:
-        return False, "Need at least 2 valid rounds"
+        return False, False, "", "Need at least 2 valid rounds"
 
     issues = current.normalized_issues.get("normalized_issues", [])
 
     # 1. No critical findings
     critical = [i for i in issues if i.get("severity") == "critical"]
     if critical:
-        return False, f"{len(critical)} critical findings remain"
+        return False, False, "", f"{len(critical)} critical findings remain"
 
     # 2. High findings <= 1
     high = [i for i in issues if i.get("severity") == "high"]
     if len(high) > 1:
-        return False, f"{len(high)} high findings remain"
+        return False, False, "", f"{len(high)} high findings remain"
 
     # 3. Issue set stability (by issue_id, not count)
     current_ids = {i.get("issue_id") for i in issues if i.get("issue_id")}
@@ -1416,7 +1435,7 @@ def _check_convergence(session: OracleSession) -> tuple[bool, str]:
     if current_ids and prev_ids:
         overlap = len(current_ids & prev_ids) / max(len(current_ids | prev_ids), 1)
         if overlap < 0.8:
-            return False, f"Issue set unstable: {overlap:.0%} overlap ({len(current_ids)} vs {len(prev_ids)})"
+            return False, False, "", f"Issue set unstable: {overlap:.0%} overlap ({len(current_ids)} vs {len(prev_ids)})"
     elif not current_ids and not prev_ids:
         overlap = 1.0  # Both empty = stable
     elif not current_ids and prev_ids:
@@ -1424,17 +1443,39 @@ def _check_convergence(session: OracleSession) -> tuple[bool, str]:
         overlap = 1.0
     else:
         # No prior issues but new ones appeared — not stable
-        overlap = 0.0
-        return False, f"Issue set unstable: new issues appeared ({len(current_ids)} vs {len(prev_ids)})"
+        return False, False, "", f"Issue set unstable: new issues appeared ({len(current_ids)} vs {len(prev_ids)})"
 
-    # 4. Same unresolved tradeoff repeats across valid rounds
+    # 4. Same unresolved tradeoff repeats across valid rounds: STOP as
+    # blocked. Further automated rounds cannot resolve a question the
+    # coordinator has twice declined to decide — but that is dissent to
+    # surface, not consensus to report.
     current_open = set(current.coordinator_decisions.get("open_questions", []))
     prev_open = set(previous.coordinator_decisions.get("open_questions", []))
     repeated = current_open & prev_open
     if repeated:
-        return True, f"Converged (repeated tradeoffs: {repeated})"
+        return (
+            True,
+            False,
+            "blocked",
+            f"Blocked: unresolved tradeoff(s) repeated across rounds, "
+            f"needs human decision: {sorted(repeated)}",
+        )
 
-    return True, f"Converged: {len(high)} high, issue overlap {overlap:.0%}"
+    # WHY stable_with_notes: converging with an outstanding high finding
+    # or open questions is agreement-with-residue, and the report must
+    # not present it as full agreement (AUDIT finding A4).
+    if high or current_open:
+        consensus_type = "stable_with_notes"
+        residue = []
+        if high:
+            residue.append(
+                "unresolved high: " + "; ".join(str(i.get("title", i.get("issue_id", "?"))) for i in high)
+            )
+        if current_open:
+            residue.append(f"open questions: {sorted(current_open)}")
+        return True, True, consensus_type, f"Converged with notes — {' | '.join(residue)}"
+
+    return True, True, "full_agreement", f"Converged: 0 high, issue overlap {overlap:.0%}"
 
 
 def _run_manual_round(
@@ -1549,18 +1590,24 @@ def _run_manual_round(
 
     if recommendation == "LOCK":
         session.converged = True
+        # LOCK with open questions is agreement-with-residue, not full
+        # agreement — the distinction must survive to the report (AUDIT A2/A4).
+        open_questions = beth_response.get("open_questions") or []
+        session.consensus_type = "stable_with_notes" if open_questions else "full_agreement"
         session.convergence_reason = reason or "Beth recommended LOCK"
         LOGGER.info(f"\nLocked after round {round_num}: {session.convergence_reason}")
         return review_round, True
 
     if recommendation == "HUMAN_REVIEW":
         session.converged = False
+        session.consensus_type = "blocked"
         session.convergence_reason = reason or "Beth recommended HUMAN_REVIEW"
         LOGGER.info(f"\nStopping for human review after round {round_num}: {session.convergence_reason}")
         return review_round, True
 
     if round_num >= max_rounds:
         session.converged = False
+        session.consensus_type = "blocked"
         session.convergence_reason = (
             reason or f"Reached max rounds ({max_rounds}) without LOCK"
         )
@@ -1683,15 +1730,19 @@ def _run_round(
 
     session.rounds.append(review_round)
 
-    converged, reason = _check_convergence(session)
-    if converged:
-        session.converged = True
+    stop, converged, consensus_type, reason = _check_convergence(session)
+    if stop:
+        session.converged = converged
+        session.consensus_type = consensus_type
         session.convergence_reason = reason
-        LOGGER.info(f"\nConverged after round {round_num}: {reason}")
+        if converged:
+            LOGGER.info(f"\nConverged after round {round_num}: {reason}")
+        else:
+            LOGGER.warning(f"\nStopped WITHOUT consensus after round {round_num}: {reason}")
     else:
         LOGGER.info(f"\nNot converged: {reason}")
 
-    return review_round, converged
+    return review_round, stop
 
 
 def run_review(
@@ -1747,6 +1798,7 @@ def run_review(
         "workflow": workflow,
         "total_rounds": len(session.rounds),
         "converged": session.converged,
+        "consensus_type": session.consensus_type,
         "convergence_reason": session.convergence_reason,
         "total_findings_by_round": [
             {
@@ -1836,6 +1888,7 @@ def compute_metrics(session: OracleSession) -> dict:
         "rounds_to_stability": len(session.rounds),
         "valid_rounds": valid_rounds,
         "converged": session.converged,
+        "consensus_type": session.consensus_type,
     }
 
 

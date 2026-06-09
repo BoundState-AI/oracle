@@ -2078,6 +2078,18 @@ def format_findings_report(
         "",
     ]
 
+    # consensus_type distinguishes full agreement from agreement-with-residue
+    # and from a blocked stop (AUDIT A2) — getattr for pre-A2 session objects.
+    consensus_type = getattr(session, "consensus_type", "")
+    if consensus_type:
+        label = {
+            "full_agreement": "Full agreement",
+            "stable_with_notes": "Stable, with unresolved notes",
+            "blocked": "BLOCKED — stopped without consensus",
+        }.get(consensus_type, consensus_type)
+        lines.append(f"**Consensus:** {label}")
+        lines.append("")
+
     if session.convergence_reason:
         lines.append(f"**Convergence Reason:** {session.convergence_reason}")
         lines.append("")
