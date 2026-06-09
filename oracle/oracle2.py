@@ -64,7 +64,7 @@ Hard rules:
 4. Every finding must be atomic: one issue, one claim.
 5. Prefer high-severity findings over style comments.
 6. Cite the exact section, heading, paragraph, line span, or quoted snippet that triggered the finding.
-7. If a concern is speculative, label it as speculative.
+7. If a concern is speculative, set "speculative": true on that finding.
 8. If you have fewer than 3 real findings, return fewer than 3. Do not invent filler.
 9. Do not repeat obvious points already stated in the draft unless they are still defective.
 10. Output valid JSON only.
@@ -94,7 +94,8 @@ Return schema:
       "problem": "...",
       "why_it_matters": "...",
       "proposed_fix": "...",
-      "confidence": 0.0
+      "confidence": 0.0,
+      "speculative": false
     }
   ],
   "top_3_must_fix": ["...", "...", "..."]
@@ -220,7 +221,9 @@ Output JSON only:
       "severity": "critical|high|medium|low",
       "source_reviewers": ["Fran", "Gemini"],
       "summary": "...",
-      "resolution": "..."
+      "resolution": "...",
+      "confidence": 0.0,
+      "speculative": false
     }
   ],
   "feedback_themes": ["..."],
@@ -348,6 +351,9 @@ Tasks:
 2. Merge semantically equivalent findings into one atomic issue.
 3. Assign final severity based on impact, not wording.
 4. Flag unsupported or weak findings.
+   For each merged issue, carry "confidence" as the LOWEST confidence
+   among merged source findings (conservative), and "speculative": true
+   if ANY merged source marked itself speculative.
 5. Detect direct conflicts between reviewers.
 6. Produce a normalized issue ledger for the coordinator.
 7. If an issue was seen in prior rounds, REUSE the same issue_id so Beth
@@ -378,7 +384,9 @@ Output JSON:
       "best_evidence": "...",
       "recommended_fix": "...",
       "conflict_flag": false,
-      "weak_signal": false
+      "weak_signal": false,
+      "confidence": 0.0,
+      "speculative": false
     }
   ],
   "dropped_findings": [
@@ -611,6 +619,12 @@ def _openai_reviewer_response_format(config: OracleConfig) -> dict[str, Any]:
                                 "why_it_matters": {"type": "string"},
                                 "proposed_fix": {"type": "string"},
                                 "confidence": {"type": "number"},
+                                # WHY: the shared contract demands marking
+                                # speculative concerns, but a strict schema
+                                # with additionalProperties:false FORBADE
+                                # the marker — the uncertainty label had
+                                # nowhere to live (AUDIT A9).
+                                "speculative": {"type": "boolean"},
                             },
                             "required": [
                                 "title",
@@ -622,6 +636,7 @@ def _openai_reviewer_response_format(config: OracleConfig) -> dict[str, Any]:
                                 "why_it_matters",
                                 "proposed_fix",
                                 "confidence",
+                                "speculative",
                             ],
                         },
                     },
@@ -1491,7 +1506,8 @@ Return JSON only:
       "problem": "...",
       "why_it_matters": "...",
       "proposed_fix": "...",
-      "confidence": 0.0
+      "confidence": 0.0,
+      "speculative": false
     }
   ],
   "top_3_must_fix": ["...", "...", "..."]

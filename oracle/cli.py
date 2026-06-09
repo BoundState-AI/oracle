@@ -2232,7 +2232,16 @@ def _format_dissent_summary(session: Any) -> list[str]:
         title = (issue or {}).get("title", "") or iid
         lines.append(f"### [{label}] {title} ({iid}, round {round_num})")
         if issue:
-            lines.append(f"**Severity (as raised):** {issue.get('severity', '?')}")
+            severity_line = f"**Severity (as raised):** {issue.get('severity', '?')}"
+            # Uncertainty signals are displayed, never used to gate (AUDIT A9):
+            # LLM confidence is uncalibrated, so weighting decisions by it
+            # would manufacture false precision. The reader weighs it.
+            confidence = issue.get("confidence")
+            if isinstance(confidence, (int, float)):
+                severity_line += f" — confidence (as reported): {confidence:.2f}"
+            if issue.get("speculative"):
+                severity_line += " — **marked SPECULATIVE by reviewer**"
+            lines.append(severity_line)
             sources = _issue_sources(issue)
             if sources:
                 lines.append(f"**Raised by:** {', '.join(sources)}")
@@ -2463,7 +2472,13 @@ def format_findings_report(
                 problem = issue.get("core_problem", "")
                 fix = issue.get("recommended_fix", "")
 
-                lines.append(f"### [{sev}] {title} ({iid})")
+                heading = f"### [{sev}] {title} ({iid})"
+                if issue.get("speculative"):
+                    heading = f"### [{sev}] [SPECULATIVE] {title} ({iid})"
+                lines.append(heading)
+                confidence = issue.get("confidence")
+                if isinstance(confidence, (int, float)):
+                    lines.append(f"**Confidence (as reported):** {confidence:.2f}")
                 if problem:
                     lines.append(f"**Problem:** {problem}")
                 if fix:
