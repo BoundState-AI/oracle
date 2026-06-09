@@ -31,6 +31,7 @@ from __future__ import annotations
 __safety_critical__: bool = True
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -555,7 +556,16 @@ def _call_anthropic(config: OracleConfig, user_message: str) -> dict:
         if getattr(block, "type", None) == "text":
             text = block.text
             break
-    return _parse_json(text, config.name)
+    result = _parse_json(text, config.name)
+    usage = getattr(final_message, "usage", None)
+    result["_telemetry"] = {
+        "response_model": getattr(final_message, "model", None),
+        "input_tokens": getattr(usage, "input_tokens", None),
+        "output_tokens": getattr(usage, "output_tokens", None),
+        "temperature": kwargs.get("temperature"),
+        "thinking": "adaptive" if "thinking" in kwargs else None,
+    }
+    return result
 
 
 def _openai_reviewer_response_format(config: OracleConfig) -> dict[str, Any]:
@@ -659,6 +669,17 @@ def _call_openai(config: OracleConfig, user_message: str) -> dict:
     message = choice.message
     text = (message.content or "").strip()
 
+    # Usage capture (AUDIT D1): getattr-safe because SDK fakes in tests
+    # (and older SDK versions) may omit usage/model attributes entirely.
+    usage = getattr(response, "usage", None)
+    telemetry = {
+        "response_model": getattr(response, "model", None),
+        "input_tokens": getattr(usage, "prompt_tokens", None),
+        "output_tokens": getattr(usage, "completion_tokens", None),
+        "temperature": kwargs.get("temperature"),
+        "reasoning_effort": kwargs.get("reasoning_effort"),
+    }
+
     if choice.finish_reason == "length":
         LOGGER.warning(
             f"[{config.name}] OpenAI hit max completion budget "
@@ -671,6 +692,7 @@ def _call_openai(config: OracleConfig, user_message: str) -> dict:
             "oracle_name": config.name,
             "error": "Model refusal",
             "raw": message.refusal[:2000],
+            "_telemetry": telemetry,
         }
 
     if not text:
@@ -682,9 +704,12 @@ def _call_openai(config: OracleConfig, user_message: str) -> dict:
             "oracle_name": config.name,
             "error": f"Empty response (finish_reason={choice.finish_reason})",
             "raw": "",
+            "_telemetry": telemetry,
         }
 
-    return _parse_json(text, config.name)
+    result = _parse_json(text, config.name)
+    result["_telemetry"] = telemetry
+    return result
 
 
 def _call_xai(config: OracleConfig, user_message: str) -> dict:
@@ -711,7 +736,15 @@ def _call_xai(config: OracleConfig, user_message: str) -> dict:
         kwargs["max_tokens"] = config.max_tokens
     response = client.chat.completions.create(**kwargs)
     text = response.choices[0].message.content or ""
-    return _parse_json(text, config.name)
+    result = _parse_json(text, config.name)
+    usage = getattr(response, "usage", None)
+    result["_telemetry"] = {
+        "response_model": getattr(response, "model", None),
+        "input_tokens": getattr(usage, "prompt_tokens", None),
+        "output_tokens": getattr(usage, "completion_tokens", None),
+        "temperature": kwargs.get("temperature"),
+    }
+    return result
 
 
 def _call_gemini(config: OracleConfig, user_message: str) -> dict:
@@ -766,6 +799,13 @@ def _call_gemini(config: OracleConfig, user_message: str) -> dict:
         }
 
     data = response.json()
+    usage = data.get("usageMetadata") or {}
+    telemetry = {
+        "response_model": data.get("modelVersion") or config.model,
+        "input_tokens": usage.get("promptTokenCount"),
+        "output_tokens": usage.get("candidatesTokenCount"),
+        "temperature": config.temperature,
+    }
     candidates = data.get("candidates") or []
     if not candidates:
         return {
@@ -773,6 +813,7 @@ def _call_gemini(config: OracleConfig, user_message: str) -> dict:
             "error": "Gemini returned no candidates",
             "raw": json.dumps(data)[:2000],
             "findings": [],
+            "_telemetry": telemetry,
         }
 
     parts = candidates[0].get("content", {}).get("parts", [])
@@ -788,9 +829,12 @@ def _call_gemini(config: OracleConfig, user_message: str) -> dict:
             "error": f"Gemini returned empty content (finishReason={finish_reason})",
             "raw": json.dumps(data)[:2000],
             "findings": [],
+            "_telemetry": telemetry,
         }
 
-    return _parse_json(text, config.name)
+    result = _parse_json(text, config.name)
+    result["_telemetry"] = telemetry
+    return result
 
 
 PROVIDER_DISPATCH = {
@@ -859,6 +903,23 @@ def call_oracle(config: OracleConfig, user_message: str) -> dict:
                 LOGGER.warning(
                     f"[{config.name}] DEGRADED: {result.get('recovery_note', 'partial recovery')}"
                 )
+
+            # Enrich provider telemetry with call-level facts (AUDIT C1/D1):
+            # configured vs actual model is the only way a silent vendor
+            # model swap is ever detectable after the fact.
+            telemetry = result.get("_telemetry")
+            if not isinstance(telemetry, dict):
+                telemetry = {}
+                result["_telemetry"] = telemetry
+            telemetry.update({
+                "oracle": config.name,
+                "provider": config.provider,
+                "configured_model": config.model,
+                "max_tokens": config.max_tokens,
+                "latency_seconds": round(elapsed, 2),
+                "attempts": attempt + 1,
+            })
+
             LOGGER.info(f"[{config.name}] Done in {elapsed:.1f}s — {findings_count} findings")
             return result
 
@@ -1191,6 +1252,10 @@ class ReviewRound:
     coordinator_decisions: dict = field(default_factory=dict)
     revised_draft: str = ""
     valid: bool = False  # True only if all required oracles succeeded
+    # Per-oracle call telemetry (models, tokens, latency — AUDIT C1/D1).
+    # Kept OUT of the oracle output dicts so it never leaks into the
+    # prompts that re-serialize those outputs for Beth/Sonnet.
+    telemetry: dict[str, dict] = field(default_factory=dict)
 
 
 def _last_valid_round(session: OracleSession) -> ReviewRound | None:
@@ -1228,6 +1293,17 @@ class OracleSession:
     #                       human-review escalation, or exhausted rounds)
     #   ""                — loop has not stopped yet
     consensus_type: str = ""
+
+
+def _write_round_telemetry(output_dir: Path, round_num: int, review_round: ReviewRound) -> None:
+    """Persist per-oracle call telemetry for one round (AUDIT C1/D1).
+
+    Written after the reviewer fan-out and rewritten after the synthesis
+    calls so a round that dies mid-way still records what it spent.
+    """
+    (output_dir / f"round{round_num}_telemetry.json").write_text(
+        encoding="utf-8", data=json.dumps(review_round.telemetry, indent=2)
+    )
 
 
 def _with_system_prompt(config: OracleConfig, system_prompt: str) -> OracleConfig:
@@ -1606,6 +1682,9 @@ def _run_manual_round(
         futures = {pool.submit(_call_reviewer, key): key for key in required_reviewers}
         for future in as_completed(futures):
             name, result = future.result()
+            # Pop telemetry before the output dict is re-serialized into
+            # Beth's bundle or written as the oracle's own output file.
+            review_round.telemetry[name] = result.pop("_telemetry", None) or {}
             review_round.reviewer_outputs[name] = result
             if "error" in result and not result.get("findings"):
                 reviewer_failed = True
@@ -1614,6 +1693,7 @@ def _run_manual_round(
         (output_dir / f"round{round_num}_{name.lower()}.json").write_text(
             encoding="utf-8", data=json.dumps(output, indent=2)
         )
+    _write_round_telemetry(output_dir, round_num, review_round)
 
     if reviewer_failed:
         LOGGER.error(f"Round {round_num} INVALID: required reviewer failed.")
@@ -1643,6 +1723,9 @@ def _run_manual_round(
         LOGGER.error(f"[Beth] FAILED after retries: {e}. Round invalid.")
         session.rounds.append(review_round)
         return review_round, False
+
+    review_round.telemetry["Beth"] = beth_response.pop("_telemetry", None) or {}
+    _write_round_telemetry(output_dir, round_num, review_round)
 
     review_round.coordinator_decisions = beth_response
     serious_issues = beth_response.get("serious_issues", [])
@@ -1768,6 +1851,9 @@ def _run_round(
         futures = {pool.submit(_call_reviewer, key): key for key in required_reviewers}
         for future in as_completed(futures):
             name, result = future.result()
+            # Pop telemetry before the output dict is re-serialized into
+            # the referee message or written as the oracle's output file.
+            review_round.telemetry[name] = result.pop("_telemetry", None) or {}
             review_round.reviewer_outputs[name] = result
             if "error" in result and not result.get("findings"):
                 reviewer_failed = True
@@ -1776,6 +1862,7 @@ def _run_round(
         (output_dir / f"round{round_num}_{name.lower()}.json").write_text(
             encoding="utf-8", data=json.dumps(output, indent=2)
         )
+    _write_round_telemetry(output_dir, round_num, review_round)
 
     if reviewer_failed:
         LOGGER.error(f"Round {round_num} INVALID: required reviewer failed.")
@@ -1794,6 +1881,7 @@ def _run_round(
         session.rounds.append(review_round)
         return review_round, False
 
+    review_round.telemetry["Sonnet"] = normalized.pop("_telemetry", None) or {}
     review_round.normalized_issues = normalized
     (output_dir / f"round{round_num}_sonnet_normalized.json").write_text(
         encoding="utf-8", data=json.dumps(normalized, indent=2)
@@ -1811,6 +1899,8 @@ def _run_round(
         session.rounds.append(review_round)
         return review_round, False
 
+    review_round.telemetry["Beth"] = beth_response.pop("_telemetry", None) or {}
+    _write_round_telemetry(output_dir, round_num, review_round)
     review_round.coordinator_decisions = beth_response
 
     revised = beth_response.get("revised_draft")
@@ -1851,6 +1941,90 @@ def _run_round(
     return review_round, stop
 
 
+def _sha256(text: str) -> str:
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _write_run_manifest(
+    output_dir: Path,
+    session_id: str,
+    workflow: str,
+    max_rounds: int,
+    document_path: str,
+    draft: str,
+    compliance_context: str | None,
+) -> None:
+    """Persist everything needed to defend or replay this run (AUDIT D2).
+
+    Records the full oracle roster as configured (provider, model,
+    temperature, token budgets), hashes of every system prompt and of the
+    inputs, and all ORACLE_* environment overrides. Prompt/input hashes
+    rather than full text keep the manifest small while still proving
+    what configuration produced a given result.
+
+    WHY only ORACLE_* env vars: API keys live in *_API_KEY variables and
+    must never be persisted; the ORACLE_ prefix carries no secrets.
+    """
+    manifest = {
+        "session_id": session_id,
+        "started_at": datetime.now().isoformat(),
+        "workflow": workflow,
+        "max_rounds": max_rounds,
+        "document_path": document_path,
+        "document_sha256": _sha256(draft),
+        "compliance_context_sha256": (
+            _sha256(compliance_context) if compliance_context else None
+        ),
+        "oracle_roster": {
+            key: {
+                "name": cfg.name,
+                "role": cfg.role,
+                "provider": cfg.provider,
+                "model": cfg.model,
+                "temperature": cfg.temperature,
+                "max_tokens": cfg.max_tokens,
+                "timeout": cfg.timeout,
+                "system_prompt_sha256": _sha256(cfg.system_prompt),
+            }
+            for key, cfg in ORACLE_ROSTER.items()
+        },
+        "env_overrides": {
+            k: os.environ[k] for k in sorted(os.environ) if k.startswith("ORACLE_")
+        },
+    }
+    (output_dir / "run_manifest.json").write_text(
+        encoding="utf-8", data=json.dumps(manifest, indent=2)
+    )
+
+
+def _usage_totals(session: OracleSession) -> dict[str, dict]:
+    """Aggregate per-oracle call/token/latency totals across rounds (AUDIT D1)."""
+    totals: dict[str, dict] = {}
+    for r in session.rounds:
+        for name, t in r.telemetry.items():
+            if not isinstance(t, dict):
+                continue
+            agg = totals.setdefault(name, {
+                "calls": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "latency_seconds": 0.0,
+                "models": [],
+            })
+            agg["calls"] += 1
+            for key in ("input_tokens", "output_tokens"):
+                value = t.get(key)
+                if isinstance(value, (int, float)):
+                    agg[key] += int(value)
+            latency = t.get("latency_seconds")
+            if isinstance(latency, (int, float)):
+                agg["latency_seconds"] = round(agg["latency_seconds"] + latency, 2)
+            model = t.get("response_model") or t.get("configured_model")
+            if model and model not in agg["models"]:
+                agg["models"].append(model)
+    return totals
+
+
 def run_review(
     draft: str,
     document_path: str = "",
@@ -1880,6 +2054,13 @@ def run_review(
     if output_dir is None:
         output_dir = Path("oracle_reviews") / session_id
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Written before the first oracle call so even a run that dies in
+    # round 1 records what configuration produced it.
+    _write_run_manifest(
+        output_dir, session_id, workflow, max_rounds,
+        document_path, draft, compliance_context,
+    )
 
     consecutive_invalid = 0
     for round_num in range(1, max_rounds + 1):
@@ -1954,6 +2135,7 @@ def run_review(
             }
             for r in session.rounds
         ],
+        "usage_totals": _usage_totals(session),
     }
     (output_dir / "session_summary.json").write_text(encoding="utf-8", data=json.dumps(summary, indent=2))
     LOGGER.info(f"\nResults saved to {output_dir}/")
