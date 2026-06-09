@@ -752,6 +752,14 @@ def _call_xai(config: OracleConfig, user_message: str) -> dict:
     else:
         kwargs["temperature"] = config.temperature
         kwargs["max_tokens"] = config.max_tokens
+    # WHY behind a flag, default OFF: xAI's endpoint is OpenAI-compatible,
+    # but its support for this strict response_format schema has not been
+    # verified with a live call (AUDIT C4). Saying "Grok output is
+    # schema-enforced" without that verification would be a lie about
+    # robustness. Flip on (ORACLE_XAI_JSON_MODE=1) after a green
+    # eval/live run confirms the endpoint honors it.
+    if os.environ.get("ORACLE_XAI_JSON_MODE", "").strip().lower() in {"1", "true", "yes"}:
+        kwargs["response_format"] = _openai_reviewer_response_format(config)
     response = client.chat.completions.create(**kwargs)
     text = response.choices[0].message.content or ""
     result = _parse_json(text, config.name)
