@@ -2225,22 +2225,8 @@ def format_findings_report(
     then formats into the Section 8 report structure.
     """
     from oracle.oracle2 import compute_metrics
-    from oracle.oracle2_adapter import build_review_result
 
     metrics = compute_metrics(session)
-
-    # Try to reconstruct structured data via adapter
-    session_dir = Path("oracle_reviews") / session.session_id
-    if hasattr(session, '_output_dir') and session._output_dir:
-        session_dir = session._output_dir
-    # Also check the common output directory patterns
-    for candidate in [
-        Path("oracle_reviews") / session.session_id,
-        Path(session.document_path).parent / "oracle_reviews" / session.session_id,
-    ]:
-        if candidate.exists():
-            session_dir = candidate
-            break
 
     lines = [
         "# ORACLE Review Report",
@@ -2293,6 +2279,14 @@ def format_findings_report(
             lines.append("")
 
     # --- Metrics Summary ---
+    # duplicate_rate is None when the workflow produces no drop signal
+    # (manual workflow) — print "n/a", never a fabricated 0.0% (AUDIT D3).
+    duplicate_rate = metrics.get("duplicate_rate")
+    duplicate_label = (
+        f"{duplicate_rate:.1%}"
+        if isinstance(duplicate_rate, (int, float))
+        else "n/a (not measured in this workflow)"
+    )
     lines.extend([
         "## Metrics",
         "",
@@ -2301,7 +2295,7 @@ def format_findings_report(
         f"- Total accepted defects: {metrics.get('total_accepted_defects', 0)}",
         f"- Total rejected claims: {metrics.get('total_rejected_claims', 0)}",
         f"- Preference-only findings: {metrics.get('total_preference_only', 0)}",
-        f"- Duplicate rate: {metrics.get('duplicate_rate', 0):.1%}",
+        f"- Duplicate rate: {duplicate_label}",
         f"- Rounds to stability: {metrics.get('rounds_to_stability', 0)}",
         f"- Converged: {metrics.get('converged', False)}",
         "",

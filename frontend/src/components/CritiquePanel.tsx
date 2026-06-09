@@ -27,6 +27,18 @@ export function CritiquePanel({
   generating = false,
   showGenerate = true,
 }: CritiquePanelProps) {
+  // Converged alone cannot distinguish full agreement from a stop on a
+  // standing disagreement — consensus_type carries that distinction.
+  const consensusLabels: Record<string, string> = {
+    full_agreement: "Full agreement",
+    stable_with_notes: "Stable, with notes",
+    blocked: "Blocked — no consensus",
+  };
+  const consensusType =
+    typeof metrics?.consensus_type === "string" && metrics.consensus_type
+      ? consensusLabels[metrics.consensus_type] ?? metrics.consensus_type
+      : undefined;
+
   const metricEntries: Array<[string, string | number]> = metrics
     ? [
         ["Accepted critical", metrics.accepted_critical_count],
@@ -36,6 +48,7 @@ export function CritiquePanel({
         ["Preference only", metrics.total_preference_only],
         ["Rounds to stability", metrics.rounds_to_stability],
         ["Converged", metrics.converged ? "Yes" : "No"],
+        ["Consensus", consensusType],
       ].filter(([, value]) => value !== undefined) as Array<[string, string | number]>
     : [];
 

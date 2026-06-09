@@ -3,10 +3,10 @@
 Module: oracle.oracle2
 Purpose: Multi-oracle review system for specs, plans, and architecture docs.
 
-Flow:
-  Round 0: Beth (Opus 4.6) writes or accepts the canonical draft
-  Round 1: Fran (GPT-5.4), Codex (GPT-5.4), Grok (xAI), Gemini review independently (blind)
-  Round 1.5: Sonnet (Claude Sonnet 4.6) normalizes/deduplicates findings
+Flow (model defaults live in ORACLE_ROSTER; override via ORACLE_*_MODEL):
+  Round 0: Beth (Anthropic coordinator) writes or accepts the canonical draft
+  Round 1: Fran (OpenAI), Codex (OpenAI), Grok (xAI), Gemini (Google) review independently (blind)
+  Round 1.5 (ledger workflow only): Sonnet (Anthropic referee) normalizes/deduplicates findings
   Round 2: Beth classifies findings, revises draft
   Round 3+: Re-review changed sections until convergence
 
@@ -2192,6 +2192,16 @@ def compute_metrics(session: OracleSession) -> dict:
     duplicate_count = sum(1 for d in dropped if d.get("reason") == "duplicate")
     unsupported_count = sum(1 for d in dropped if d.get("reason") == "unsupported")
 
+    # WHY None vs 0.0: only the ledger workflow's referee emits
+    # dropped_findings. The manual workflow has no drop signal at all, so
+    # its rates were constitutionally 0.0 yet reported as if measured
+    # (AUDIT D3). None means "not measured"; 0.0 means "measured, zero".
+    has_drop_signal = any(
+        "dropped_findings" in r.normalized_issues
+        for r in session.rounds
+        if r.valid
+    )
+
     # Valid rounds = all 5 oracles succeeded (reviewer + Sonnet + Beth)
     valid_rounds = sum(1 for r in session.rounds if r.valid)
 
@@ -2202,8 +2212,12 @@ def compute_metrics(session: OracleSession) -> dict:
         "total_rejected_claims": len(rejected),
         "total_preference_only": len(preference),
         "novel_issue_count": len(issue_severity),
-        "duplicate_rate": duplicate_count / max(total_findings, 1),
-        "unsupported_claim_rate": unsupported_count / max(total_findings, 1),
+        "duplicate_rate": (
+            duplicate_count / max(total_findings, 1) if has_drop_signal else None
+        ),
+        "unsupported_claim_rate": (
+            unsupported_count / max(total_findings, 1) if has_drop_signal else None
+        ),
         "rounds_to_stability": len(session.rounds),
         "valid_rounds": valid_rounds,
         "converged": session.converged,
@@ -2230,7 +2244,7 @@ Environment variables:
   ORACLE_BETH_MODEL   — Override Beth model  (default: claude-opus-4-8)
   ORACLE_FRAN_MODEL   — Override Fran model  (default: gpt-5.4)
   ORACLE_CODEX_MODEL  — Override Codex model (default: gpt-5.4)
-  ORACLE_GROK_MODEL   — Override Grok model  (default: grok-4)
+  ORACLE_GROK_MODEL   — Override Grok model  (default: grok-4.20)
   ORACLE_GEMINI_MODEL — Override Gemini model (default: gemini-2.5-pro)
   ORACLE_SONNET_MODEL — Override Sonnet model (default: claude-sonnet-4-6)
 
