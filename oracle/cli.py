@@ -438,6 +438,20 @@ def register_pack(
 
     # Copy pack file to library
     dest = pack_dir / f"{slug}.json"
+
+    # Version history on overwrite (AUDIT B4): keep the prior pack file
+    # under archive/<slug>@<short-hash>.json so a regenerated pack stays
+    # diffable against the version past reviews actually ran with.
+    # archive/ is a subdirectory, so pack globs ("*.json") never see it.
+    if dest.exists():
+        prior_hash = _compute_content_hash(dest).split(":")[-1][:12]
+        archive_dir = pack_dir / "archive"
+        archive_dir.mkdir(exist_ok=True)
+        archive_path = archive_dir / f"{slug}@{prior_hash}.json"
+        if not archive_path.exists():
+            archive_path.write_bytes(dest.read_bytes())
+            LOGGER.info(f"Archived prior pack version: archive/{archive_path.name}")
+
     dest.write_text(
         json.dumps(pack_data, indent=2, ensure_ascii=False), encoding="utf-8"
     )

@@ -240,14 +240,25 @@ def render_tier2_part(rulepack: dict, part_num: int) -> str:
         "",
     ]
 
+    truncated = 0
     for r in reqs:
         kw = r["obligation_keyword"].upper()
         sec = r["section"] or "??"
         text = r["statement_text"]
-        # Truncate very long statements for prompt efficiency
+        # WHY 500: long statements blow the token budget; the cut must be
+        # explicit so reviewers (and readers of the rendered context) can
+        # tell a truncated requirement from a complete short one — a bare
+        # "..." is indistinguishable from prose ellipsis (AUDIT B5).
         if len(text) > 500:
-            text = text[:497] + "..."
+            text = text[:500] + " [TRUNCATED — see full text in the rule pack]"
+            truncated += 1
         lines.append(f"[{kw}] §{sec} p.{r['page']}: {text}")
+
+    if truncated:
+        LOGGER.info(
+            "FAR Part %s render: %d of %d statements truncated at 500 chars",
+            part_num, truncated, len(reqs),
+        )
 
     return "\n".join(lines)
 
