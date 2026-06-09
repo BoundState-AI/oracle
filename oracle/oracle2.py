@@ -35,6 +35,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import sys
 import time
 from dataclasses import dataclass, field
@@ -856,6 +857,39 @@ MAX_CONSECUTIVE_INVALID_ROUNDS = int(
     os.environ.get("ORACLE_MAX_CONSECUTIVE_INVALID_ROUNDS", "2")
 )
 GEMINI_FALLBACK_ERROR_STATUSES = ("429", "500", "502", "503", "504")
+# WHY 4x for rate limits: a 429 means the quota window is exhausted;
+# retrying on the transient-error schedule usually re-hits the same
+# window and burns the attempt (then the round, then the run — AUDIT C3).
+RATE_LIMIT_BACKOFF_MULTIPLIER = 4
+# WHY cap: a pathological Retry-After header (or multiplied growth) must
+# not stall a round indefinitely; 120s exceeds standard vendor rate-limit
+# windows while keeping worst-case round latency bounded.
+MAX_RETRY_DELAY_SECONDS = 120.0
+
+
+def _retry_delay(attempt: int, last_failure: Any) -> float:
+    """Seconds to wait before retry `attempt`, honoring Retry-After.
+
+    Precedence: a vendor-stated Retry-After beats the local schedule; a
+    429-shaped failure quadruples the base; everything gets jitter
+    because four reviewers retry in parallel and synchronized retries
+    re-spike the same rate limit.
+    """
+    base = float(RETRY_BACKOFF[min(attempt - 1, len(RETRY_BACKOFF) - 1)])
+
+    response = getattr(last_failure, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is not None:
+        try:
+            retry_after = float(headers.get("retry-after"))
+        except (TypeError, ValueError):
+            retry_after = None
+        if retry_after is not None and retry_after >= 0:
+            return min(max(retry_after, base), MAX_RETRY_DELAY_SECONDS)
+
+    if "429" in str(last_failure or ""):
+        base *= RATE_LIMIT_BACKOFF_MULTIPLIER
+    return min(base + random.uniform(0, base * 0.25), MAX_RETRY_DELAY_SECONDS)
 
 
 def _should_fallback_gemini(config: OracleConfig, last_error: str | None) -> bool:
@@ -875,10 +909,14 @@ def call_oracle(config: OracleConfig, user_message: str) -> dict:
         raise ValueError(f"Unknown provider: {config.provider}")
 
     last_error = None
+    # last_failure keeps the exception OBJECT where one exists (so
+    # _retry_delay can read Retry-After headers); otherwise the error
+    # string (still usable for 429 detection).
+    last_failure: Any = None
     for attempt in range(MAX_RETRIES):
         if attempt > 0:
-            wait = RETRY_BACKOFF[min(attempt - 1, len(RETRY_BACKOFF) - 1)]
-            LOGGER.warning(f"[{config.name}] Retry {attempt}/{MAX_RETRIES} after {wait}s...")
+            wait = _retry_delay(attempt, last_failure)
+            LOGGER.warning(f"[{config.name}] Retry {attempt}/{MAX_RETRIES} after {wait:.1f}s...")
             time.sleep(wait)
 
         LOGGER.info(f"[{config.name}] Calling {config.provider}/{config.model} (attempt {attempt + 1})...")
@@ -891,6 +929,7 @@ def call_oracle(config: OracleConfig, user_message: str) -> dict:
             if "error" in result and "raw" in result:
                 LOGGER.warning(f"[{config.name}] Parse failed: {result['error']}")
                 last_error = result["error"]
+                last_failure = last_error
                 continue
 
             # Schema validation: check required fields for this oracle's role
@@ -898,6 +937,7 @@ def call_oracle(config: OracleConfig, user_message: str) -> dict:
             if schema_error:
                 LOGGER.warning(f"[{config.name}] Schema invalid: {schema_error}")
                 last_error = f"Schema: {schema_error}"
+                last_failure = last_error
                 continue
 
             findings_count = len(result.get("findings", result.get("normalized_issues", [])))
@@ -930,6 +970,7 @@ def call_oracle(config: OracleConfig, user_message: str) -> dict:
             # Redact before logging/retaining: exception text can echo
             # request headers or URLs containing credentials (AUDIT C5).
             last_error = redact_secrets(str(e))
+            last_failure = e
             LOGGER.error(f"[{config.name}] Failed in {elapsed:.1f}s: {last_error}")
 
     if _should_fallback_gemini(config, last_error):
