@@ -803,6 +803,12 @@ PROVIDER_DISPATCH = {
 
 MAX_RETRIES = 3
 RETRY_BACKOFF = (2, 4, 8)  # seconds
+# WHY 2: one invalid round can be a transient blip (rate limit, brief
+# outage); two in a row means a vendor is systemically down and further
+# rounds only burn spend on the healthy vendors (AUDIT C2).
+MAX_CONSECUTIVE_INVALID_ROUNDS = int(
+    os.environ.get("ORACLE_MAX_CONSECUTIVE_INVALID_ROUNDS", "2")
+)
 GEMINI_FALLBACK_ERROR_STATUSES = ("429", "500", "502", "503", "504")
 
 
@@ -1775,6 +1781,7 @@ def run_review(
         output_dir = Path("oracle_reviews") / session_id
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    consecutive_invalid = 0
     for round_num in range(1, max_rounds + 1):
         LOGGER.info(f"\n{'='*60}\nRound {round_num}\n{'='*60}")
         if workflow == "manual":
@@ -1789,6 +1796,36 @@ def run_review(
             _, should_stop = _run_round(session, round_num, output_dir, compliance_context)
         if should_stop:
             break
+
+        # WHY abort on consecutive invalid rounds: with a vendor hard-down,
+        # every retry of the round re-pays the three healthy vendors and
+        # still produces nothing. Two consecutive invalid rounds means the
+        # failure is systemic, not transient — burning the remaining round
+        # budget cannot help (AUDIT C2).
+        if session.rounds and not session.rounds[-1].valid:
+            consecutive_invalid += 1
+        else:
+            consecutive_invalid = 0
+        if consecutive_invalid >= MAX_CONSECUTIVE_INVALID_ROUNDS:
+            session.converged = False
+            session.consensus_type = "blocked"
+            session.convergence_reason = (
+                f"Aborted after {consecutive_invalid} consecutive invalid rounds "
+                f"(oracle failures) — the document was NOT fully reviewed"
+            )
+            LOGGER.error(f"\n{session.convergence_reason}")
+            break
+
+    # A run must never end without explaining its outcome — an empty
+    # reason on a non-converged session previously left readers unable to
+    # tell a failed run from a quietly stopped one (AUDIT C2/F2).
+    if not session.converged and not session.convergence_reason:
+        valid_rounds = sum(1 for r in session.rounds if r.valid)
+        session.consensus_type = session.consensus_type or "blocked"
+        session.convergence_reason = (
+            f"Stopped at max rounds ({max_rounds}) without convergence "
+            f"({valid_rounds}/{len(session.rounds)} rounds valid)"
+        )
 
     # Save final state
     (output_dir / "final_draft.md").write_text(encoding="utf-8", data=session.canonical_draft)

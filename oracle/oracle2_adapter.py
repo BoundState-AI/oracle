@@ -131,6 +131,10 @@ class ReviewResult:
     converged: bool                     # Whether review reached convergence
     total_rounds: int
     metrics: MetricsSummary             # Aggregated metrics for findings report
+    # full_agreement | stable_with_notes | blocked | "" (pre-A2 sessions).
+    # Carried so deliverable labels can distinguish agreement from a
+    # blocked stop instead of collapsing both into one bool (AUDIT A2/F2).
+    consensus_type: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -456,6 +460,7 @@ def build_review_result(
         converged=converged,
         total_rounds=total_rounds,
         metrics=metrics,
+        consensus_type=summary.get("consensus_type", ""),
     )
 
 

@@ -1135,6 +1135,45 @@ class GenerateRequest(BaseModel):
     approved: bool
 
 
+def _review_status_label(review_result) -> str:
+    """Honest convergence status for generated deliverables.
+
+    WHY: non-converged runs were previously labeled "Maximum Reasoning",
+    a euphemism that presented an unfinished (or entirely failed) review
+    as a feature (AUDIT F2). The label must state what actually happened.
+    """
+    consensus_type = getattr(review_result, "consensus_type", "")
+    if review_result.converged:
+        if consensus_type == "stable_with_notes":
+            return "Converged (unresolved notes remain — see findings report)"
+        return "Converged"
+    if consensus_type == "blocked":
+        return "NOT CONVERGED — blocked, needs human review"
+    return "NOT CONVERGED — review incomplete"
+
+
+def _require_reviewed_result(session: dict):
+    """Return the session's ReviewResult, refusing unreviewed content.
+
+    WHY 409: a session whose every round was invalid (e.g., a vendor
+    outage) has rounds=[] and a "final draft" identical to the unreviewed
+    input. Generating a polished deliverable from it would ship an
+    unreviewed document under a review banner (AUDIT C2 + F2).
+    """
+    review_result = session.get("review_result")
+    if not review_result:
+        raise HTTPException(status_code=400, detail="Review not complete")
+    if not review_result.rounds:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "No valid review rounds — the document was never successfully "
+                "reviewed (all rounds failed). Nothing trustworthy to generate."
+            ),
+        )
+    return review_result
+
+
 @oracle_router.post("/generate")
 async def generate(request: Request, body: GenerateRequest):
     """Generate polished output documents from a reviewed session."""
@@ -1145,6 +1184,8 @@ async def generate(request: Request, body: GenerateRequest):
 
     if not body.approved:
         raise HTTPException(status_code=400, detail="Review not approved")
+
+    _require_reviewed_result(session)
 
     return {
         "docx_url": f"/oracle/download/{body.session_id}/docx",
@@ -1204,9 +1245,7 @@ async def download(request: Request, session_id: str, fmt: str):
             filename=f"{base_name}_pack_manifest_snapshot.json",
         )
 
-    review_result = session.get("review_result")
-    if not review_result:
-        raise HTTPException(status_code=400, detail="Review not complete")
+    review_result = _require_reviewed_result(session)
 
     try:
         from oracle.document_generator import generate_docx, generate_pptx
@@ -1225,7 +1264,7 @@ async def download(request: Request, session_id: str, fmt: str):
                 final_draft=review_result.final_draft,
                 output_path=out_path,
                 title=doc_title,
-                subtitle=f"Oracle2 Multi-Oracle Review | {review_result.total_rounds} round(s) | {'Converged' if review_result.converged else 'Maximum Reasoning'}",
+                subtitle=f"Oracle2 Multi-Oracle Review | {review_result.total_rounds} round(s) | {_review_status_label(review_result)}",
             )
         except ModuleNotFoundError as exc:
             raise HTTPException(
@@ -1245,7 +1284,7 @@ async def download(request: Request, session_id: str, fmt: str):
                 final_draft=review_result.final_draft,
                 output_path=out_path,
                 title=doc_title,
-                subtitle=f"Oracle2 Multi-Oracle Review | {review_result.total_rounds} round(s)",
+                subtitle=f"Oracle2 Multi-Oracle Review | {review_result.total_rounds} round(s) | {_review_status_label(review_result)}",
             )
         except ModuleNotFoundError as exc:
             raise HTTPException(
