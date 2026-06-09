@@ -40,14 +40,14 @@ export function CritiquePanel({
       ["Type", consensusType.replace(/_/g, " ").split(" ").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ")],
     ],
     "Findings": [
-      ["Accepted Critical", metrics?.accepted_critical_count ?? "—"],
-      ["Accepted High", metrics?.accepted_high_count ?? "—"],
-      ["Total Accepted", metrics?.total_accepted_defects ?? "—"],
-      ["Rejected Claims", metrics?.total_rejected_claims ?? "—"],
+      ["Accepted Critical", String(metrics?.accepted_critical_count ?? "—")],
+      ["Accepted High", String(metrics?.accepted_high_count ?? "—")],
+      ["Total Accepted", String(metrics?.total_accepted_defects ?? "—")],
+      ["Rejected Claims", String(metrics?.total_rejected_claims ?? "—")],
     ],
     "Resolution": [
-      ["Rounds to Stability", metrics?.rounds_to_stability ?? "—"],
-      ["Preference Only", metrics?.total_preference_only ?? "—"],
+      ["Rounds to Stability", String(metrics?.rounds_to_stability ?? "—")],
+      ["Preference Only", String(metrics?.total_preference_only ?? "—")],
     ],
   };
 
@@ -59,7 +59,7 @@ export function CritiquePanel({
           Review Analysis
         </h2>
         <p className="text-sm text-muted-foreground">
-          Multi-oracle consensus analysis · {metrics?.rounds_to_stability ?? "∞"} rounds
+          Multi-oracle consensus analysis · {String(metrics?.rounds_to_stability ?? "∞")} rounds
         </p>
       </div>
 
