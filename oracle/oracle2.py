@@ -1340,6 +1340,86 @@ class OracleSession:
     consensus_type: str = ""
 
 
+# The blind-review pool. Both workflows require all four to succeed;
+# a missing reviewer invalidates the round rather than degrading 3-of-4.
+REQUIRED_REVIEWERS = ("fran", "codex", "grok", "gemini")
+
+
+def _fan_out_reviewers(
+    review_round: ReviewRound,
+    review_msg: str,
+    output_dir: Path,
+    round_num: int,
+) -> bool:
+    """Run the blind reviewers in parallel; persist outputs + telemetry.
+
+    Returns True when every required reviewer succeeded.
+
+    Why extracted: this block was duplicated verbatim between the manual
+    and ledger runners — that duplication is how the F1 filename
+    divergence went unnoticed. One copy, two callers.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    reviewer_failed = False
+
+    def _call_reviewer(key: str) -> tuple[str, dict]:
+        config = ORACLE_ROSTER[key]
+        try:
+            result = call_oracle(config, review_msg)
+            return config.name, result
+        except Exception as e:
+            LOGGER.error(f"[{config.name}] FAILED after retries: {e}")
+            return config.name, {"oracle_name": config.name, "error": str(e), "findings": []}
+
+    LOGGER.info(f"  Launching {len(REQUIRED_REVIEWERS)} blind reviewers in parallel...")
+    with ThreadPoolExecutor(max_workers=len(REQUIRED_REVIEWERS)) as pool:
+        futures = {pool.submit(_call_reviewer, key): key for key in REQUIRED_REVIEWERS}
+        for future in as_completed(futures):
+            name, result = future.result()
+            # Pop telemetry before the output dict is re-serialized into
+            # any downstream prompt or written as the oracle's output file.
+            review_round.telemetry[name] = result.pop("_telemetry", None) or {}
+            review_round.reviewer_outputs[name] = result
+            if "error" in result and not result.get("findings"):
+                reviewer_failed = True
+
+    for name, output in review_round.reviewer_outputs.items():
+        (output_dir / f"round{round_num}_{name.lower()}.json").write_text(
+            encoding="utf-8", data=json.dumps(output, indent=2)
+        )
+    _write_round_telemetry(output_dir, round_num, review_round)
+
+    return not reviewer_failed
+
+
+def _apply_revised_draft(session: OracleSession, review_round: ReviewRound, beth_response: dict) -> None:
+    """Adopt Beth's revised draft as canonical, if she produced one."""
+    revised = beth_response.get("revised_draft")
+    if revised and isinstance(revised, str) and revised.strip():
+        session.canonical_draft = revised.strip()
+        review_round.revised_draft = session.canonical_draft
+        LOGGER.info(f"[Beth] Draft revised ({len(session.canonical_draft)} chars)")
+    else:
+        LOGGER.info("[Beth] No revision to draft this round")
+
+
+def _persist_beth_outputs(
+    output_dir: Path,
+    round_num: int,
+    beth_response: dict,
+    review_round: ReviewRound,
+) -> None:
+    """Write Beth's decisions and any revised draft for one round."""
+    (output_dir / f"round{round_num}_beth_decisions.json").write_text(
+        encoding="utf-8", data=json.dumps(beth_response, indent=2)
+    )
+    if review_round.revised_draft:
+        (output_dir / f"round{round_num}_revised_draft.md").write_text(
+            encoding="utf-8", data=review_round.revised_draft
+        )
+
+
 def _write_round_telemetry(output_dir: Path, round_num: int, review_round: ReviewRound) -> None:
     """Persist per-oracle call telemetry for one round (AUDIT C1/D1).
 
@@ -1701,8 +1781,6 @@ def _run_manual_round(
     This mirrors Joe's manual process. Reviewers stay blind; Beth receives the
     raw bundle and acts as normalizer, bundler, spec revisor, and stop-signal.
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
     review_round = ReviewRound(round_number=round_num)
     review_msg = _build_manual_review_message(
         session.canonical_draft,
@@ -1710,37 +1788,7 @@ def _run_manual_round(
         compliance_context=compliance_context,
     )
 
-    required_reviewers = ("fran", "codex", "grok", "gemini")
-    reviewer_failed = False
-
-    def _call_reviewer(key: str) -> tuple[str, dict]:
-        config = ORACLE_ROSTER[key]
-        try:
-            result = call_oracle(config, review_msg)
-            return config.name, result
-        except Exception as e:
-            LOGGER.error(f"[{config.name}] FAILED after retries: {e}")
-            return config.name, {"oracle_name": config.name, "error": str(e), "findings": []}
-
-    LOGGER.info(f"  Launching {len(required_reviewers)} blind reviewers in parallel...")
-    with ThreadPoolExecutor(max_workers=len(required_reviewers)) as pool:
-        futures = {pool.submit(_call_reviewer, key): key for key in required_reviewers}
-        for future in as_completed(futures):
-            name, result = future.result()
-            # Pop telemetry before the output dict is re-serialized into
-            # Beth's bundle or written as the oracle's own output file.
-            review_round.telemetry[name] = result.pop("_telemetry", None) or {}
-            review_round.reviewer_outputs[name] = result
-            if "error" in result and not result.get("findings"):
-                reviewer_failed = True
-
-    for name, output in review_round.reviewer_outputs.items():
-        (output_dir / f"round{round_num}_{name.lower()}.json").write_text(
-            encoding="utf-8", data=json.dumps(output, indent=2)
-        )
-    _write_round_telemetry(output_dir, round_num, review_round)
-
-    if reviewer_failed:
+    if not _fan_out_reviewers(review_round, review_msg, output_dir, round_num):
         LOGGER.error(f"Round {round_num} INVALID: required reviewer failed.")
         session.rounds.append(review_round)
         return review_round, False
@@ -1780,26 +1828,13 @@ def _run_manual_round(
         "normalized_issues": serious_issues if isinstance(serious_issues, list) else [],
     }
 
-    revised = beth_response.get("revised_draft")
-    if revised and isinstance(revised, str) and revised.strip():
-        session.canonical_draft = revised.strip()
-        review_round.revised_draft = session.canonical_draft
-        LOGGER.info(f"[Beth] Draft revised ({len(session.canonical_draft)} chars)")
-    else:
-        LOGGER.info("[Beth] No revision to draft this round")
-
+    _apply_revised_draft(session, review_round, beth_response)
     review_round.valid = True
 
-    (output_dir / f"round{round_num}_beth_decisions.json").write_text(
-        encoding="utf-8", data=json.dumps(beth_response, indent=2)
-    )
+    _persist_beth_outputs(output_dir, round_num, beth_response, review_round)
     (output_dir / f"round{round_num}_beth_normalized.json").write_text(
         encoding="utf-8", data=json.dumps(review_round.normalized_issues, indent=2)
     )
-    if review_round.revised_draft:
-        (output_dir / f"round{round_num}_revised_draft.md").write_text(
-            encoding="utf-8", data=review_round.revised_draft
-        )
 
     session.rounds.append(review_round)
 
@@ -1864,8 +1899,6 @@ def _run_round(
     Each round is an independent unit of work — extracting it makes the
     convergence loop in run_review readable and each round independently testable.
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
     review_round = ReviewRound(round_number=round_num)
 
     last_valid = _last_valid_round(session)
@@ -1879,37 +1912,7 @@ def _run_round(
         compliance_context=compliance_context,
     )
 
-    required_reviewers = ("fran", "codex", "grok", "gemini")
-    reviewer_failed = False
-
-    def _call_reviewer(key: str) -> tuple[str, dict]:
-        config = ORACLE_ROSTER[key]
-        try:
-            result = call_oracle(config, review_msg)
-            return config.name, result
-        except Exception as e:
-            LOGGER.error(f"[{config.name}] FAILED after retries: {e}")
-            return config.name, {"oracle_name": config.name, "error": str(e), "findings": []}
-
-    LOGGER.info(f"  Launching {len(required_reviewers)} reviewers in parallel...")
-    with ThreadPoolExecutor(max_workers=len(required_reviewers)) as pool:
-        futures = {pool.submit(_call_reviewer, key): key for key in required_reviewers}
-        for future in as_completed(futures):
-            name, result = future.result()
-            # Pop telemetry before the output dict is re-serialized into
-            # the referee message or written as the oracle's output file.
-            review_round.telemetry[name] = result.pop("_telemetry", None) or {}
-            review_round.reviewer_outputs[name] = result
-            if "error" in result and not result.get("findings"):
-                reviewer_failed = True
-
-    for name, output in review_round.reviewer_outputs.items():
-        (output_dir / f"round{round_num}_{name.lower()}.json").write_text(
-            encoding="utf-8", data=json.dumps(output, indent=2)
-        )
-    _write_round_telemetry(output_dir, round_num, review_round)
-
-    if reviewer_failed:
+    if not _fan_out_reviewers(review_round, review_msg, output_dir, round_num):
         LOGGER.error(f"Round {round_num} INVALID: required reviewer failed.")
         session.rounds.append(review_round)
         return review_round, False
@@ -1948,23 +1951,10 @@ def _run_round(
     _write_round_telemetry(output_dir, round_num, review_round)
     review_round.coordinator_decisions = beth_response
 
-    revised = beth_response.get("revised_draft")
-    if revised and isinstance(revised, str) and revised.strip():
-        session.canonical_draft = revised.strip()
-        review_round.revised_draft = session.canonical_draft
-        LOGGER.info(f"[Beth] Draft revised ({len(session.canonical_draft)} chars)")
-    else:
-        LOGGER.info("[Beth] No revision to draft this round")
-
+    _apply_revised_draft(session, review_round, beth_response)
     review_round.valid = True
 
-    (output_dir / f"round{round_num}_beth_decisions.json").write_text(
-        encoding="utf-8", data=json.dumps(beth_response, indent=2)
-    )
-    if review_round.revised_draft:
-        (output_dir / f"round{round_num}_revised_draft.md").write_text(
-            encoding="utf-8", data=review_round.revised_draft
-        )
+    _persist_beth_outputs(output_dir, round_num, beth_response, review_round)
 
     session.rounds.append(review_round)
 
