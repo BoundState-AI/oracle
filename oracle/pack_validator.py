@@ -99,6 +99,16 @@ GPCM_SCHEMA: dict[str, Any] = {
                     "keywords": {"type": "array", "items": {"type": "string"}},
                     "applies_to": {"type": "array", "items": {"type": "string"}},
                     "mua_relevant": {"type": "boolean"},
+                    # Per-field provenance: "vision_repaired" marks fields
+                    # that contain model-INTERPRETED text rather than
+                    # mechanically extracted text (AUDIT B3).
+                    "field_provenance": {
+                        "type": "object",
+                        "additionalProperties": {
+                            "type": "string",
+                            "enum": ["extracted", "vision_repaired"],
+                        },
+                    },
                 },
             },
         },

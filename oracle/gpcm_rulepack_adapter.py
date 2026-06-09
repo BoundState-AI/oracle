@@ -870,6 +870,20 @@ def repair_continuation_from_justification(requirement: dict[str, Any]) -> bool:
     return True
 
 
+def mark_vision_provenance(requirement: dict[str, Any], fields: list[str]) -> None:
+    """Record which fields were overwritten by Sonnet vision (AUDIT B3).
+
+    WHY: vision repair replaces mechanically extracted text with
+    model-INTERPRETED text. Retrieved and interpreted claims must stay
+    structurally separate — without this marker the distinction is erased
+    at build time, and the human promoting the pack cannot know which
+    fields to verify against the source pages.
+    """
+    provenance = requirement.setdefault("field_provenance", {})
+    for field in fields:
+        provenance[field] = "vision_repaired"
+
+
 def vision_repair_reasons(requirement: dict[str, Any]) -> list[str]:
     reasons: list[str] = []
     shall_text = normalize_space(requirement.get("shall_text", ""))
@@ -1209,20 +1223,27 @@ def apply_vision_repairs(
                 justification = clean_justification(candidate.get("justification", ""))
                 section = normalize_space(candidate.get("section", ""))
 
+                repaired_fields: list[str] = []
                 if shall_text:
                     requirement["shall_text"] = shall_text
                     subject, requirement_text = split_subject_requirement(shall_text)
                     requirement["subject"] = subject
                     requirement["requirement"] = requirement_text
                     repaired_tags.add(tag)
+                    repaired_fields.append("shall_text")
 
                 if section:
                     requirement["section"] = section
                     repaired_tags.add(tag)
+                    repaired_fields.append("section")
 
                 if justification:
                     requirement["justification"] = justification
                     repaired_tags.add(tag)
+                    repaired_fields.append("justification")
+
+                if repaired_fields:
+                    mark_vision_provenance(requirement, repaired_fields)
 
                 requirement["keywords"] = extract_keywords(
                     requirement.get("shall_text", ""),
@@ -1312,6 +1333,7 @@ def apply_targeted_tag_vision_repairs(
                 continue
 
             changed = False
+            repaired_fields: list[str] = []
             shall_text = normalize_space(candidate.get("shall_text", ""))
             justification = clean_justification(candidate.get("justification", ""))
             section = normalize_space(candidate.get("section", ""))
@@ -1322,18 +1344,25 @@ def apply_targeted_tag_vision_repairs(
                 requirement["subject"] = subject
                 requirement["requirement"] = requirement_text
                 changed = True
+                repaired_fields.append("shall_text")
 
             if justification and justification != requirement.get("justification", ""):
                 requirement["justification"] = justification
                 changed = True
+                repaired_fields.append("justification")
 
             if section and section != requirement.get("section", ""):
                 requirement["section"] = section
                 changed = True
+                repaired_fields.append("section")
 
             if primary_page and primary_page != requirement.get("page"):
                 requirement["page"] = primary_page
                 changed = True
+                repaired_fields.append("page")
+
+            if repaired_fields:
+                mark_vision_provenance(requirement, repaired_fields)
 
             if changed:
                 requirement["keywords"] = extract_keywords(

@@ -621,6 +621,19 @@ def promote_pack(
         for cf in chunk_failures[:5]:
             print(f"    pages {cf.get('page_start')}-{cf.get('page_end')}: {cf.get('final_error', '?')}")
 
+    # Vision-repair disclosure (AUDIT B3): fields marked vision_repaired
+    # are model-INTERPRETED, not mechanically extracted — the promoting
+    # human should verify them against the source pages.
+    vision_repaired = sum(
+        1 for req in pack_data.get("requirements", [])
+        if isinstance(req, dict) and req.get("field_provenance")
+    )
+    if vision_repaired:
+        print(
+            f"  Vision-fixed: {vision_repaired} requirement(s) contain "
+            f"model-interpreted fields (field_provenance) — verify against source"
+        )
+
     source_hash = meta.get("source_document_hash")
     if source_hash:
         print(f"  Source hash:  {source_hash[:20]}...")
