@@ -2038,6 +2038,113 @@ def run_review(
 # Findings Report (Section 8)
 # ---------------------------------------------------------------------------
 
+def _issue_sources(issue: dict) -> list[str]:
+    """Source-oracle attribution for a normalized issue, both workflow shapes.
+
+    Ledger (Sonnet referee) nests sources in merged_from dicts; the manual
+    workflow (Beth) lists names in source_reviewers.
+    """
+    sources: list[str] = []
+    for merged in issue.get("merged_from", []) or []:
+        if isinstance(merged, dict) and merged.get("oracle"):
+            if merged["oracle"] not in sources:
+                sources.append(merged["oracle"])
+    for reviewer in issue.get("source_reviewers", []) or []:
+        if isinstance(reviewer, str) and reviewer and reviewer not in sources:
+            sources.append(reviewer)
+    return sources
+
+
+def _format_dissent_summary(session: Any) -> list[str]:
+    """Render every rejected/unresolved finding with full coordinator reasoning.
+
+    WHY this section exists: the coordinator decides what enters the
+    revised draft, but dissent it declines must remain visible to the
+    reader with full fidelity — a rejection count is not dissent
+    (AUDIT A1, philosophy rule 4). Reasons are NOT truncated here.
+    """
+    entries: list[tuple[int, dict, dict | None]] = []
+    for r in session.rounds:
+        if not r.valid:
+            continue
+        issues_by_id = {
+            i.get("issue_id"): i
+            for i in r.normalized_issues.get("normalized_issues", [])
+            if i.get("issue_id")
+        }
+        for d in r.coordinator_decisions.get("revision_decisions", []):
+            if d.get("decision") in ("rejected_claim", "unresolved_question"):
+                entries.append((r.round_number, d, issues_by_id.get(d.get("issue_id"))))
+
+    if not entries:
+        return []
+
+    lines = [
+        "## Dissent Summary",
+        "",
+        "> The findings below were raised by reviewer oracles and NOT accepted "
+        "into the revised draft. The coordinator's reasoning is recorded in "
+        "full. A rejection is the coordinator's judgment, not a consensus "
+        "verdict — readers should weigh the reviewer's position themselves.",
+        "",
+    ]
+    for round_num, decision, issue in entries:
+        iid = decision.get("issue_id", "?")
+        label = (
+            "REJECTED BY COORDINATOR"
+            if decision.get("decision") == "rejected_claim"
+            else "UNRESOLVED QUESTION"
+        )
+        title = (issue or {}).get("title", "") or iid
+        lines.append(f"### [{label}] {title} ({iid}, round {round_num})")
+        if issue:
+            lines.append(f"**Severity (as raised):** {issue.get('severity', '?')}")
+            sources = _issue_sources(issue)
+            if sources:
+                lines.append(f"**Raised by:** {', '.join(sources)}")
+            if issue.get("conflict_flag"):
+                lines.append("**⚠ Direct conflict between reviewers on this issue**")
+        reason = decision.get("reason", "")
+        if reason:
+            lines.append(f"**Coordinator reasoning (full):** {reason}")
+        lines.append("")
+    return lines
+
+
+def _format_referee_drops(session: Any) -> list[str]:
+    """List reviewer findings the referee excluded before coordination.
+
+    WHY: dropped findings previously survived only as aggregate rates;
+    the findings themselves vanished (AUDIT A8). Listing them keeps the
+    referee's filtering auditable.
+    """
+    drops: list[tuple[int, dict]] = []
+    for r in session.rounds:
+        if not r.valid:
+            continue
+        for d in r.normalized_issues.get("dropped_findings", []):
+            if isinstance(d, dict):
+                drops.append((r.round_number, d))
+
+    if not drops:
+        return []
+
+    lines = [
+        "## Findings Dropped by Referee",
+        "",
+        "> The referee oracle excluded these reviewer findings before they "
+        "reached the coordinator. Listed for dissent fidelity.",
+        "",
+    ]
+    for round_num, d in drops:
+        lines.append(
+            f"- Round {round_num} — **{d.get('oracle', '?')}**: "
+            f"{d.get('title', '?')} (drop reason: {d.get('reason', '?')})"
+        )
+    lines.append("")
+    return lines
+
+
 def format_findings_report(
     session: Any,
     pack_dir: Path,
@@ -2133,6 +2240,11 @@ def format_findings_report(
         "",
     ])
 
+    # --- Dissent Summary (AUDIT A1) — before per-round detail so dissent
+    # is impossible to miss in a skim read ---
+    lines.extend(_format_dissent_summary(session))
+    lines.extend(_format_referee_drops(session))
+
     # --- Per-Round Detail ---
     for r in session.rounds:
         if not r.valid:
@@ -2175,7 +2287,10 @@ def format_findings_report(
             lines.append("")
 
     # --- Open Questions ---
-    for r in session.rounds:
+    # Iterate newest-first: the LAST valid round's open questions are the
+    # freshest unresolved dissent. (Iterating oldest-first showed round 1's
+    # questions and dropped the final round's — AUDIT A10.)
+    for r in reversed(session.rounds):
         if not r.valid:
             continue
         open_qs = r.coordinator_decisions.get("open_questions", [])
@@ -2188,7 +2303,7 @@ def format_findings_report(
                 else:
                     lines.append(f"- {q}")
             lines.append("")
-            break  # Only show from the last valid round
+            break  # Only show the last valid round's open questions
 
     report = "\n".join(lines)
 
