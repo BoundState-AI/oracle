@@ -48,6 +48,7 @@ from oracle.cli import (
 from oracle.chat_engine import answer_query as oracle_answer_query
 from oracle.oracle2 import compute_metrics
 from oracle.oracle2_adapter import build_review_result
+from oracle.redact import redact_secrets
 
 LOGGER = logging.getLogger("oracle.server")
 logging.basicConfig(level=logging.INFO)
@@ -395,10 +396,16 @@ def _pack_snapshot(output_dir: Path) -> dict[str, Any] | None:
 
 
 def _append_session_log(session_id: str, raw_message: str) -> None:
-    """Persist a rolling tail of clean log messages for polling fallbacks."""
+    """Persist a rolling tail of clean log messages for polling fallbacks.
+
+    Redacted at this choke point because persisted session logs include
+    raw exception text from provider SDKs/httpx, which can echo
+    credentials (AUDIT C5).
+    """
     clean = _clean_log_message(raw_message)
     if not clean:
         return
+    clean = redact_secrets(clean)
 
     session = _sessions.get(session_id)
     if not session:
@@ -502,8 +509,13 @@ def _run_review_background(
 
         msg_queue.put("All oracles have reported — finalizing...")
 
-    except BaseException as e:
+    # WHY Exception, not BaseException: catching BaseException converted
+    # KeyboardInterrupt/SystemExit during shutdown into a fake "review
+    # error" session state (AUDIT F6). Those now propagate; the finally
+    # block still detaches handlers and closes the stream.
+    except Exception as e:
         LOGGER.exception("oracle review failed")
+        error_text = redact_secrets(str(e))
         _sessions[session_id] = {
             "session_id": session_id,
             "job_type": "review",
@@ -515,10 +527,10 @@ def _run_review_background(
             "pack_names": pack_names,
             "pack_parts": pack_parts or {},
             "status": "error",
-            "error": str(e),
+            "error": error_text,
         }
         _persist_session_state(_sessions[session_id])
-        msg_queue.put(f"ERROR: {e}")
+        msg_queue.put(f"ERROR: {error_text}")
 
     finally:
         oracle_logger.removeHandler(handler)

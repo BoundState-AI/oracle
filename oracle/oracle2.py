@@ -42,6 +42,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from oracle.redact import redact_secrets
+
 LOGGER = logging.getLogger("oracle2")
 
 # ---------------------------------------------------------------------------
@@ -691,7 +693,7 @@ def _call_openai(config: OracleConfig, user_message: str) -> dict:
         return {
             "oracle_name": config.name,
             "error": "Model refusal",
-            "raw": message.refusal[:2000],
+            "raw": redact_secrets(message.refusal[:2000]),
             "_telemetry": telemetry,
         }
 
@@ -794,7 +796,7 @@ def _call_gemini(config: OracleConfig, user_message: str) -> dict:
         return {
             "oracle_name": config.name,
             "error": f"Gemini API error {response.status_code}",
-            "raw": response.text[:2000],
+            "raw": redact_secrets(response.text[:2000]),
             "findings": [],
         }
 
@@ -811,7 +813,7 @@ def _call_gemini(config: OracleConfig, user_message: str) -> dict:
         return {
             "oracle_name": config.name,
             "error": "Gemini returned no candidates",
-            "raw": json.dumps(data)[:2000],
+            "raw": redact_secrets(json.dumps(data)[:2000]),
             "findings": [],
             "_telemetry": telemetry,
         }
@@ -827,7 +829,7 @@ def _call_gemini(config: OracleConfig, user_message: str) -> dict:
         return {
             "oracle_name": config.name,
             "error": f"Gemini returned empty content (finishReason={finish_reason})",
-            "raw": json.dumps(data)[:2000],
+            "raw": redact_secrets(json.dumps(data)[:2000]),
             "findings": [],
             "_telemetry": telemetry,
         }
@@ -925,8 +927,10 @@ def call_oracle(config: OracleConfig, user_message: str) -> dict:
 
         except Exception as e:
             elapsed = time.time() - t0
-            LOGGER.error(f"[{config.name}] Failed in {elapsed:.1f}s: {e}")
-            last_error = str(e)
+            # Redact before logging/retaining: exception text can echo
+            # request headers or URLs containing credentials (AUDIT C5).
+            last_error = redact_secrets(str(e))
+            LOGGER.error(f"[{config.name}] Failed in {elapsed:.1f}s: {last_error}")
 
     if _should_fallback_gemini(config, last_error):
         fallback_model = os.environ.get("ORACLE_GEMINI_FALLBACK_MODEL", "gemini-2.5-flash")
@@ -1031,7 +1035,7 @@ def _parse_json(text: str, oracle_name: str) -> dict:
         LOGGER.error(
             f"[{oracle_name}] No JSON object found in response. Preview: {preview!r}"
         )
-        return {"oracle_name": oracle_name, "error": "No JSON found", "raw": text[:2000]}
+        return {"oracle_name": oracle_name, "error": "No JSON found", "raw": redact_secrets(text[:2000])}
 
     depth = 0
     in_string = False
@@ -1216,7 +1220,7 @@ def _recover_truncated_json(text: str, oracle_name: str) -> dict:
     if not has_content:
         LOGGER.error(f"[{oracle_name}] Could not recover any content from malformed response")
         result["error"] = "Malformed JSON, no recoverable content"
-        result["raw"] = text[:2000]
+        result["raw"] = redact_secrets(text[:2000])
     else:
         # WHY flag the salvage: a partially recovered response used to be
         # indistinguishable from a complete one, so a reviewer whose last
