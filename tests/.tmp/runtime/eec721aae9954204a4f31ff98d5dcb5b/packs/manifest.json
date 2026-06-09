@@ -1,0 +1,25 @@
+{
+  "schema_version": "oracle_packs/v1",
+  "description": "ORACLE Rule Pack Library — BoundState AI",
+  "packs": {
+    "msfc_std_3012a": {
+      "name": "EEE Parts Management Requirements",
+      "slug": "msfc_std_3012a",
+      "file": "msfc_std_3012a.json",
+      "schema": "generic",
+      "standard_id": "MSFC-STD-3012A",
+      "description": "EEE Parts Management Requirements pack",
+      "rule_count": 2,
+      "version": "1.0.0",
+      "status": "draft",
+      "extraction_status": "complete",
+      "failed_page_ranges": [],
+      "content_hash": "sha256:1eb9418806e477c8c539653a88ccfa60675acd2d1994c09fe915ae2b05c6cd60",
+      "added_at": "2026-04-08T00:00:00Z",
+      "promoted_at": null,
+      "promoted_by": null,
+      "source_document": "MSFC-STD-3012A.pdf",
+      "source_document_hash": null
+    }
+  }
+}

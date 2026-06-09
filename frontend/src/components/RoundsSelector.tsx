@@ -1,6 +1,6 @@
 /**
- * RoundsSelector — review round count picker with per-round cost warning.
- * Surfaces the 4-reviewer cost model so operators make informed choices before long runs.
+ * RoundsSelector — review round configuration with cost transparency.
+ * Surfaces oracle resource costs in scientific specification format.
  */
 
 "use client";
@@ -19,8 +19,8 @@ interface RoundsOption {
   value: number;
   label: string;
   description: string;
+  specification: string;
   warning?: string;
-  isDefault?: boolean;
 }
 
 const ROUNDS_OPTIONS: RoundsOption[] = [
@@ -28,46 +28,57 @@ const ROUNDS_OPTIONS: RoundsOption[] = [
     value: 1,
     label: "Single Pass",
     description:
-      "One round of review. Fast, cheap, cannot converge by definition.",
-    isDefault: true,
+      "One round of oracle review. Baseline for exploratory or low-risk documents.",
+    specification: "4 oracles × 1 round = 4 reviewer calls",
+    warning: "Cannot converge",
   },
   {
     value: 2,
     label: "Two Rounds",
     description:
-      "Enables true convergence: round 2 confirms no new critical/high findings emerged from revisions.",
+      "Enables convergence validation: round 2 confirms no new critical findings emerged from revisions.",
+    specification: "4 oracles × 2 rounds = 8 reviewer calls",
   },
   {
     value: 3,
     label: "Three Rounds",
     description:
-      "For dense specs or contested findings where round 2 rarely stabilizes.",
+      "For dense specifications or contested findings where round 2 yields new defects.",
+    specification: "4 oracles × 3 rounds = 12 reviewer calls",
   },
   {
     value: 4,
     label: "Four Rounds",
-    description: "Maximum. Use only when you expect heavy iteration.",
-    warning: "Very expensive",
+    description:
+      "Maximum iteration depth. Use only when round 3 yields new unresolved disagreements.",
+    specification: "4 oracles × 4 rounds = 16 reviewer calls",
+    warning: "Peak cost",
   },
 ];
 
-const PER_ROUND_COST_LABEL = "~$2–8 per round";
+const COST_ESTIMATE = "~$8–$32 depending on document length";
 
 export function RoundsSelector({ value, onChange }: RoundsSelectorProps) {
   return (
-    <div className="space-y-3">
-      <div className="flex items-baseline justify-between gap-3">
-        <h3 className="text-sm font-medium text-foreground">Review Rounds</h3>
-        <span className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-          {PER_ROUND_COST_LABEL}
-        </span>
+    <div className="space-y-4">
+      <div>
+        <h3 className="text-base font-serif font-semibold mb-2">Review Configuration</h3>
+        <p className="text-xs text-muted-foreground">
+          Select oracle depth. Each round runs 4 independent reviewers.
+        </p>
       </div>
-      <div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-200/90">
-        <strong className="font-semibold">Heads up:</strong> each round runs 4
-        reviewer LLMs (Beth, Fran, Codex, Grok) over the full document. Cost
-        and latency scale roughly linearly with round count. A 100-page spec at
-        4 rounds can exceed $30.
+
+      {/* Cost note */}
+      <div className="p-3 bg-accent/10 border border-accent/30 rounded-md space-y-1">
+        <div className="text-xs font-mono font-semibold text-accent uppercase tracking-wider">
+          Resource estimate
+        </div>
+        <div className="text-sm text-foreground">
+          {COST_ESTIMATE}
+        </div>
       </div>
+
+      {/* Round options */}
       <RadioGroup
         value={String(value)}
         onValueChange={(v) => {
@@ -76,44 +87,59 @@ export function RoundsSelector({ value, onChange }: RoundsSelectorProps) {
             onChange(Math.max(MIN_ROUNDS, Math.min(MAX_ROUNDS, parsed)));
           }
         }}
-        className="space-y-2"
+        className="space-y-3"
       >
         {ROUNDS_OPTIONS.map((option) => (
           <label
             key={option.value}
             className={`
-              flex items-start gap-3 rounded-lg border px-4 py-3 cursor-pointer transition-colors
+              group cursor-pointer block p-4 rounded-md border transition-all
               ${
                 value === option.value
-                  ? "border-ring bg-accent"
-                  : "border-border hover:bg-accent/50"
+                  ? "border-primary bg-primary/5"
+                  : "border-border hover:border-primary/50 bg-card/50"
               }
             `}
           >
-            <RadioGroupItem value={String(option.value)} className="mt-0.5" />
-            <div className="flex-1">
-              <div className="flex items-center gap-2">
-                <span className="text-sm font-medium text-foreground">
-                  {option.label}
-                </span>
-                {option.isDefault && (
-                  <span className="rounded-full bg-ring/10 px-2 py-0.5 text-[10px] font-medium text-ring">
-                    default
-                  </span>
-                )}
-                {option.warning && (
-                  <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-300">
-                    {option.warning}
-                  </span>
-                )}
+            <div className="flex items-start gap-3">
+              <RadioGroupItem
+                value={String(option.value)}
+                id={`rounds-${option.value}`}
+                className="mt-1 flex-shrink-0"
+              />
+              <div className="flex-1 space-y-2">
+                <div className="flex items-center gap-2">
+                  <label
+                    htmlFor={`rounds-${option.value}`}
+                    className="text-sm font-serif font-semibold text-foreground cursor-pointer"
+                  >
+                    {option.label}
+                  </label>
+                  {option.warning && (
+                    <span className="text-[10px] font-mono font-semibold uppercase tracking-wider text-accent px-2 py-1 bg-accent/15 rounded">
+                      {option.warning}
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  {option.description}
+                </p>
+                <div className="text-xs font-mono text-muted-foreground bg-card/50 px-2 py-1 rounded inline-block">
+                  {option.specification}
+                </div>
               </div>
-              <p className="text-xs text-muted-foreground mt-0.5">
-                {option.description}
-              </p>
             </div>
           </label>
         ))}
       </RadioGroup>
+
+      {/* Convergence note */}
+      <div className="p-3 bg-muted/10 border border-border rounded-md text-xs text-muted-foreground space-y-1">
+        <div className="font-mono font-semibold uppercase tracking-wider">Convergence</div>
+        <p>
+          Baseline convergence requires round 2+. Systems that disagree persistently are reported as blocked, never as false consensus.
+        </p>
+      </div>
     </div>
   );
 }
