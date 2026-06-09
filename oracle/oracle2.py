@@ -2205,6 +2205,32 @@ def compute_metrics(session: OracleSession) -> dict:
     # Valid rounds = all 5 oracles succeeded (reviewer + Sonnet + Beth)
     valid_rounds = sum(1 for r in session.rounds if r.valid)
 
+    # WHY dangling-ID tracking (AUDIT A7): Beth references findings by
+    # issue_id; an ID with no matching normalized issue silently drops
+    # out of every severity count. Surfacing them makes referee/
+    # coordinator ID discipline auditable instead of assumed.
+    dangling_decision_ids = sorted({
+        d.get("issue_id") for d in all_decisions
+        if d.get("issue_id") and d.get("issue_id") not in issue_severity
+    })
+
+    # WHY continuity (AUDIT A7): the ledger convergence gate depends on
+    # the referee voluntarily reusing issue_ids across rounds. This
+    # measures how much reuse actually happened; None = not measurable
+    # (fewer than two valid rounds with IDs).
+    continuity_samples: list[float] = []
+    valid_with_ids = [
+        {i.get("issue_id") for i in r.normalized_issues.get("normalized_issues", []) if i.get("issue_id")}
+        for r in session.rounds if r.valid
+    ]
+    for prev_ids, curr_ids in zip(valid_with_ids, valid_with_ids[1:]):
+        if prev_ids and curr_ids:
+            continuity_samples.append(len(curr_ids & prev_ids) / len(curr_ids))
+    issue_id_continuity = (
+        sum(continuity_samples) / len(continuity_samples)
+        if continuity_samples else None
+    )
+
     return {
         "accepted_critical_count": critical_accepted,
         "accepted_high_count": high_accepted,
@@ -2222,6 +2248,8 @@ def compute_metrics(session: OracleSession) -> dict:
         "valid_rounds": valid_rounds,
         "converged": session.converged,
         "consensus_type": session.consensus_type,
+        "dangling_decision_ids": dangling_decision_ids,
+        "issue_id_continuity": issue_id_continuity,
     }
 
 

@@ -2122,6 +2122,60 @@ def _format_reviewer_verdicts(session: Any) -> list[str]:
     return []
 
 
+def _oracle_provider_map() -> dict[str, str]:
+    """Oracle display name -> provider, from the live roster."""
+    from oracle.oracle2 import ORACLE_ROSTER
+    return {cfg.name: cfg.provider for cfg in ORACLE_ROSTER.values()}
+
+
+def _corroboration_note(sources: list[str]) -> str | None:
+    """Classify multi-oracle agreement as cross-vendor or same-vendor.
+
+    WHY: Fran and Codex run on the same model, so their agreement is one
+    vendor's training distribution voting twice — structurally weaker
+    evidence than two vendors agreeing independently (AUDIT A6). The
+    distinction is annotated, never weighted: the reader judges.
+    """
+    if len(sources) < 2:
+        return None
+    provider_map = _oracle_provider_map()
+    providers = {provider_map.get(s, "unknown") for s in sources}
+    if len(providers) >= 2:
+        return f"cross-vendor ({len(providers)} independent providers)"
+    provider = next(iter(providers))
+    return (
+        f"same-vendor — all corroborating reviewers share provider "
+        f"'{provider}'; same-model agreement is weaker evidence than "
+        f"cross-vendor agreement"
+    )
+
+
+def _format_reviewer_pool_note(session: Any) -> list[str]:
+    """One-line disclosure of reviewer vendor diversity (AUDIT A6)."""
+    from oracle.oracle2 import ORACLE_ROSTER
+    reviewers = [
+        cfg for cfg in ORACLE_ROSTER.values()
+        if cfg.role not in ("coordinator", "referee")
+    ]
+    if not reviewers:
+        return []
+    by_provider: dict[str, list[str]] = {}
+    for cfg in reviewers:
+        by_provider.setdefault(cfg.provider, []).append(cfg.name)
+    shared = [
+        f"{', '.join(sorted(names))} share {provider}"
+        for provider, names in sorted(by_provider.items())
+        if len(names) > 1
+    ]
+    note = (
+        f"**Reviewer pool:** {len(reviewers)} oracles across "
+        f"{len(by_provider)} vendors"
+    )
+    if shared:
+        note += f" ({'; '.join(shared)})"
+    return [note, ""]
+
+
 def _format_dissent_summary(session: Any) -> list[str]:
     """Render every rejected/unresolved finding with full coordinator reasoning.
 
@@ -2169,6 +2223,9 @@ def _format_dissent_summary(session: Any) -> list[str]:
             sources = _issue_sources(issue)
             if sources:
                 lines.append(f"**Raised by:** {', '.join(sources)}")
+                corroboration = _corroboration_note(sources)
+                if corroboration:
+                    lines.append(f"**Corroboration:** {corroboration}")
             if issue.get("conflict_flag"):
                 lines.append("**⚠ Direct conflict between reviewers on this issue**")
         reason = decision.get("reason", "")
@@ -2284,6 +2341,8 @@ def format_findings_report(
         lines.append(f"**Convergence Reason:** {session.convergence_reason}")
         lines.append("")
 
+    lines.extend(_format_reviewer_pool_note(session))
+
     # --- Authority Summary (Section 8, item 2) ---
     if pack_names:
         lines.append("## Authority Summary")
@@ -2330,6 +2389,23 @@ def format_findings_report(
         f"- Converged: {metrics.get('converged', False)}",
         "",
     ])
+    continuity = metrics.get("issue_id_continuity")
+    if isinstance(continuity, (int, float)):
+        lines.append(f"- Issue-ID continuity across rounds: {continuity:.0%}")
+        lines.append("")
+
+    # Data-integrity warnings (AUDIT A7): a coordinator decision whose
+    # issue_id matches no normalized issue drops out of severity counts.
+    dangling = metrics.get("dangling_decision_ids") or []
+    if dangling:
+        lines.append("## Data Integrity Warnings")
+        lines.append("")
+        lines.append(
+            f"> {len(dangling)} coordinator decision(s) reference issue IDs "
+            f"with no matching normalized issue: {', '.join(dangling)}. "
+            f"Severity counts above may be incomplete for these decisions."
+        )
+        lines.append("")
 
     # --- Reviewer verdicts + Dissent Summary (AUDIT A3 + A1) — before
     # per-round detail so dissent is impossible to miss in a skim read ---
@@ -2380,10 +2456,12 @@ def format_findings_report(
                 if fix:
                     lines.append(f"**Fix:** {fix}")
 
-                merged = issue.get("merged_from", [])
-                if merged:
-                    sources = ", ".join(m.get("oracle", "?") for m in merged)
-                    lines.append(f"**Sources:** {sources}")
+                sources = _issue_sources(issue)
+                if sources:
+                    lines.append(f"**Sources:** {', '.join(sources)}")
+                    corroboration = _corroboration_note(sources)
+                    if corroboration:
+                        lines.append(f"**Corroboration:** {corroboration}")
                 lines.append("")
 
         # Coordinator decisions
