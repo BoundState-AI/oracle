@@ -1,0 +1,128 @@
+{
+  "jurisdiction": {
+    "state": "CO",
+    "county": "Larimer",
+    "version": "2026.06"
+  },
+  "governance": {
+    "owner": "Dr. Joseph Wilde",
+    "monitored_sources": [
+      "CREC standard forms library (dora.colorado.gov/divisions/division-of-real-estate)",
+      "C.R.S. Title 12, Article 10 (leg.colorado.gov)",
+      "CO Division of Real Estate position statements",
+      "ECMC (formerly COGCC) rules (ecmc.state.co.us)",
+      "DOLA special district transparency portal (dola.colorado.gov)"
+    ],
+    "update_sla_days": 30,
+    "status": "provisional"
+  },
+  "rules": [
+    {
+      "rule_id": "CO-LAR-BDB-FEE-001",
+      "category": "commission_norm",
+      "status": "provisional",
+      "effective_from": "2024-08-17",
+      "effective_to": null,
+      "source": "CREC Exclusive Right-to-Buy Listing Contract (BDB24-6-24) §7 compensation blanks; Burnett v. NAR settlement practice changes (eff. 2024-08-17); C.R.S. 12-10-203",
+      "authority_review": null,
+      "signature": "STUB1:9c3430352b3de9942f65f934da7cb0f4a0cd2687bfc6a237c38854cdc3a64674",
+      "payload": {
+        "summary": "Pre-filled buyer-broker fee percentage presented as if standard.",
+        "detection": {
+          "type": "clause_regex",
+          "all_of": [
+            "(?:success fee|broker'?s? fee|compensation|commission)",
+            "(?P<fee_pct>\\d{1,2}(?:\\.\\d{1,2})?)\\s*(?:%|percent)"
+          ]
+        },
+        "finding": {
+          "category": "fee",
+          "severity": "warn",
+          "default_analysis": "The compensation blank arrives pre-filled with a percentage. Buyer-broker compensation is negotiable and is not set by law or by any MLS rule; the blank could equally hold a flat fee, an hourly rate, or a lower percentage with a cap. Ask what the number would be if you proposed it.",
+          "exposure": null
+        }
+      }
+    },
+    {
+      "rule_id": "CO-LAR-BDB-SCOPE-001",
+      "category": "form",
+      "status": "provisional",
+      "effective_from": "2024-08-17",
+      "effective_to": null,
+      "source": "CREC BDB24-6-24 §2 brokerage services area blank; CO Division of Real Estate buyer-agency guidance",
+      "authority_review": null,
+      "signature": "STUB1:0079b2aa6e28e5c678658fa8f44414bbe9c6052210d4e8053022695423d8f370",
+      "payload": {
+        "summary": "Agreement scope covers an entire region rather than the search actually underway.",
+        "detection": {
+          "type": "clause_regex",
+          "all_of": [
+            "(?:applies to|services? area|exclusive (?:right|agent))",
+            "(?:state of colorado|all (?:other )?counties|anywhere in colorado)"
+          ]
+        },
+        "finding": {
+          "category": "scope",
+          "severity": "flag",
+          "default_analysis": "The services-area blank is filled region-wide, obligating the buyer to this broker for ANY purchase anywhere in the territory during the term. The blank could have named one county, one town, or one listing. Region-wide scope plus a backstop clause is how a buyer ends up owing a fee on a property the broker never touched.",
+          "exposure": null
+        }
+      }
+    },
+    {
+      "rule_id": "CO-LAR-BDB-BACKSTOP-001",
+      "category": "commission_norm",
+      "status": "provisional",
+      "effective_from": "2024-08-17",
+      "effective_to": null,
+      "source": "CREC BDB24-6-24 §7 additional-compensation/payment terms",
+      "authority_review": null,
+      "signature": "STUB1:5c52bae73d00c400ca5184451ba756d94a69df2813bd845a55c91435a0eaa180",
+      "payload": {
+        "summary": "Buyer personally backstops the fee if seller-side payment falls through.",
+        "detection": {
+          "type": "clause_regex",
+          "all_of": [
+            "(?:seller|landlord|listing broker(?:age)?)[^.]{0,160}?(?:does not pay|fails? to pay|shall not pay|will not pay)",
+            "buyer (?:shall|will|agrees? to) pay"
+          ]
+        },
+        "finding": {
+          "category": "backstop",
+          "severity": "flag",
+          "default_analysis": "If the seller or listing brokerage does not pay, the buyer pays the entire unpaid fee at closing — on top of down payment and closing costs. The blank could have capped buyer liability, made the fee contingent on seller-side payment, or struck the backstop entirely. Exposure shown is the pre-filled percentage applied to the configured target price.",
+          "exposure": {
+            "method": "pct_capture_times_target_price",
+            "pct_capture": "fee_pct"
+          }
+        }
+      }
+    },
+    {
+      "rule_id": "CO-LAR-BDB-DEFAULT-001",
+      "category": "form",
+      "status": "provisional",
+      "effective_from": "2024-08-17",
+      "effective_to": null,
+      "source": "CREC BDB24-6-24 fee-earned and survival-of-obligations provisions",
+      "authority_review": null,
+      "signature": "STUB1:c17780f5218bb606bd7022fbb112da2ea31e0abfe54760a5f34ca9eec0ea5694",
+      "payload": {
+        "summary": "Fee is earned and survives even when the deal dies on buyer default.",
+        "detection": {
+          "type": "clause_regex",
+          "all_of": [
+            "(?:buyer[^.]{0,100}?defaults?|defaults? by (?:the )?buyer)",
+            "(?:success fee|fee|compensation)[^.]{0,120}?(?:earned|due|payable|surviv\\w*)"
+          ]
+        },
+        "finding": {
+          "category": "default_trap",
+          "severity": "flag",
+          "default_analysis": "If the buyer defaults on a purchase contract, the broker's fee is still earned, due, and payable — the buyer pays for a closing that never happened, on top of any earnest money already lost. The blank could have limited the fee to transactions that actually close.",
+          "exposure": null
+        }
+      }
+    }
+  ]
+}

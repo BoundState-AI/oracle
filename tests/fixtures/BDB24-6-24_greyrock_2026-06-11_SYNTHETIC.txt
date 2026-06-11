@@ -1,0 +1,56 @@
+SYNTHETIC TEST FIXTURE — reconstructed for HEARTH Phase 1 from the clause
+content described in spec v0.3 §2.5 / §12 P1-B. Not an executed agreement.
+Layout modeled on a CREC-style exclusive right-to-buy contract as presented
+by the Grey Rock brokerage on 2026-06-11.
+
+EXCLUSIVE RIGHT-TO-BUY LISTING CONTRACT (BDB24-6-24)
+(ALL TYPES OF PROPERTIES)
+Grey Rock Realty Group LLC, Berthoud, Colorado
+Date: June 11, 2026
+
+1. AGREEMENT. Buyer engages Broker as Buyer's exclusive agent to locate and
+negotiate the acquisition of real property as described in this Contract,
+and Broker accepts that engagement.
+
+2. BROKERAGE SERVICES AREA. This Contract applies to the purchase of any
+real property by Buyer located anywhere in the State of Colorado, including
+without limitation Larimer, Weld, and Boulder Counties.
+
+3. TERM OF CONTRACT. This Contract begins on the date set forth above and
+continues through December 31, 2026. The parties may extend the term by
+written agreement.
+
+4. BROKERAGE DUTIES. Broker will exercise reasonable skill and care for
+Buyer as a buyer's agent, including presenting all offers in a timely
+manner and disclosing to Buyer adverse material facts actually known by
+Broker.
+
+5. EARNEST MONEY. Broker may hold earnest money as provided in a Contract
+to Buy and Sell Real Estate between Buyer and a seller.
+
+6. OTHER BROKERS. Buyer agrees to conduct all negotiations for properties
+in the Services Area only through Broker and to refer to Broker all
+communications received from other brokers or sellers.
+
+7. COMPENSATION TO BROKER. Buyer agrees that Broker's Success Fee shall be
+3% of the Purchase Price of any property acquired by Buyer during the term
+of this Contract, earned as set forth below.
+
+7.1 PAYMENT SOURCE. Broker will first seek payment of the Success Fee from
+the seller or the listing brokerage by separate written agreement.
+
+7.3 ADDITIONAL COMPENSATION. If the Seller or the listing brokerage does
+not pay all or any portion of the Success Fee, Buyer shall pay Broker the
+unpaid balance at Closing.
+
+7.4 HOLDOVER. If within ninety days after this Contract ends Buyer acquires
+a property identified to Buyer by Broker during the term, the Success Fee
+will be due as if the property were acquired during the term.
+
+8. FEE EARNED ON DEFAULT. If Buyer defaults under any contract to purchase
+a property in the Services Area, the Success Fee is earned, due, and
+payable on the date of default, and the obligations of this Section
+survive the expiration or termination of this Contract.
+
+9. ENTIRE AGREEMENT. This Contract constitutes the entire agreement of the
+parties relating to its subject matter and supersedes all prior agreements.
