@@ -16,13 +16,16 @@ def _reviewer_response(name: str) -> dict:
 
 
 def test_run_review_aborts_after_consecutive_invalid_rounds(monkeypatch, tmp_path):
-    """A vendor hard-down must stop the loop early, not burn all rounds."""
+    """A TOTAL vendor outage must stop the loop early, not burn all rounds.
+
+    (A single-vendor outage now salvages on degraded quorum — see
+    tests/test_quorum_salvage.py. The abort path is for rounds below
+    quorum.)
+    """
     def fake_call_oracle(config, user_message):
-        if config.name == "Grok":
-            raise RuntimeError("simulated vendor outage")
         if config.name == "Beth":
-            raise AssertionError("Beth must not be called when a round is invalid")
-        return _reviewer_response(config.name)
+            raise AssertionError("Beth must not be called when a round is below quorum")
+        raise RuntimeError("simulated total vendor outage")
 
     monkeypatch.setattr(oracle2, "call_oracle", fake_call_oracle)
 
@@ -40,16 +43,12 @@ def test_run_review_aborts_after_consecutive_invalid_rounds(monkeypatch, tmp_pat
 
 
 def test_run_review_recovers_when_outage_is_transient(monkeypatch, tmp_path):
-    """One invalid round followed by a healthy one resets the abort counter."""
-    grok_calls = 0
+    """A below-quorum round followed by a healthy one resets the abort counter."""
+    round_counter = {"n": 0}
 
     def fake_call_oracle(config, user_message):
-        nonlocal grok_calls
-        if config.name == "Grok":
-            grok_calls += 1
-            if grok_calls == 1:
-                raise RuntimeError("transient outage")
-            return _reviewer_response(config.name)
+        if config.name == "Fran":
+            round_counter["n"] += 1
         if config.name == "Beth":
             return {
                 "oracle_name": "Beth",
@@ -65,6 +64,9 @@ def test_run_review_recovers_when_outage_is_transient(monkeypatch, tmp_path):
                 "recommendation_reason": "clean",
                 "revised_draft": None,
             }
+        # Round 1: every reviewer fails (below quorum). Round 2: healthy.
+        if round_counter["n"] == 1:
+            raise RuntimeError("transient total outage")
         return _reviewer_response(config.name)
 
     monkeypatch.setattr(oracle2, "call_oracle", fake_call_oracle)
@@ -77,7 +79,7 @@ def test_run_review_recovers_when_outage_is_transient(monkeypatch, tmp_path):
     )
 
     assert session.converged is True
-    assert len(session.rounds) == 2  # round 1 invalid, round 2 valid + LOCK
+    assert len(session.rounds) == 2  # round 1 below quorum, round 2 valid + LOCK
 
 
 def test_non_converged_run_always_has_a_reason(monkeypatch, tmp_path):

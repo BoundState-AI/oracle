@@ -3,10 +3,10 @@
 Module: oracle.oracle2
 Purpose: Multi-oracle review system for specs, plans, and architecture docs.
 
-Flow:
-  Round 0: Beth (Opus 4.6) writes or accepts the canonical draft
-  Round 1: Fran (GPT-5.4), Codex (GPT-5.4), Grok (xAI), Gemini review independently (blind)
-  Round 1.5: Sonnet (Claude Sonnet 4.6) normalizes/deduplicates findings
+Flow (model defaults live in ORACLE_ROSTER; override via ORACLE_*_MODEL):
+  Round 0: Beth (Anthropic coordinator) writes or accepts the canonical draft
+  Round 1: Fran (OpenAI), Codex (OpenAI), Grok (xAI), Gemini (Google) review independently (blind)
+  Round 1.5 (ledger workflow only): Sonnet (Anthropic referee) normalizes/deduplicates findings
   Round 2: Beth classifies findings, revises draft
   Round 3+: Re-review changed sections until convergence
 
@@ -31,15 +31,19 @@ from __future__ import annotations
 __safety_critical__: bool = True
 
 import argparse
+import hashlib
 import json
 import logging
 import os
+import random
 import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from oracle.redact import redact_secrets
 
 LOGGER = logging.getLogger("oracle2")
 
@@ -60,7 +64,7 @@ Hard rules:
 4. Every finding must be atomic: one issue, one claim.
 5. Prefer high-severity findings over style comments.
 6. Cite the exact section, heading, paragraph, line span, or quoted snippet that triggered the finding.
-7. If a concern is speculative, label it as speculative.
+7. If a concern is speculative, set "speculative": true on that finding.
 8. If you have fewer than 3 real findings, return fewer than 3. Do not invent filler.
 9. Do not repeat obvious points already stated in the draft unless they are still defective.
 10. Output valid JSON only.
@@ -90,7 +94,8 @@ Return schema:
       "problem": "...",
       "why_it_matters": "...",
       "proposed_fix": "...",
-      "confidence": 0.0
+      "confidence": 0.0,
+      "speculative": false
     }
   ],
   "top_3_must_fix": ["...", "...", "..."]
@@ -216,7 +221,9 @@ Output JSON only:
       "severity": "critical|high|medium|low",
       "source_reviewers": ["Fran", "Gemini"],
       "summary": "...",
-      "resolution": "..."
+      "resolution": "...",
+      "confidence": 0.0,
+      "speculative": false
     }
   ],
   "feedback_themes": ["..."],
@@ -344,6 +351,9 @@ Tasks:
 2. Merge semantically equivalent findings into one atomic issue.
 3. Assign final severity based on impact, not wording.
 4. Flag unsupported or weak findings.
+   For each merged issue, carry "confidence" as the LOWEST confidence
+   among merged source findings (conservative), and "speculative": true
+   if ANY merged source marked itself speculative.
 5. Detect direct conflicts between reviewers.
 6. Produce a normalized issue ledger for the coordinator.
 7. If an issue was seen in prior rounds, REUSE the same issue_id so Beth
@@ -374,7 +384,9 @@ Output JSON:
       "best_evidence": "...",
       "recommended_fix": "...",
       "conflict_flag": false,
-      "weak_signal": false
+      "weak_signal": false,
+      "confidence": 0.0,
+      "speculative": false
     }
   ],
   "dropped_findings": [
@@ -395,6 +407,11 @@ Output JSON:
 # WHY 600s: multi-oracle reviews with 3 parallel calls + normalization +
 # coordination can take 8-10 minutes for large documents.
 PROVIDER_TIMEOUT = int(os.environ.get("ORACLE_TIMEOUT_SECONDS", "600"))
+# WHY configurable: the 10s default suits normal links, but TLS handshakes
+# over satellite/high-latency connections can exceed it (the HEARTH abort
+# ran over airplane WiFi). The right value is environment-dependent; the
+# default is unchanged because raising it globally would be a guess.
+CONNECT_TIMEOUT = float(os.environ.get("ORACLE_CONNECT_TIMEOUT", "10.0"))
 # WHY 24576: GPT-5.4 reviewer responses include full findings JSON + rationale;
 # 24K tokens accommodates documents with 50+ findings without truncation.
 OPENAI_REVIEWER_MAX_TOKENS = int(
@@ -528,7 +545,7 @@ def _call_anthropic(config: OracleConfig, user_message: str) -> dict:
 
     client = Anthropic(
         api_key=os.environ.get("ANTHROPIC_API_KEY"),
-        timeout=httpx.Timeout(config.timeout, connect=10.0),
+        timeout=httpx.Timeout(config.timeout, connect=CONNECT_TIMEOUT),
         max_retries=0,
     )
     kwargs: dict[str, Any] = {
@@ -555,7 +572,16 @@ def _call_anthropic(config: OracleConfig, user_message: str) -> dict:
         if getattr(block, "type", None) == "text":
             text = block.text
             break
-    return _parse_json(text, config.name)
+    result = _parse_json(text, config.name)
+    usage = getattr(final_message, "usage", None)
+    result["_telemetry"] = {
+        "response_model": getattr(final_message, "model", None),
+        "input_tokens": getattr(usage, "input_tokens", None),
+        "output_tokens": getattr(usage, "output_tokens", None),
+        "temperature": kwargs.get("temperature"),
+        "thinking": "adaptive" if "thinking" in kwargs else None,
+    }
+    return result
 
 
 def _openai_reviewer_response_format(config: OracleConfig) -> dict[str, Any]:
@@ -598,6 +624,12 @@ def _openai_reviewer_response_format(config: OracleConfig) -> dict[str, Any]:
                                 "why_it_matters": {"type": "string"},
                                 "proposed_fix": {"type": "string"},
                                 "confidence": {"type": "number"},
+                                # WHY: the shared contract demands marking
+                                # speculative concerns, but a strict schema
+                                # with additionalProperties:false FORBADE
+                                # the marker — the uncertainty label had
+                                # nowhere to live (AUDIT A9).
+                                "speculative": {"type": "boolean"},
                             },
                             "required": [
                                 "title",
@@ -609,6 +641,7 @@ def _openai_reviewer_response_format(config: OracleConfig) -> dict[str, Any]:
                                 "why_it_matters",
                                 "proposed_fix",
                                 "confidence",
+                                "speculative",
                             ],
                         },
                     },
@@ -637,7 +670,7 @@ def _call_openai(config: OracleConfig, user_message: str) -> dict:
 
     client = OpenAI(
         api_key=os.environ.get("OPENAI_API_KEY"),
-        timeout=httpx.Timeout(config.timeout, connect=10.0),
+        timeout=httpx.Timeout(config.timeout, connect=CONNECT_TIMEOUT),
     )
     kwargs: dict[str, Any] = {
         "model": config.model,
@@ -659,6 +692,17 @@ def _call_openai(config: OracleConfig, user_message: str) -> dict:
     message = choice.message
     text = (message.content or "").strip()
 
+    # Usage capture (AUDIT D1): getattr-safe because SDK fakes in tests
+    # (and older SDK versions) may omit usage/model attributes entirely.
+    usage = getattr(response, "usage", None)
+    telemetry = {
+        "response_model": getattr(response, "model", None),
+        "input_tokens": getattr(usage, "prompt_tokens", None),
+        "output_tokens": getattr(usage, "completion_tokens", None),
+        "temperature": kwargs.get("temperature"),
+        "reasoning_effort": kwargs.get("reasoning_effort"),
+    }
+
     if choice.finish_reason == "length":
         LOGGER.warning(
             f"[{config.name}] OpenAI hit max completion budget "
@@ -670,7 +714,8 @@ def _call_openai(config: OracleConfig, user_message: str) -> dict:
         return {
             "oracle_name": config.name,
             "error": "Model refusal",
-            "raw": message.refusal[:2000],
+            "raw": redact_secrets(message.refusal[:2000]),
+            "_telemetry": telemetry,
         }
 
     if not text:
@@ -682,9 +727,12 @@ def _call_openai(config: OracleConfig, user_message: str) -> dict:
             "oracle_name": config.name,
             "error": f"Empty response (finish_reason={choice.finish_reason})",
             "raw": "",
+            "_telemetry": telemetry,
         }
 
-    return _parse_json(text, config.name)
+    result = _parse_json(text, config.name)
+    result["_telemetry"] = telemetry
+    return result
 
 
 def _call_xai(config: OracleConfig, user_message: str) -> dict:
@@ -695,7 +743,7 @@ def _call_xai(config: OracleConfig, user_message: str) -> dict:
     client = OpenAI(
         api_key=os.environ.get("XAI_API_KEY"),
         base_url="https://api.x.ai/v1",
-        timeout=httpx.Timeout(config.timeout, connect=10.0),
+        timeout=httpx.Timeout(config.timeout, connect=CONNECT_TIMEOUT),
     )
     kwargs: dict[str, Any] = {
         "model": config.model,
@@ -709,9 +757,25 @@ def _call_xai(config: OracleConfig, user_message: str) -> dict:
     else:
         kwargs["temperature"] = config.temperature
         kwargs["max_tokens"] = config.max_tokens
+    # WHY behind a flag, default OFF: xAI's endpoint is OpenAI-compatible,
+    # but its support for this strict response_format schema has not been
+    # verified with a live call (AUDIT C4). Saying "Grok output is
+    # schema-enforced" without that verification would be a lie about
+    # robustness. Flip on (ORACLE_XAI_JSON_MODE=1) after a green
+    # eval/live run confirms the endpoint honors it.
+    if os.environ.get("ORACLE_XAI_JSON_MODE", "").strip().lower() in {"1", "true", "yes"}:
+        kwargs["response_format"] = _openai_reviewer_response_format(config)
     response = client.chat.completions.create(**kwargs)
     text = response.choices[0].message.content or ""
-    return _parse_json(text, config.name)
+    result = _parse_json(text, config.name)
+    usage = getattr(response, "usage", None)
+    result["_telemetry"] = {
+        "response_model": getattr(response, "model", None),
+        "input_tokens": getattr(usage, "prompt_tokens", None),
+        "output_tokens": getattr(usage, "completion_tokens", None),
+        "temperature": kwargs.get("temperature"),
+    }
+    return result
 
 
 def _call_gemini(config: OracleConfig, user_message: str) -> dict:
@@ -747,7 +811,7 @@ def _call_gemini(config: OracleConfig, user_message: str) -> dict:
         },
     }
 
-    with httpx.Client(timeout=httpx.Timeout(config.timeout, connect=10.0)) as client:
+    with httpx.Client(timeout=httpx.Timeout(config.timeout, connect=CONNECT_TIMEOUT)) as client:
         response = client.post(
             url,
             headers={
@@ -761,18 +825,26 @@ def _call_gemini(config: OracleConfig, user_message: str) -> dict:
         return {
             "oracle_name": config.name,
             "error": f"Gemini API error {response.status_code}",
-            "raw": response.text[:2000],
+            "raw": redact_secrets(response.text[:2000]),
             "findings": [],
         }
 
     data = response.json()
+    usage = data.get("usageMetadata") or {}
+    telemetry = {
+        "response_model": data.get("modelVersion") or config.model,
+        "input_tokens": usage.get("promptTokenCount"),
+        "output_tokens": usage.get("candidatesTokenCount"),
+        "temperature": config.temperature,
+    }
     candidates = data.get("candidates") or []
     if not candidates:
         return {
             "oracle_name": config.name,
             "error": "Gemini returned no candidates",
-            "raw": json.dumps(data)[:2000],
+            "raw": redact_secrets(json.dumps(data)[:2000]),
             "findings": [],
+            "_telemetry": telemetry,
         }
 
     parts = candidates[0].get("content", {}).get("parts", [])
@@ -786,11 +858,14 @@ def _call_gemini(config: OracleConfig, user_message: str) -> dict:
         return {
             "oracle_name": config.name,
             "error": f"Gemini returned empty content (finishReason={finish_reason})",
-            "raw": json.dumps(data)[:2000],
+            "raw": redact_secrets(json.dumps(data)[:2000]),
             "findings": [],
+            "_telemetry": telemetry,
         }
 
-    return _parse_json(text, config.name)
+    result = _parse_json(text, config.name)
+    result["_telemetry"] = telemetry
+    return result
 
 
 PROVIDER_DISPATCH = {
@@ -810,6 +885,39 @@ MAX_CONSECUTIVE_INVALID_ROUNDS = int(
     os.environ.get("ORACLE_MAX_CONSECUTIVE_INVALID_ROUNDS", "2")
 )
 GEMINI_FALLBACK_ERROR_STATUSES = ("429", "500", "502", "503", "504")
+# WHY 4x for rate limits: a 429 means the quota window is exhausted;
+# retrying on the transient-error schedule usually re-hits the same
+# window and burns the attempt (then the round, then the run — AUDIT C3).
+RATE_LIMIT_BACKOFF_MULTIPLIER = 4
+# WHY cap: a pathological Retry-After header (or multiplied growth) must
+# not stall a round indefinitely; 120s exceeds standard vendor rate-limit
+# windows while keeping worst-case round latency bounded.
+MAX_RETRY_DELAY_SECONDS = 120.0
+
+
+def _retry_delay(attempt: int, last_failure: Any) -> float:
+    """Seconds to wait before retry `attempt`, honoring Retry-After.
+
+    Precedence: a vendor-stated Retry-After beats the local schedule; a
+    429-shaped failure quadruples the base; everything gets jitter
+    because four reviewers retry in parallel and synchronized retries
+    re-spike the same rate limit.
+    """
+    base = float(RETRY_BACKOFF[min(attempt - 1, len(RETRY_BACKOFF) - 1)])
+
+    response = getattr(last_failure, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is not None:
+        try:
+            retry_after = float(headers.get("retry-after"))
+        except (TypeError, ValueError):
+            retry_after = None
+        if retry_after is not None and retry_after >= 0:
+            return min(max(retry_after, base), MAX_RETRY_DELAY_SECONDS)
+
+    if "429" in str(last_failure or ""):
+        base *= RATE_LIMIT_BACKOFF_MULTIPLIER
+    return min(base + random.uniform(0, base * 0.25), MAX_RETRY_DELAY_SECONDS)
 
 
 def _should_fallback_gemini(config: OracleConfig, last_error: str | None) -> bool:
@@ -822,17 +930,57 @@ def _should_fallback_gemini(config: OracleConfig, last_error: str | None) -> boo
     return any(f"Gemini API error {status}" in last_error for status in GEMINI_FALLBACK_ERROR_STATUSES)
 
 
+class OracleCallError(RuntimeError):
+    """All retries exhausted for one oracle call.
+
+    Carries the per-attempt forensic log so a failure persists with
+    enough detail to classify after the fact (network vs API vs format).
+    WHY: the zero-finding HEARTH abort (sessions 20260611-162307 /
+    f843b5593ebb) was unclassifiable because failed calls persisted only
+    an error STRING — which is empty for raw httpx network exceptions
+    (str(httpx.ConnectTimeout(...)) == ""), and no status, class, or
+    per-attempt latency survived anywhere.
+    """
+
+    def __init__(self, message: str, attempt_log: list[dict] | None = None):
+        super().__init__(message)
+        self.attempt_log: list[dict] = attempt_log or []
+
+
+def _describe_exception(e: Exception) -> dict:
+    """Forensic record of one failed attempt: class, status, message."""
+    status_code = getattr(e, "status_code", None)
+    if status_code is None:
+        status_code = getattr(getattr(e, "response", None), "status_code", None)
+    return {
+        "failure_class": type(e).__name__,
+        "status_code": status_code,
+        # Raw httpx exceptions stringify to "" — the class name above is
+        # then the only signal, and the message must say so explicitly.
+        "error": redact_secrets(str(e)) or "(exception carried no message)",
+    }
+
+
 def call_oracle(config: OracleConfig, user_message: str) -> dict:
-    """Route to the correct provider with retries and backoff."""
+    """Route to the correct provider with retries and backoff.
+
+    Raises OracleCallError (with a per-attempt forensic log) after all
+    retries are exhausted.
+    """
     dispatch = PROVIDER_DISPATCH.get(config.provider)
     if not dispatch:
         raise ValueError(f"Unknown provider: {config.provider}")
 
     last_error = None
+    # last_failure keeps the exception OBJECT where one exists (so
+    # _retry_delay can read Retry-After headers); otherwise the error
+    # string (still usable for 429 detection).
+    last_failure: Any = None
+    attempt_log: list[dict] = []
     for attempt in range(MAX_RETRIES):
         if attempt > 0:
-            wait = RETRY_BACKOFF[min(attempt - 1, len(RETRY_BACKOFF) - 1)]
-            LOGGER.warning(f"[{config.name}] Retry {attempt}/{MAX_RETRIES} after {wait}s...")
+            wait = _retry_delay(attempt, last_failure)
+            LOGGER.warning(f"[{config.name}] Retry {attempt}/{MAX_RETRIES} after {wait:.1f}s...")
             time.sleep(wait)
 
         LOGGER.info(f"[{config.name}] Calling {config.provider}/{config.model} (attempt {attempt + 1})...")
@@ -845,6 +993,14 @@ def call_oracle(config: OracleConfig, user_message: str) -> dict:
             if "error" in result and "raw" in result:
                 LOGGER.warning(f"[{config.name}] Parse failed: {result['error']}")
                 last_error = result["error"]
+                last_failure = last_error
+                attempt_log.append({
+                    "attempt": attempt + 1,
+                    "elapsed_seconds": round(elapsed, 2),
+                    "failure_class": "ParseOrProviderError",
+                    "status_code": None,
+                    "error": last_error,
+                })
                 continue
 
             # Schema validation: check required fields for this oracle's role
@@ -852,6 +1008,14 @@ def call_oracle(config: OracleConfig, user_message: str) -> dict:
             if schema_error:
                 LOGGER.warning(f"[{config.name}] Schema invalid: {schema_error}")
                 last_error = f"Schema: {schema_error}"
+                last_failure = last_error
+                attempt_log.append({
+                    "attempt": attempt + 1,
+                    "elapsed_seconds": round(elapsed, 2),
+                    "failure_class": "SchemaValidationError",
+                    "status_code": None,
+                    "error": last_error,
+                })
                 continue
 
             findings_count = len(result.get("findings", result.get("normalized_issues", [])))
@@ -859,13 +1023,42 @@ def call_oracle(config: OracleConfig, user_message: str) -> dict:
                 LOGGER.warning(
                     f"[{config.name}] DEGRADED: {result.get('recovery_note', 'partial recovery')}"
                 )
+
+            # Enrich provider telemetry with call-level facts (AUDIT C1/D1):
+            # configured vs actual model is the only way a silent vendor
+            # model swap is ever detectable after the fact.
+            telemetry = result.get("_telemetry")
+            if not isinstance(telemetry, dict):
+                telemetry = {}
+                result["_telemetry"] = telemetry
+            telemetry.update({
+                "oracle": config.name,
+                "provider": config.provider,
+                "configured_model": config.model,
+                "max_tokens": config.max_tokens,
+                "latency_seconds": round(elapsed, 2),
+                "attempts": attempt + 1,
+            })
+            if attempt_log:
+                # Earlier attempts failed — keep their forensics on the
+                # successful result too.
+                telemetry["attempt_log"] = attempt_log
+
             LOGGER.info(f"[{config.name}] Done in {elapsed:.1f}s — {findings_count} findings")
             return result
 
         except Exception as e:
             elapsed = time.time() - t0
-            LOGGER.error(f"[{config.name}] Failed in {elapsed:.1f}s: {e}")
-            last_error = str(e)
+            failure = _describe_exception(e)
+            failure["attempt"] = attempt + 1
+            failure["elapsed_seconds"] = round(elapsed, 2)
+            attempt_log.append(failure)
+            # Class name in the log line because raw httpx network
+            # exceptions stringify to "" (verified) — a blank error line
+            # made the HEARTH abort unclassifiable.
+            last_error = f"{failure['failure_class']}: {failure['error']}"
+            last_failure = e
+            LOGGER.error(f"[{config.name}] Failed in {elapsed:.1f}s: {last_error}")
 
     if _should_fallback_gemini(config, last_error):
         fallback_model = os.environ.get("ORACLE_GEMINI_FALLBACK_MODEL", "gemini-2.5-flash")
@@ -894,8 +1087,12 @@ def call_oracle(config: OracleConfig, user_message: str) -> dict:
         result["fallback_model_used"] = fallback_model
         return result
 
-    # All retries exhausted
-    raise RuntimeError(f"[{config.name}] Failed after {MAX_RETRIES} attempts: {last_error}")
+    # All retries exhausted — raise with the forensic log attached so the
+    # caller can persist it (round telemetry) instead of losing it.
+    raise OracleCallError(
+        f"[{config.name}] Failed after {MAX_RETRIES} attempts: {last_error}",
+        attempt_log=attempt_log,
+    )
 
 
 def _validate_schema(result: dict, config: OracleConfig) -> str | None:
@@ -970,7 +1167,7 @@ def _parse_json(text: str, oracle_name: str) -> dict:
         LOGGER.error(
             f"[{oracle_name}] No JSON object found in response. Preview: {preview!r}"
         )
-        return {"oracle_name": oracle_name, "error": "No JSON found", "raw": text[:2000]}
+        return {"oracle_name": oracle_name, "error": "No JSON found", "raw": redact_secrets(text[:2000])}
 
     depth = 0
     in_string = False
@@ -1155,7 +1352,7 @@ def _recover_truncated_json(text: str, oracle_name: str) -> dict:
     if not has_content:
         LOGGER.error(f"[{oracle_name}] Could not recover any content from malformed response")
         result["error"] = "Malformed JSON, no recoverable content"
-        result["raw"] = text[:2000]
+        result["raw"] = redact_secrets(text[:2000])
     else:
         # WHY flag the salvage: a partially recovered response used to be
         # indistinguishable from a complete one, so a reviewer whose last
@@ -1190,7 +1387,15 @@ class ReviewRound:
     normalized_issues: dict = field(default_factory=dict)
     coordinator_decisions: dict = field(default_factory=dict)
     revised_draft: str = ""
-    valid: bool = False  # True only if all required oracles succeeded
+    valid: bool = False  # True only if the round met quorum and synthesis ran
+    # Per-oracle call telemetry (models, tokens, latency — AUDIT C1/D1).
+    # Kept OUT of the oracle output dicts so it never leaks into the
+    # prompts that re-serialize those outputs for Beth/Sonnet.
+    telemetry: dict[str, dict] = field(default_factory=dict)
+    # Reviewers that failed when the round proceeded anyway on a degraded
+    # quorum. Empty for full rounds. Disclosed in the report; a non-empty
+    # list caps consensus at stable_with_notes.
+    missing_reviewers: list[str] = field(default_factory=list)
 
 
 def _last_valid_round(session: OracleSession) -> ReviewRound | None:
@@ -1228,6 +1433,180 @@ class OracleSession:
     #                       human-review escalation, or exhausted rounds)
     #   ""                — loop has not stopped yet
     consensus_type: str = ""
+
+
+# The blind-review pool.
+REQUIRED_REVIEWERS = ("fran", "codex", "grok", "gemini")
+
+
+def _min_valid_reviewers() -> int:
+    """Quorum: how many reviewers must succeed for a round to be usable.
+
+    WHY default 2 (per the HEARTH failure handoff): one unreachable vendor
+    previously discarded the entire round — three valid reviews thrown
+    away, twice, producing a zero-finding abort. WHY the floor is hard 2:
+    a single reviewer is not a cross-check of anything; below 2 the
+    "consensus" label would be a lie regardless of disclosure.
+    """
+    configured = int(os.environ.get("ORACLE_MIN_VALID_REVIEWERS", "2"))
+    if configured < 2:
+        LOGGER.warning(
+            "ORACLE_MIN_VALID_REVIEWERS=%d is below the hard floor; using 2",
+            configured,
+        )
+        return 2
+    return configured
+
+
+def _is_failed_output(output: dict) -> bool:
+    """True for the error placeholder a failed reviewer call leaves behind."""
+    return isinstance(output, dict) and "error" in output and not output.get("findings")
+
+
+def _fan_out_reviewers(
+    review_round: ReviewRound,
+    review_msg: str,
+    output_dir: Path,
+    round_num: int,
+) -> bool:
+    """Run the blind reviewers in parallel; persist outputs + telemetry.
+
+    Returns True when the round is usable: either every reviewer
+    succeeded, or at least ORACLE_MIN_VALID_REVIEWERS did (degraded
+    quorum — failed reviewers are recorded in round.missing_reviewers
+    and their error placeholders never reach synthesis).
+
+    Why extracted: this block was duplicated verbatim between the manual
+    and ledger runners — that duplication is how the F1 filename
+    divergence went unnoticed. One copy, two callers.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def _call_reviewer(key: str) -> tuple[str, dict]:
+        config = ORACLE_ROSTER[key]
+        try:
+            result = call_oracle(config, review_msg)
+            return config.name, result
+        except OracleCallError as e:
+            LOGGER.error(f"[{config.name}] FAILED after retries: {e}")
+            return config.name, {
+                "oracle_name": config.name,
+                "error": str(e),
+                "findings": [],
+                # Forensics for the failure matrix: per-attempt class,
+                # status, latency (the HEARTH abort persisted none of this).
+                "_telemetry": {
+                    "oracle": config.name,
+                    "provider": config.provider,
+                    "configured_model": config.model,
+                    "failed": True,
+                    "attempt_log": e.attempt_log,
+                },
+            }
+        except Exception as e:
+            LOGGER.error(f"[{config.name}] FAILED after retries: {e}")
+            return config.name, {
+                "oracle_name": config.name,
+                "error": redact_secrets(str(e)) or type(e).__name__,
+                "findings": [],
+                "_telemetry": {
+                    "oracle": config.name,
+                    "provider": config.provider,
+                    "configured_model": config.model,
+                    "failed": True,
+                    "attempt_log": [_describe_exception(e)],
+                },
+            }
+
+    LOGGER.info(f"  Launching {len(REQUIRED_REVIEWERS)} blind reviewers in parallel...")
+    with ThreadPoolExecutor(max_workers=len(REQUIRED_REVIEWERS)) as pool:
+        futures = {pool.submit(_call_reviewer, key): key for key in REQUIRED_REVIEWERS}
+        for future in as_completed(futures):
+            name, result = future.result()
+            # Pop telemetry before the output dict is re-serialized into
+            # any downstream prompt or written as the oracle's output file.
+            review_round.telemetry[name] = result.pop("_telemetry", None) or {}
+            review_round.reviewer_outputs[name] = result
+
+    for name, output in review_round.reviewer_outputs.items():
+        (output_dir / f"round{round_num}_{name.lower()}.json").write_text(
+            encoding="utf-8", data=json.dumps(output, indent=2)
+        )
+    _write_round_telemetry(output_dir, round_num, review_round)
+
+    failed = sorted(
+        name for name, output in review_round.reviewer_outputs.items()
+        if _is_failed_output(output)
+    )
+    if not failed:
+        return True
+
+    valid_count = len(review_round.reviewer_outputs) - len(failed)
+    if valid_count >= _min_valid_reviewers():
+        review_round.missing_reviewers = failed
+        LOGGER.warning(
+            f"Round {round_num} DEGRADED: proceeding with quorum "
+            f"{valid_count}/{len(review_round.reviewer_outputs)}; "
+            f"failed: {', '.join(failed)}"
+        )
+        return True
+
+    LOGGER.error(
+        f"Round {round_num} below quorum: only {valid_count} valid reviewer(s); "
+        f"failed: {', '.join(failed)}"
+    )
+    return False
+
+
+def _valid_reviewer_outputs(review_round: ReviewRound) -> dict[str, dict]:
+    """Reviewer outputs minus failure placeholders.
+
+    Fail-closed: synthesis must only ever see validated reviewer content —
+    an error placeholder is not a review and must not enter any prompt.
+    """
+    return {
+        name: output
+        for name, output in review_round.reviewer_outputs.items()
+        if not _is_failed_output(output)
+    }
+
+
+def _apply_revised_draft(session: OracleSession, review_round: ReviewRound, beth_response: dict) -> None:
+    """Adopt Beth's revised draft as canonical, if she produced one."""
+    revised = beth_response.get("revised_draft")
+    if revised and isinstance(revised, str) and revised.strip():
+        session.canonical_draft = revised.strip()
+        review_round.revised_draft = session.canonical_draft
+        LOGGER.info(f"[Beth] Draft revised ({len(session.canonical_draft)} chars)")
+    else:
+        LOGGER.info("[Beth] No revision to draft this round")
+
+
+def _persist_beth_outputs(
+    output_dir: Path,
+    round_num: int,
+    beth_response: dict,
+    review_round: ReviewRound,
+) -> None:
+    """Write Beth's decisions and any revised draft for one round."""
+    (output_dir / f"round{round_num}_beth_decisions.json").write_text(
+        encoding="utf-8", data=json.dumps(beth_response, indent=2)
+    )
+    if review_round.revised_draft:
+        (output_dir / f"round{round_num}_revised_draft.md").write_text(
+            encoding="utf-8", data=review_round.revised_draft
+        )
+
+
+def _write_round_telemetry(output_dir: Path, round_num: int, review_round: ReviewRound) -> None:
+    """Persist per-oracle call telemetry for one round (AUDIT C1/D1).
+
+    Written after the reviewer fan-out and rewritten after the synthesis
+    calls so a round that dies mid-way still records what it spent.
+    """
+    (output_dir / f"round{round_num}_telemetry.json").write_text(
+        encoding="utf-8", data=json.dumps(review_round.telemetry, indent=2)
+    )
 
 
 def _with_system_prompt(config: OracleConfig, system_prompt: str) -> OracleConfig:
@@ -1290,7 +1669,8 @@ Return JSON only:
       "problem": "...",
       "why_it_matters": "...",
       "proposed_fix": "...",
-      "confidence": 0.0
+      "confidence": 0.0,
+      "speculative": false
     }
   ],
   "top_3_must_fix": ["...", "...", "..."]
@@ -1336,14 +1716,33 @@ def _build_manual_review_message(
     return msg
 
 
+def _missing_reviewer_note(missing_reviewers: list[str] | None) -> str:
+    """Disclosure block for a degraded-quorum round's synthesis prompts.
+
+    WHY explicit: a synthesizer that simply doesn't see a reviewer could
+    read the silence as agreement; the absence must be stated.
+    """
+    if not missing_reviewers:
+        return ""
+    return (
+        f"## Missing Reviewers\n\n"
+        f"{', '.join(missing_reviewers)} failed this round (provider/network "
+        f"error) and submitted no review. Do not infer agreement or absence "
+        f"of concerns from a missing reviewer.\n\n"
+    )
+
+
 def _build_referee_message(
     draft: str,
     reviews: dict[str, dict],
     round_number: int,
     prior_issues: list[dict] | None = None,
+    missing_reviewers: list[str] | None = None,
 ) -> str:
     """Build the message for Sonnet referee."""
-    msg = f"## Round {round_number}\n\n## Canonical Draft\n\n{draft}\n\n## Reviewer Outputs\n\n"
+    msg = f"## Round {round_number}\n\n## Canonical Draft\n\n{draft}\n\n"
+    msg += _missing_reviewer_note(missing_reviewers)
+    msg += "## Reviewer Outputs\n\n"
     for name, output in reviews.items():
         msg += f"### {name}\n```json\n{json.dumps(output, indent=2)}\n```\n\n"
     if prior_issues:
@@ -1365,6 +1764,7 @@ def _build_manual_beth_message(
     round_number: int,
     max_rounds: int,
     prior_beth_decisions: list[dict] | None = None,
+    missing_reviewers: list[str] | None = None,
 ) -> str:
     """Build Beth's raw-review bundle for the manual workflow."""
     msg = (
@@ -1374,8 +1774,9 @@ def _build_manual_beth_message(
         f"- Hard cap: {max_rounds} rounds\n"
         f"- Round 3+ policy: only material blockers or regressions should keep the loop open.\n"
         f"- Final round policy: recommend LOCK or HUMAN_REVIEW, not ONE_MORE_ROUND.\n\n"
-        "## Blind Review Bundle\n\n"
     )
+    msg += _missing_reviewer_note(missing_reviewers)
+    msg += "## Blind Review Bundle\n\n"
     for name, output in reviews.items():
         msg += f"### {name}\n```json\n{json.dumps(output, indent=2)}\n```\n\n"
 
@@ -1580,8 +1981,6 @@ def _run_manual_round(
     This mirrors Joe's manual process. Reviewers stay blind; Beth receives the
     raw bundle and acts as normalizer, bundler, spec revisor, and stop-signal.
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
     review_round = ReviewRound(round_number=round_num)
     review_msg = _build_manual_review_message(
         session.canonical_draft,
@@ -1589,34 +1988,8 @@ def _run_manual_round(
         compliance_context=compliance_context,
     )
 
-    required_reviewers = ("fran", "codex", "grok", "gemini")
-    reviewer_failed = False
-
-    def _call_reviewer(key: str) -> tuple[str, dict]:
-        config = ORACLE_ROSTER[key]
-        try:
-            result = call_oracle(config, review_msg)
-            return config.name, result
-        except Exception as e:
-            LOGGER.error(f"[{config.name}] FAILED after retries: {e}")
-            return config.name, {"oracle_name": config.name, "error": str(e), "findings": []}
-
-    LOGGER.info(f"  Launching {len(required_reviewers)} blind reviewers in parallel...")
-    with ThreadPoolExecutor(max_workers=len(required_reviewers)) as pool:
-        futures = {pool.submit(_call_reviewer, key): key for key in required_reviewers}
-        for future in as_completed(futures):
-            name, result = future.result()
-            review_round.reviewer_outputs[name] = result
-            if "error" in result and not result.get("findings"):
-                reviewer_failed = True
-
-    for name, output in review_round.reviewer_outputs.items():
-        (output_dir / f"round{round_num}_{name.lower()}.json").write_text(
-            encoding="utf-8", data=json.dumps(output, indent=2)
-        )
-
-    if reviewer_failed:
-        LOGGER.error(f"Round {round_num} INVALID: required reviewer failed.")
+    if not _fan_out_reviewers(review_round, review_msg, output_dir, round_num):
+        LOGGER.error(f"Round {round_num} INVALID: reviewer quorum not met.")
         session.rounds.append(review_round)
         return review_round, False
 
@@ -1625,12 +1998,15 @@ def _run_manual_round(
         for r in session.rounds
         if r.valid and r.coordinator_decisions
     ]
+    # Fail-closed: only validated reviews enter the bundle; failed
+    # reviewers appear as an explicit absence note, never as content.
     beth_msg = _build_manual_beth_message(
         session.canonical_draft,
-        review_round.reviewer_outputs,
+        _valid_reviewer_outputs(review_round),
         round_number=round_num,
         max_rounds=max_rounds,
         prior_beth_decisions=prior_decisions or None,
+        missing_reviewers=review_round.missing_reviewers or None,
     )
     beth_config = _with_system_prompt(
         ORACLE_ROSTER["beth"],
@@ -1640,9 +2016,18 @@ def _run_manual_round(
     try:
         beth_response = call_oracle(beth_config, beth_msg)
     except Exception as e:
+        review_round.telemetry["Beth"] = {
+            "oracle": "Beth",
+            "failed": True,
+            "attempt_log": getattr(e, "attempt_log", [_describe_exception(e)]),
+        }
+        _write_round_telemetry(output_dir, round_num, review_round)
         LOGGER.error(f"[Beth] FAILED after retries: {e}. Round invalid.")
         session.rounds.append(review_round)
         return review_round, False
+
+    review_round.telemetry["Beth"] = beth_response.pop("_telemetry", None) or {}
+    _write_round_telemetry(output_dir, round_num, review_round)
 
     review_round.coordinator_decisions = beth_response
     serious_issues = beth_response.get("serious_issues", [])
@@ -1652,26 +2037,13 @@ def _run_manual_round(
         "normalized_issues": serious_issues if isinstance(serious_issues, list) else [],
     }
 
-    revised = beth_response.get("revised_draft")
-    if revised and isinstance(revised, str) and revised.strip():
-        session.canonical_draft = revised.strip()
-        review_round.revised_draft = session.canonical_draft
-        LOGGER.info(f"[Beth] Draft revised ({len(session.canonical_draft)} chars)")
-    else:
-        LOGGER.info("[Beth] No revision to draft this round")
-
+    _apply_revised_draft(session, review_round, beth_response)
     review_round.valid = True
 
-    (output_dir / f"round{round_num}_beth_decisions.json").write_text(
-        encoding="utf-8", data=json.dumps(beth_response, indent=2)
-    )
+    _persist_beth_outputs(output_dir, round_num, beth_response, review_round)
     (output_dir / f"round{round_num}_beth_normalized.json").write_text(
         encoding="utf-8", data=json.dumps(review_round.normalized_issues, indent=2)
     )
-    if review_round.revised_draft:
-        (output_dir / f"round{round_num}_revised_draft.md").write_text(
-            encoding="utf-8", data=review_round.revised_draft
-        )
 
     session.rounds.append(review_round)
 
@@ -1689,6 +2061,14 @@ def _run_manual_round(
             consensus_type,
             reason or "Beth recommended LOCK",
         )
+        # A round that ran without a reviewer cannot claim full agreement:
+        # the missing oracle's dissent is unknowable, not absent.
+        if converged and review_round.missing_reviewers and consensus_type == "full_agreement":
+            consensus_type = "stable_with_notes"
+            lock_reason += (
+                f" | Degraded quorum: round ran without "
+                f"{', '.join(review_round.missing_reviewers)}"
+            )
         session.converged = converged
         session.consensus_type = consensus_type
         session.convergence_reason = lock_reason
@@ -1736,8 +2116,6 @@ def _run_round(
     Each round is an independent unit of work — extracting it makes the
     convergence loop in run_review readable and each round independently testable.
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
     review_round = ReviewRound(round_number=round_num)
 
     last_valid = _last_valid_round(session)
@@ -1751,49 +2129,31 @@ def _run_round(
         compliance_context=compliance_context,
     )
 
-    required_reviewers = ("fran", "codex", "grok", "gemini")
-    reviewer_failed = False
-
-    def _call_reviewer(key: str) -> tuple[str, dict]:
-        config = ORACLE_ROSTER[key]
-        try:
-            result = call_oracle(config, review_msg)
-            return config.name, result
-        except Exception as e:
-            LOGGER.error(f"[{config.name}] FAILED after retries: {e}")
-            return config.name, {"oracle_name": config.name, "error": str(e), "findings": []}
-
-    LOGGER.info(f"  Launching {len(required_reviewers)} reviewers in parallel...")
-    with ThreadPoolExecutor(max_workers=len(required_reviewers)) as pool:
-        futures = {pool.submit(_call_reviewer, key): key for key in required_reviewers}
-        for future in as_completed(futures):
-            name, result = future.result()
-            review_round.reviewer_outputs[name] = result
-            if "error" in result and not result.get("findings"):
-                reviewer_failed = True
-
-    for name, output in review_round.reviewer_outputs.items():
-        (output_dir / f"round{round_num}_{name.lower()}.json").write_text(
-            encoding="utf-8", data=json.dumps(output, indent=2)
-        )
-
-    if reviewer_failed:
-        LOGGER.error(f"Round {round_num} INVALID: required reviewer failed.")
+    if not _fan_out_reviewers(review_round, review_msg, output_dir, round_num):
+        LOGGER.error(f"Round {round_num} INVALID: reviewer quorum not met.")
         session.rounds.append(review_round)
         return review_round, False
 
-    # --- Sonnet normalizes ---
+    # --- Sonnet normalizes (fail-closed: validated reviews only) ---
     referee_msg = _build_referee_message(
-        session.canonical_draft, review_round.reviewer_outputs,
+        session.canonical_draft, _valid_reviewer_outputs(review_round),
         round_number=round_num, prior_issues=prior_issues,
+        missing_reviewers=review_round.missing_reviewers or None,
     )
     try:
         normalized = call_oracle(ORACLE_ROSTER["sonnet"], referee_msg)
     except Exception as e:
+        review_round.telemetry["Sonnet"] = {
+            "oracle": "Sonnet",
+            "failed": True,
+            "attempt_log": getattr(e, "attempt_log", [_describe_exception(e)]),
+        }
+        _write_round_telemetry(output_dir, round_num, review_round)
         LOGGER.error(f"[Sonnet] FAILED after retries: {e}. Round invalid.")
         session.rounds.append(review_round)
         return review_round, False
 
+    review_round.telemetry["Sonnet"] = normalized.pop("_telemetry", None) or {}
     review_round.normalized_issues = normalized
     (output_dir / f"round{round_num}_sonnet_normalized.json").write_text(
         encoding="utf-8", data=json.dumps(normalized, indent=2)
@@ -1807,29 +2167,24 @@ def _run_round(
     try:
         beth_response = call_oracle(ORACLE_ROSTER["beth"], coord_msg)
     except Exception as e:
+        review_round.telemetry["Beth"] = {
+            "oracle": "Beth",
+            "failed": True,
+            "attempt_log": getattr(e, "attempt_log", [_describe_exception(e)]),
+        }
+        _write_round_telemetry(output_dir, round_num, review_round)
         LOGGER.error(f"[Beth] FAILED after retries: {e}. Round invalid.")
         session.rounds.append(review_round)
         return review_round, False
 
+    review_round.telemetry["Beth"] = beth_response.pop("_telemetry", None) or {}
+    _write_round_telemetry(output_dir, round_num, review_round)
     review_round.coordinator_decisions = beth_response
 
-    revised = beth_response.get("revised_draft")
-    if revised and isinstance(revised, str) and revised.strip():
-        session.canonical_draft = revised.strip()
-        review_round.revised_draft = session.canonical_draft
-        LOGGER.info(f"[Beth] Draft revised ({len(session.canonical_draft)} chars)")
-    else:
-        LOGGER.info("[Beth] No revision to draft this round")
-
+    _apply_revised_draft(session, review_round, beth_response)
     review_round.valid = True
 
-    (output_dir / f"round{round_num}_beth_decisions.json").write_text(
-        encoding="utf-8", data=json.dumps(beth_response, indent=2)
-    )
-    if review_round.revised_draft:
-        (output_dir / f"round{round_num}_revised_draft.md").write_text(
-            encoding="utf-8", data=review_round.revised_draft
-        )
+    _persist_beth_outputs(output_dir, round_num, beth_response, review_round)
 
     session.rounds.append(review_round)
 
@@ -1838,6 +2193,13 @@ def _run_round(
         converged, consensus_type, reason = _apply_verdict_consistency(
             review_round, converged, consensus_type, reason
         )
+        # A round that ran without a reviewer cannot claim full agreement.
+        if converged and review_round.missing_reviewers and consensus_type == "full_agreement":
+            consensus_type = "stable_with_notes"
+            reason += (
+                f" | Degraded quorum: round ran without "
+                f"{', '.join(review_round.missing_reviewers)}"
+            )
         session.converged = converged
         session.consensus_type = consensus_type
         session.convergence_reason = reason
@@ -1849,6 +2211,153 @@ def _run_round(
         LOGGER.info(f"\nNot converged: {reason}")
 
     return review_round, stop
+
+
+# Preflight pass conditions: these "errors" prove the provider accepted
+# auth + model and responded — for a connectivity/model-ID check, a prose
+# or empty reply is success. Anything else (exceptions, HTTP error dicts,
+# missing keys) is a real preflight failure.
+_PREFLIGHT_ACCEPTABLE_ERRORS = (
+    "No JSON found",
+    "Empty response",
+    "Model refusal",
+    "Gemini returned no candidates",
+    "Gemini returned empty content",
+    "Malformed JSON",
+)
+
+
+def preflight_models() -> list[dict]:
+    """Ping each unique (provider, model) in the roster with a tiny request.
+
+    WHY: the HEARTH zero-finding abort burned two full rounds (and the
+    healthy vendors' spend) to discover that calls were failing. A ~one-
+    token ping per vendor before round 1 converts that into an immediate,
+    named failure: which oracle, which provider, which model, what error.
+
+    Returns a list of failure dicts; empty list = all vendors reachable.
+    Opt-in via ORACLE_PREFLIGHT=1 (default off: it makes live network
+    calls, which keyless/mocked environments must not attempt).
+    """
+    failures: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for cfg in ORACLE_ROSTER.values():
+        ident = (cfg.provider, cfg.model)
+        if ident in seen:
+            continue
+        seen.add(ident)
+        ping_config = OracleConfig(
+            name=f"preflight-{cfg.name}",
+            role="preflight",  # no REQUIRED_SCHEMA entry -> no schema gate
+            provider=cfg.provider,
+            model=cfg.model,
+            system_prompt="Reply with the single word: pong",
+            max_tokens=int(os.environ.get("ORACLE_PREFLIGHT_MAX_TOKENS", "64")),
+            timeout=int(os.environ.get("ORACLE_PREFLIGHT_TIMEOUT", "30")),
+        )
+        try:
+            result = PROVIDER_DISPATCH[cfg.provider](ping_config, "Reply with the single word: pong")
+            error = str(result.get("error", ""))
+            if error and not error.startswith(_PREFLIGHT_ACCEPTABLE_ERRORS):
+                failures.append({
+                    "oracle": cfg.name,
+                    "provider": cfg.provider,
+                    "model": cfg.model,
+                    "error": error,
+                })
+        except Exception as e:
+            failure = _describe_exception(e)
+            failure.update({
+                "oracle": cfg.name,
+                "provider": cfg.provider,
+                "model": cfg.model,
+            })
+            failures.append(failure)
+    return failures
+
+
+def _sha256(text: str) -> str:
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _write_run_manifest(
+    output_dir: Path,
+    session_id: str,
+    workflow: str,
+    max_rounds: int,
+    document_path: str,
+    draft: str,
+    compliance_context: str | None,
+) -> None:
+    """Persist everything needed to defend or replay this run (AUDIT D2).
+
+    Records the full oracle roster as configured (provider, model,
+    temperature, token budgets), hashes of every system prompt and of the
+    inputs, and all ORACLE_* environment overrides. Prompt/input hashes
+    rather than full text keep the manifest small while still proving
+    what configuration produced a given result.
+
+    WHY only ORACLE_* env vars: API keys live in *_API_KEY variables and
+    must never be persisted; the ORACLE_ prefix carries no secrets.
+    """
+    manifest = {
+        "session_id": session_id,
+        "started_at": datetime.now().isoformat(),
+        "workflow": workflow,
+        "max_rounds": max_rounds,
+        "document_path": document_path,
+        "document_sha256": _sha256(draft),
+        "compliance_context_sha256": (
+            _sha256(compliance_context) if compliance_context else None
+        ),
+        "oracle_roster": {
+            key: {
+                "name": cfg.name,
+                "role": cfg.role,
+                "provider": cfg.provider,
+                "model": cfg.model,
+                "temperature": cfg.temperature,
+                "max_tokens": cfg.max_tokens,
+                "timeout": cfg.timeout,
+                "system_prompt_sha256": _sha256(cfg.system_prompt),
+            }
+            for key, cfg in ORACLE_ROSTER.items()
+        },
+        "env_overrides": {
+            k: os.environ[k] for k in sorted(os.environ) if k.startswith("ORACLE_")
+        },
+    }
+    (output_dir / "run_manifest.json").write_text(
+        encoding="utf-8", data=json.dumps(manifest, indent=2)
+    )
+
+
+def _usage_totals(session: OracleSession) -> dict[str, dict]:
+    """Aggregate per-oracle call/token/latency totals across rounds (AUDIT D1)."""
+    totals: dict[str, dict] = {}
+    for r in session.rounds:
+        for name, t in r.telemetry.items():
+            if not isinstance(t, dict):
+                continue
+            agg = totals.setdefault(name, {
+                "calls": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "latency_seconds": 0.0,
+                "models": [],
+            })
+            agg["calls"] += 1
+            for key in ("input_tokens", "output_tokens"):
+                value = t.get(key)
+                if isinstance(value, (int, float)):
+                    agg[key] += int(value)
+            latency = t.get("latency_seconds")
+            if isinstance(latency, (int, float)):
+                agg["latency_seconds"] = round(agg["latency_seconds"] + latency, 2)
+            model = t.get("response_model") or t.get("configured_model")
+            if model and model not in agg["models"]:
+                agg["models"].append(model)
+    return totals
 
 
 def run_review(
@@ -1880,6 +2389,25 @@ def run_review(
     if output_dir is None:
         output_dir = Path("oracle_reviews") / session_id
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Written before the first oracle call so even a run that dies in
+    # round 1 records what configuration produced it.
+    _write_run_manifest(
+        output_dir, session_id, workflow, max_rounds,
+        document_path, draft, compliance_context,
+    )
+
+    # Opt-in vendor preflight (ORACLE_PREFLIGHT=1): fail in seconds with a
+    # named cause instead of burning review rounds against a dead vendor.
+    if os.environ.get("ORACLE_PREFLIGHT", "").strip().lower() in {"1", "true", "yes"}:
+        preflight_failures = preflight_models()
+        if preflight_failures:
+            detail = "; ".join(
+                f"{f['oracle']} ({f['provider']}/{f['model']}): "
+                f"{f.get('failure_class', '')} {f.get('error', '')}".strip()
+                for f in preflight_failures
+            )
+            raise OracleCallError(f"Preflight failed — review not started: {detail}")
 
     consecutive_invalid = 0
     for round_num in range(1, max_rounds + 1):
@@ -1954,6 +2482,7 @@ def run_review(
             }
             for r in session.rounds
         ],
+        "usage_totals": _usage_totals(session),
     }
     (output_dir / "session_summary.json").write_text(encoding="utf-8", data=json.dumps(summary, indent=2))
     LOGGER.info(f"\nResults saved to {output_dir}/")
@@ -2010,8 +2539,44 @@ def compute_metrics(session: OracleSession) -> dict:
     duplicate_count = sum(1 for d in dropped if d.get("reason") == "duplicate")
     unsupported_count = sum(1 for d in dropped if d.get("reason") == "unsupported")
 
+    # WHY None vs 0.0: only the ledger workflow's referee emits
+    # dropped_findings. The manual workflow has no drop signal at all, so
+    # its rates were constitutionally 0.0 yet reported as if measured
+    # (AUDIT D3). None means "not measured"; 0.0 means "measured, zero".
+    has_drop_signal = any(
+        "dropped_findings" in r.normalized_issues
+        for r in session.rounds
+        if r.valid
+    )
+
     # Valid rounds = all 5 oracles succeeded (reviewer + Sonnet + Beth)
     valid_rounds = sum(1 for r in session.rounds if r.valid)
+
+    # WHY dangling-ID tracking (AUDIT A7): Beth references findings by
+    # issue_id; an ID with no matching normalized issue silently drops
+    # out of every severity count. Surfacing them makes referee/
+    # coordinator ID discipline auditable instead of assumed.
+    dangling_decision_ids = sorted({
+        d.get("issue_id") for d in all_decisions
+        if d.get("issue_id") and d.get("issue_id") not in issue_severity
+    })
+
+    # WHY continuity (AUDIT A7): the ledger convergence gate depends on
+    # the referee voluntarily reusing issue_ids across rounds. This
+    # measures how much reuse actually happened; None = not measurable
+    # (fewer than two valid rounds with IDs).
+    continuity_samples: list[float] = []
+    valid_with_ids = [
+        {i.get("issue_id") for i in r.normalized_issues.get("normalized_issues", []) if i.get("issue_id")}
+        for r in session.rounds if r.valid
+    ]
+    for prev_ids, curr_ids in zip(valid_with_ids, valid_with_ids[1:]):
+        if prev_ids and curr_ids:
+            continuity_samples.append(len(curr_ids & prev_ids) / len(curr_ids))
+    issue_id_continuity = (
+        sum(continuity_samples) / len(continuity_samples)
+        if continuity_samples else None
+    )
 
     return {
         "accepted_critical_count": critical_accepted,
@@ -2020,12 +2585,18 @@ def compute_metrics(session: OracleSession) -> dict:
         "total_rejected_claims": len(rejected),
         "total_preference_only": len(preference),
         "novel_issue_count": len(issue_severity),
-        "duplicate_rate": duplicate_count / max(total_findings, 1),
-        "unsupported_claim_rate": unsupported_count / max(total_findings, 1),
+        "duplicate_rate": (
+            duplicate_count / max(total_findings, 1) if has_drop_signal else None
+        ),
+        "unsupported_claim_rate": (
+            unsupported_count / max(total_findings, 1) if has_drop_signal else None
+        ),
         "rounds_to_stability": len(session.rounds),
         "valid_rounds": valid_rounds,
         "converged": session.converged,
         "consensus_type": session.consensus_type,
+        "dangling_decision_ids": dangling_decision_ids,
+        "issue_id_continuity": issue_id_continuity,
     }
 
 
@@ -2048,7 +2619,7 @@ Environment variables:
   ORACLE_BETH_MODEL   — Override Beth model  (default: claude-opus-4-8)
   ORACLE_FRAN_MODEL   — Override Fran model  (default: gpt-5.4)
   ORACLE_CODEX_MODEL  — Override Codex model (default: gpt-5.4)
-  ORACLE_GROK_MODEL   — Override Grok model  (default: grok-4)
+  ORACLE_GROK_MODEL   — Override Grok model  (default: grok-4.20)
   ORACLE_GEMINI_MODEL — Override Gemini model (default: gemini-2.5-pro)
   ORACLE_SONNET_MODEL — Override Sonnet model (default: claude-sonnet-4-6)
 

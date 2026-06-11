@@ -9,7 +9,7 @@ ORACLE — Orchestrated Review And Compliance Liaison Engine. Standalone multi-o
 ```
 oracle/
 ├── cli.py               # Unified CLI entry point (7 commands)
-├── oracle2.py            # Multi-oracle review engine (5 oracles, convergence loop)
+├── oracle2.py            # Multi-oracle review engine (6 oracles, convergence loop)
 ├── oracle2_adapter.py    # Parses oracle2 output files → ReviewResult contract
 ├── pack_validator.py     # JSON Schema validation for all pack types
 ├── shall_extractor.py    # Obligation extraction from PDFs (regex + NLP)
@@ -44,6 +44,7 @@ python -m oracle review document.md --packs pack1
 | `ANTHROPIC_API_KEY` | Review (Beth, Sonnet) + generic extraction |
 | `OPENAI_API_KEY` | Review (Fran, Codex) |
 | `XAI_API_KEY` | Review (Grok) |
+| `GEMINI_API_KEY` | Review (Gemini; `GOOGLE_API_KEY` also accepted) |
 
 ## Testing
 

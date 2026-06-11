@@ -131,12 +131,32 @@ def test_g4_adapter_preserves_severity(golden_oracle, tmp_path):
     )
 
 
+def test_g6_abandoned_finding_surfaces_as_drift(golden_oracle, tmp_path):
+    """Fran drops a critical finding with no draft change between rounds.
+
+    Desired: the findings report carries a drift disclosure naming the
+    oracle and the abandoned finding (AUDIT A5). Report-only — the run's
+    convergence outcome is untouched.
+    """
+    fixture = load_fixture("g6_reviewer_drift")
+    session = _run_fixture(golden_oracle, fixture, tmp_path)
+
+    report = oracle_cli.format_findings_report(session, pack_dir=tmp_path)
+
+    assert "## Position Changes (Drift Watch)" in report, (
+        "Abandoned critical finding produced no drift disclosure"
+    )
+    assert "Fran" in report
+    assert "Admin endpoint lacks authentication" in report
+
+
 def test_g5_outage_refuses_generation(golden_oracle, tmp_path):
-    """Grok is down all run; every round is invalid; nothing was reviewed.
+    """ALL vendors are down all run; every round is below quorum.
 
     Desired: the session explains the failure, and the server refuses to
     generate a polished deliverable from the unreviewed input instead of
-    shipping it with a flattering subtitle.
+    shipping it with a flattering subtitle. (A single-vendor outage now
+    salvages on degraded quorum — covered in test_quorum_salvage.py.)
     """
     fixture = load_fixture("g5_vendor_outage")
     output_dir = tmp_path / "session"

@@ -1,0 +1,122 @@
+{
+  "case": "g6_reviewer_drift",
+  "description": "Fran raises a critical finding in round 1, Beth makes NO revision, and Fran silently drops the finding in round 2. The abandoned position must surface in the report's drift section (AUDIT A5).",
+  "workflow": "manual",
+  "document": "# Admin Console Spec\n\nThe admin endpoint requires no authentication.\nOperators access it directly over the public internet.\n",
+  "rounds": [
+    {
+      "Fran": {
+        "oracle_name": "Fran",
+        "role": "adversarial_logic",
+        "document_type": "spec",
+        "overall_verdict": "major_revision",
+        "findings": [
+          {
+            "title": "Admin endpoint lacks authentication",
+            "severity": "critical",
+            "category": "security",
+            "location": "Section 1",
+            "evidence": "The admin endpoint requires no authentication.",
+            "problem": "Anyone on the internet can administer the system.",
+            "why_it_matters": "Complete compromise with zero effort.",
+            "proposed_fix": "Require authenticated, role-gated access.",
+            "confidence": 0.95
+          }
+        ],
+        "top_3_must_fix": ["Admin endpoint lacks authentication"]
+      },
+      "Codex": {
+        "oracle_name": "Codex",
+        "role": "implementation_feasibility",
+        "document_type": "spec",
+        "overall_verdict": "revise",
+        "findings": [],
+        "top_3_must_fix": []
+      },
+      "Grok": {
+        "oracle_name": "Grok",
+        "role": "contrarian",
+        "document_type": "spec",
+        "overall_verdict": "revise",
+        "findings": [],
+        "top_3_must_fix": []
+      },
+      "Gemini": {
+        "oracle_name": "Gemini",
+        "role": "domain_context",
+        "document_type": "spec",
+        "overall_verdict": "revise",
+        "findings": [],
+        "top_3_must_fix": []
+      },
+      "Beth": {
+        "oracle_name": "Beth",
+        "role": "coordinator",
+        "revision_decisions": [
+          {
+            "issue_id": "BETH-R1-ISSUE-001",
+            "decision": "rejected_claim",
+            "reason": "Deployment is behind a VPN; not a real exposure."
+          }
+        ],
+        "serious_issues": [],
+        "feedback_themes": [],
+        "architectural_risks_remaining": [],
+        "revised_sections": [],
+        "open_questions": [],
+        "convergence_status": "converging",
+        "recommendation": "ONE_MORE_ROUND",
+        "recommendation_reason": "Confirm reviewers agree after rejection.",
+        "revised_draft": null
+      }
+    },
+    {
+      "Fran": {
+        "oracle_name": "Fran",
+        "role": "adversarial_logic",
+        "document_type": "spec",
+        "overall_verdict": "approve_with_minor_changes",
+        "findings": [],
+        "top_3_must_fix": []
+      },
+      "Codex": {
+        "oracle_name": "Codex",
+        "role": "implementation_feasibility",
+        "document_type": "spec",
+        "overall_verdict": "approve_with_minor_changes",
+        "findings": [],
+        "top_3_must_fix": []
+      },
+      "Grok": {
+        "oracle_name": "Grok",
+        "role": "contrarian",
+        "document_type": "spec",
+        "overall_verdict": "approve_with_minor_changes",
+        "findings": [],
+        "top_3_must_fix": []
+      },
+      "Gemini": {
+        "oracle_name": "Gemini",
+        "role": "domain_context",
+        "document_type": "spec",
+        "overall_verdict": "approve_with_minor_changes",
+        "findings": [],
+        "top_3_must_fix": []
+      },
+      "Beth": {
+        "oracle_name": "Beth",
+        "role": "coordinator",
+        "revision_decisions": [],
+        "serious_issues": [],
+        "feedback_themes": [],
+        "architectural_risks_remaining": [],
+        "revised_sections": [],
+        "open_questions": [],
+        "convergence_status": "converging",
+        "recommendation": "LOCK",
+        "recommendation_reason": "No remaining findings.",
+        "revised_draft": null
+      }
+    }
+  ]
+}

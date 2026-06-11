@@ -438,6 +438,20 @@ def register_pack(
 
     # Copy pack file to library
     dest = pack_dir / f"{slug}.json"
+
+    # Version history on overwrite (AUDIT B4): keep the prior pack file
+    # under archive/<slug>@<short-hash>.json so a regenerated pack stays
+    # diffable against the version past reviews actually ran with.
+    # archive/ is a subdirectory, so pack globs ("*.json") never see it.
+    if dest.exists():
+        prior_hash = _compute_content_hash(dest).split(":")[-1][:12]
+        archive_dir = pack_dir / "archive"
+        archive_dir.mkdir(exist_ok=True)
+        archive_path = archive_dir / f"{slug}@{prior_hash}.json"
+        if not archive_path.exists():
+            archive_path.write_bytes(dest.read_bytes())
+            LOGGER.info(f"Archived prior pack version: archive/{archive_path.name}")
+
     dest.write_text(
         json.dumps(pack_data, indent=2, ensure_ascii=False), encoding="utf-8"
     )
@@ -620,6 +634,19 @@ def promote_pack(
         print(f"  Chunk fails:  {len(chunk_failures)} chunks failed extraction")
         for cf in chunk_failures[:5]:
             print(f"    pages {cf.get('page_start')}-{cf.get('page_end')}: {cf.get('final_error', '?')}")
+
+    # Vision-repair disclosure (AUDIT B3): fields marked vision_repaired
+    # are model-INTERPRETED, not mechanically extracted — the promoting
+    # human should verify them against the source pages.
+    vision_repaired = sum(
+        1 for req in pack_data.get("requirements", [])
+        if isinstance(req, dict) and req.get("field_provenance")
+    )
+    if vision_repaired:
+        print(
+            f"  Vision-fixed: {vision_repaired} requirement(s) contain "
+            f"model-interpreted fields (field_provenance) — verify against source"
+        )
 
     source_hash = meta.get("source_document_hash")
     if source_hash:
@@ -2122,6 +2149,60 @@ def _format_reviewer_verdicts(session: Any) -> list[str]:
     return []
 
 
+def _oracle_provider_map() -> dict[str, str]:
+    """Oracle display name -> provider, from the live roster."""
+    from oracle.oracle2 import ORACLE_ROSTER
+    return {cfg.name: cfg.provider for cfg in ORACLE_ROSTER.values()}
+
+
+def _corroboration_note(sources: list[str]) -> str | None:
+    """Classify multi-oracle agreement as cross-vendor or same-vendor.
+
+    WHY: Fran and Codex run on the same model, so their agreement is one
+    vendor's training distribution voting twice — structurally weaker
+    evidence than two vendors agreeing independently (AUDIT A6). The
+    distinction is annotated, never weighted: the reader judges.
+    """
+    if len(sources) < 2:
+        return None
+    provider_map = _oracle_provider_map()
+    providers = {provider_map.get(s, "unknown") for s in sources}
+    if len(providers) >= 2:
+        return f"cross-vendor ({len(providers)} independent providers)"
+    provider = next(iter(providers))
+    return (
+        f"same-vendor — all corroborating reviewers share provider "
+        f"'{provider}'; same-model agreement is weaker evidence than "
+        f"cross-vendor agreement"
+    )
+
+
+def _format_reviewer_pool_note(session: Any) -> list[str]:
+    """One-line disclosure of reviewer vendor diversity (AUDIT A6)."""
+    from oracle.oracle2 import ORACLE_ROSTER
+    reviewers = [
+        cfg for cfg in ORACLE_ROSTER.values()
+        if cfg.role not in ("coordinator", "referee")
+    ]
+    if not reviewers:
+        return []
+    by_provider: dict[str, list[str]] = {}
+    for cfg in reviewers:
+        by_provider.setdefault(cfg.provider, []).append(cfg.name)
+    shared = [
+        f"{', '.join(sorted(names))} share {provider}"
+        for provider, names in sorted(by_provider.items())
+        if len(names) > 1
+    ]
+    note = (
+        f"**Reviewer pool:** {len(reviewers)} oracles across "
+        f"{len(by_provider)} vendors"
+    )
+    if shared:
+        note += f" ({'; '.join(shared)})"
+    return [note, ""]
+
+
 def _format_dissent_summary(session: Any) -> list[str]:
     """Render every rejected/unresolved finding with full coordinator reasoning.
 
@@ -2165,10 +2246,22 @@ def _format_dissent_summary(session: Any) -> list[str]:
         title = (issue or {}).get("title", "") or iid
         lines.append(f"### [{label}] {title} ({iid}, round {round_num})")
         if issue:
-            lines.append(f"**Severity (as raised):** {issue.get('severity', '?')}")
+            severity_line = f"**Severity (as raised):** {issue.get('severity', '?')}"
+            # Uncertainty signals are displayed, never used to gate (AUDIT A9):
+            # LLM confidence is uncalibrated, so weighting decisions by it
+            # would manufacture false precision. The reader weighs it.
+            confidence = issue.get("confidence")
+            if isinstance(confidence, (int, float)):
+                severity_line += f" — confidence (as reported): {confidence:.2f}"
+            if issue.get("speculative"):
+                severity_line += " — **marked SPECULATIVE by reviewer**"
+            lines.append(severity_line)
             sources = _issue_sources(issue)
             if sources:
                 lines.append(f"**Raised by:** {', '.join(sources)}")
+                corroboration = _corroboration_note(sources)
+                if corroboration:
+                    lines.append(f"**Corroboration:** {corroboration}")
             if issue.get("conflict_flag"):
                 lines.append("**⚠ Direct conflict between reviewers on this issue**")
         reason = decision.get("reason", "")
@@ -2212,6 +2305,36 @@ def _format_referee_drops(session: Any) -> list[str]:
     return lines
 
 
+def _format_drift_section(session: Any) -> list[str]:
+    """Render abandoned-finding drift events (AUDIT A5).
+
+    Disclosure only: drift detection is heuristic and never gates
+    convergence — the reader weighs it, the system does not act on it.
+    """
+    from oracle.drift import detect_drift
+
+    events = detect_drift(session)
+    if not events:
+        return []
+
+    lines = [
+        "## Position Changes (Drift Watch)",
+        "",
+        "> A reviewer abandoned a critical/high finding between rounds even "
+        "though the draft text it pointed to did not change. This is a "
+        "possible sycophancy signal to weigh, not a verdict — detection is "
+        "heuristic and report-only.",
+        "",
+    ]
+    for e in events:
+        lines.append(
+            f"- Round {e.round_from}→{e.round_to} — **{e.oracle}** dropped "
+            f"[{e.severity.upper()}] \"{e.title}\" — {e.reason}"
+        )
+    lines.append("")
+    return lines
+
+
 def format_findings_report(
     session: Any,
     pack_dir: Path,
@@ -2225,22 +2348,8 @@ def format_findings_report(
     then formats into the Section 8 report structure.
     """
     from oracle.oracle2 import compute_metrics
-    from oracle.oracle2_adapter import build_review_result
 
     metrics = compute_metrics(session)
-
-    # Try to reconstruct structured data via adapter
-    session_dir = Path("oracle_reviews") / session.session_id
-    if hasattr(session, '_output_dir') and session._output_dir:
-        session_dir = session._output_dir
-    # Also check the common output directory patterns
-    for candidate in [
-        Path("oracle_reviews") / session.session_id,
-        Path(session.document_path).parent / "oracle_reviews" / session.session_id,
-    ]:
-        if candidate.exists():
-            session_dir = candidate
-            break
 
     lines = [
         "# ORACLE Review Report",
@@ -2268,6 +2377,8 @@ def format_findings_report(
         lines.append(f"**Convergence Reason:** {session.convergence_reason}")
         lines.append("")
 
+    lines.extend(_format_reviewer_pool_note(session))
+
     # --- Authority Summary (Section 8, item 2) ---
     if pack_names:
         lines.append("## Authority Summary")
@@ -2293,6 +2404,14 @@ def format_findings_report(
             lines.append("")
 
     # --- Metrics Summary ---
+    # duplicate_rate is None when the workflow produces no drop signal
+    # (manual workflow) — print "n/a", never a fabricated 0.0% (AUDIT D3).
+    duplicate_rate = metrics.get("duplicate_rate")
+    duplicate_label = (
+        f"{duplicate_rate:.1%}"
+        if isinstance(duplicate_rate, (int, float))
+        else "n/a (not measured in this workflow)"
+    )
     lines.extend([
         "## Metrics",
         "",
@@ -2301,17 +2420,35 @@ def format_findings_report(
         f"- Total accepted defects: {metrics.get('total_accepted_defects', 0)}",
         f"- Total rejected claims: {metrics.get('total_rejected_claims', 0)}",
         f"- Preference-only findings: {metrics.get('total_preference_only', 0)}",
-        f"- Duplicate rate: {metrics.get('duplicate_rate', 0):.1%}",
+        f"- Duplicate rate: {duplicate_label}",
         f"- Rounds to stability: {metrics.get('rounds_to_stability', 0)}",
         f"- Converged: {metrics.get('converged', False)}",
         "",
     ])
+    continuity = metrics.get("issue_id_continuity")
+    if isinstance(continuity, (int, float)):
+        lines.append(f"- Issue-ID continuity across rounds: {continuity:.0%}")
+        lines.append("")
+
+    # Data-integrity warnings (AUDIT A7): a coordinator decision whose
+    # issue_id matches no normalized issue drops out of severity counts.
+    dangling = metrics.get("dangling_decision_ids") or []
+    if dangling:
+        lines.append("## Data Integrity Warnings")
+        lines.append("")
+        lines.append(
+            f"> {len(dangling)} coordinator decision(s) reference issue IDs "
+            f"with no matching normalized issue: {', '.join(dangling)}. "
+            f"Severity counts above may be incomplete for these decisions."
+        )
+        lines.append("")
 
     # --- Reviewer verdicts + Dissent Summary (AUDIT A3 + A1) — before
     # per-round detail so dissent is impossible to miss in a skim read ---
     lines.extend(_format_reviewer_verdicts(session))
     lines.extend(_format_dissent_summary(session))
     lines.extend(_format_referee_drops(session))
+    lines.extend(_format_drift_section(session))
 
     # --- Per-Round Detail ---
     for r in session.rounds:
@@ -2320,6 +2457,19 @@ def format_findings_report(
 
         lines.append(f"## Round {r.round_number}")
         lines.append("")
+
+        # Degraded-quorum disclosure: the round proceeded without these
+        # reviewers (provider/network failure). Their dissent is
+        # unknowable, not absent — the reader must weigh that.
+        missing = getattr(r, "missing_reviewers", []) or []
+        if missing:
+            total = len(r.reviewer_outputs) or 4
+            lines.append(
+                f"> **Degraded quorum:** {total - len(missing)}/{total} reviewers — "
+                f"{', '.join(missing)} failed this round and submitted no review. "
+                f"Absence of findings from a failed reviewer is not agreement."
+            )
+            lines.append("")
 
         # Degraded-data disclosure (AUDIT B2): a truncated response that
         # was partially salvaged means this round's finding set may be
@@ -2349,16 +2499,24 @@ def format_findings_report(
                 problem = issue.get("core_problem", "")
                 fix = issue.get("recommended_fix", "")
 
-                lines.append(f"### [{sev}] {title} ({iid})")
+                heading = f"### [{sev}] {title} ({iid})"
+                if issue.get("speculative"):
+                    heading = f"### [{sev}] [SPECULATIVE] {title} ({iid})"
+                lines.append(heading)
+                confidence = issue.get("confidence")
+                if isinstance(confidence, (int, float)):
+                    lines.append(f"**Confidence (as reported):** {confidence:.2f}")
                 if problem:
                     lines.append(f"**Problem:** {problem}")
                 if fix:
                     lines.append(f"**Fix:** {fix}")
 
-                merged = issue.get("merged_from", [])
-                if merged:
-                    sources = ", ".join(m.get("oracle", "?") for m in merged)
-                    lines.append(f"**Sources:** {sources}")
+                sources = _issue_sources(issue)
+                if sources:
+                    lines.append(f"**Sources:** {', '.join(sources)}")
+                    corroboration = _corroboration_note(sources)
+                    if corroboration:
+                        lines.append(f"**Corroboration:** {corroboration}")
                 lines.append("")
 
         # Coordinator decisions

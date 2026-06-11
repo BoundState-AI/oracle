@@ -1,47 +1,14 @@
 {
   "case": "g5_vendor_outage",
-  "description": "Grok's vendor is hard-down for the entire run, so every round is invalid and the 'final draft' is the unreviewed input. The run must explain itself, and the server must refuse to generate a polished deliverable from it (AUDIT C2 + F2).",
+  "description": "ALL four reviewer vendors are hard-down for the entire run, so every round is below quorum and the 'final draft' is the unreviewed input. The run must explain itself, and the server must refuse to generate a polished deliverable from it (AUDIT C2 + F2). NOTE: a single-vendor outage is no longer a total loss — it salvages on degraded quorum (see test_quorum_salvage.py); this case is the floor where salvage is impossible.",
   "workflow": "manual",
   "document": "# Unreviewed Spec\n\nThis document never actually got reviewed.\n",
   "rounds": [
     {
-      "Fran": {
-        "oracle_name": "Fran",
-        "role": "adversarial_logic",
-        "document_type": "spec",
-        "overall_verdict": "revise",
-        "findings": [
-          {
-            "title": "Placeholder finding",
-            "severity": "low",
-            "category": "other",
-            "location": "Section 1",
-            "evidence": "n/a",
-            "problem": "Round is invalid anyway; this must not leak into results.",
-            "why_it_matters": "n/a",
-            "proposed_fix": "n/a",
-            "confidence": 0.5
-          }
-        ],
-        "top_3_must_fix": []
-      },
-      "Codex": {
-        "oracle_name": "Codex",
-        "role": "implementation_feasibility",
-        "document_type": "spec",
-        "overall_verdict": "revise",
-        "findings": [],
-        "top_3_must_fix": []
-      },
+      "Fran": "__FAIL__",
+      "Codex": "__FAIL__",
       "Grok": "__FAIL__",
-      "Gemini": {
-        "oracle_name": "Gemini",
-        "role": "domain_context",
-        "document_type": "spec",
-        "overall_verdict": "revise",
-        "findings": [],
-        "top_3_must_fix": []
-      }
+      "Gemini": "__FAIL__"
     }
   ]
 }

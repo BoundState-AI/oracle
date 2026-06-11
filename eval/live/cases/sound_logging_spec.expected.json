@@ -1,0 +1,6 @@
+{
+  "case": "sound_logging_spec",
+  "description": "Deliberately sound, small-scope spec with explicit rollback, PII policy, and verification. A trustworthy review may raise medium/low improvements but should not invent critical/high defects.",
+  "expected_defects": [],
+  "max_false_critical_high": 1
+}
