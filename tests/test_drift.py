@@ -102,6 +102,23 @@ def test_dropped_low_severity_finding_is_not_drift():
     assert detect_drift(_session(rounds, draft)) == []
 
 
+def test_failed_reviewer_in_later_round_is_not_drift():
+    """A reviewer that errored out didn't abandon its position — outage != drift."""
+    draft = "The admin endpoint requires no authentication."
+    rounds = [
+        _round(1, {"Fran": [_finding("Admin endpoint lacks authentication")]}),
+        ReviewRound(
+            round_number=2,
+            reviewer_outputs={
+                "Fran": {"oracle_name": "Fran", "error": "[Fran] Failed after 3 attempts: ConnectTimeout", "findings": []},
+            },
+            valid=True,  # degraded-quorum round
+        ),
+    ]
+
+    assert detect_drift(_session(rounds, draft)) == []
+
+
 def test_invalid_rounds_are_skipped():
     draft = "Stable text."
     rounds = [

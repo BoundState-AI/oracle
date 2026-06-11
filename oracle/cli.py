@@ -2458,6 +2458,19 @@ def format_findings_report(
         lines.append(f"## Round {r.round_number}")
         lines.append("")
 
+        # Degraded-quorum disclosure: the round proceeded without these
+        # reviewers (provider/network failure). Their dissent is
+        # unknowable, not absent — the reader must weigh that.
+        missing = getattr(r, "missing_reviewers", []) or []
+        if missing:
+            total = len(r.reviewer_outputs) or 4
+            lines.append(
+                f"> **Degraded quorum:** {total - len(missing)}/{total} reviewers — "
+                f"{', '.join(missing)} failed this round and submitted no review. "
+                f"Absence of findings from a failed reviewer is not agreement."
+            )
+            lines.append("")
+
         # Degraded-data disclosure (AUDIT B2): a truncated response that
         # was partially salvaged means this round's finding set may be
         # incomplete — the reader must know, not just the logs.

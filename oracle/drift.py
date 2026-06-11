@@ -103,6 +103,11 @@ def detect_drift(session: Any) -> list[DriftEvent]:
         draft_a, draft_b = drafts[idx_a], drafts[idx_b]
         for oracle, output_a in round_a.reviewer_outputs.items():
             output_b = round_b.reviewer_outputs.get(oracle, {})
+            # A reviewer that FAILED in the later round (error placeholder,
+            # degraded-quorum round) didn't abandon anything — its silence
+            # is an outage, not a position change.
+            if isinstance(output_b, dict) and output_b.get("error") and not output_b.get("findings"):
+                continue
             findings_a = output_a.get("findings", []) if isinstance(output_a, dict) else []
             findings_b = [
                 f for f in (output_b.get("findings", []) if isinstance(output_b, dict) else [])
