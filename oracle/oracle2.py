@@ -961,6 +961,36 @@ def _describe_exception(e: Exception) -> dict:
     }
 
 
+class OracleAuthError(RuntimeError):
+    """Raised when a provider rejects the configured API key (HTTP 401).
+
+    WHY a distinct type: an authentication failure is categorically different
+    from a transient error. A revoked, malformed, or wrong-workspace key will
+    be rejected on every attempt, so callers must be able to distinguish "the
+    key is dead, stop everything" from "the model hiccuped, try again." A
+    dedicated subclass lets the orchestrator and the server surface this as an
+    operator-actionable configuration fault rather than burying it in a generic
+    "failed after N attempts" message.
+    """
+
+
+def _is_auth_error(exc: Exception) -> bool:
+    """True when an exception represents a provider authentication failure.
+
+    WHY: Both the Anthropic and OpenAI SDKs (xAI reuses the OpenAI client)
+    raise APIStatusError subclasses that expose the HTTP status as
+    `status_code`, so a single 401 check covers all three providers without
+    importing each SDK's exception hierarchy into this module. The class-name
+    fallback catches SDK versions that surface the status differently but still
+    name the type `AuthenticationError`.
+    """
+    if getattr(exc, "status_code", None) == 401:
+        return True
+    if getattr(exc, "status", None) == 401:
+        return True
+    return type(exc).__name__ == "AuthenticationError"
+
+
 def call_oracle(config: OracleConfig, user_message: str) -> dict:
     """Route to the correct provider with retries and backoff.
 
@@ -1049,6 +1079,20 @@ def call_oracle(config: OracleConfig, user_message: str) -> dict:
 
         except Exception as e:
             elapsed = time.time() - t0
+            # Authentication failures are not transient: a rejected key is
+            # rejected identically on every attempt. Fail hard immediately
+            # instead of burning the backoff schedule (and the Gemini
+            # fallback) and hiding the cause under a generic "failed after N
+            # attempts" error. This is the exact failure that masqueraded as a
+            # flaky retry loop during the ANTHROPIC_API_KEY rotation incident.
+            if _is_auth_error(e):
+                raise OracleAuthError(
+                    f"[{config.name}] Authentication failed for provider "
+                    f"'{config.provider}' (HTTP 401 invalid API key). The "
+                    f"configured key is missing, malformed, revoked, or scoped "
+                    f"to the wrong workspace. Fix the provider key and redeploy "
+                    f"— retrying cannot succeed."
+                ) from e
             failure = _describe_exception(e)
             failure["attempt"] = attempt + 1
             failure["elapsed_seconds"] = round(elapsed, 2)
@@ -1487,6 +1531,14 @@ def _fan_out_reviewers(
         try:
             result = call_oracle(config, review_msg)
             return config.name, result
+        except OracleAuthError:
+            # A dead key is a configuration fault, not a reviewer failure.
+            # Propagate (it surfaces via future.result()) so the run aborts
+            # loudly instead of degrading to a missing-reviewer quorum round
+            # after round. Must precede OracleCallError/Exception — it is a
+            # sibling of OracleCallError, not a subclass, so it would
+            # otherwise be swallowed into an error placeholder.
+            raise
         except OracleCallError as e:
             LOGGER.error(f"[{config.name}] FAILED after retries: {e}")
             return config.name, {
@@ -2142,6 +2194,9 @@ def _run_round(
     )
     try:
         normalized = call_oracle(ORACLE_ROSTER["sonnet"], referee_msg)
+    except OracleAuthError:
+        # Dead key — abort the whole review rather than marking rounds invalid.
+        raise
     except Exception as e:
         review_round.telemetry["Sonnet"] = {
             "oracle": "Sonnet",
@@ -2166,6 +2221,9 @@ def _run_round(
     )
     try:
         beth_response = call_oracle(ORACLE_ROSTER["beth"], coord_msg)
+    except OracleAuthError:
+        # Dead key — abort the whole review rather than marking rounds invalid.
+        raise
     except Exception as e:
         review_round.telemetry["Beth"] = {
             "oracle": "Beth",
