@@ -34,3 +34,7 @@ oracle_sessions/
 # OS
 .DS_Store
 Thumbs.db
+
+# HEARTH runtime artifacts (generated, not committed)
+hearth_audit/
+.pytest_cache/
