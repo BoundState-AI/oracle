@@ -53,6 +53,30 @@ from oracle.redact import redact_secrets
 LOGGER = logging.getLogger("oracle.server")
 logging.basicConfig(level=logging.INFO)
 
+
+def _normalize_api_keys() -> None:
+    """Strip surrounding whitespace from provider key env vars at boot.
+
+    WHY: a trailing newline/space is a common artifact when a key is pasted
+    into a deployment dashboard (e.g. Railway). The value is sent to the
+    provider verbatim in the `x-api-key` header and comes back as an opaque
+    `401 invalid x-api-key`, while every non-Anthropic oracle still succeeds —
+    exactly the production failure mode for Beth. Normalizing once here fixes
+    every downstream reader without touching the oracle2 black box.
+    """
+    for var in (
+        "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "XAI_API_KEY",
+        "GOOGLE_API_KEY", "GEMINI_API_KEY", "ORACLE_API_KEY",
+    ):
+        raw = os.environ.get(var)
+        if raw is not None and raw != raw.strip():
+            os.environ[var] = raw.strip()
+            LOGGER.warning("Stripped surrounding whitespace from %s", var)
+
+
+# Run before any module-level env reads below (e.g. ORACLE_API_KEY for auth).
+_normalize_api_keys()
+
 app = FastAPI(
     title="ORACLE API",
     version="1.0.0",
@@ -1319,5 +1343,24 @@ app.include_router(oracle_router)
 
 @app.get("/health")
 async def health():
-    """Health check endpoint for Railway. No auth required."""
-    return {"status": "ok", "service": "oracle"}
+    """Health check endpoint for Railway. No auth required.
+
+    Also reports non-sensitive provider-key fingerprints — presence and length
+    only, never the value — so a key rotation can be verified against the LIVE
+    process without shell access. If `keys.anthropic.present` is false the
+    variable isn't reaching this service/environment (a Railway wiring issue,
+    not a bad key); a length far from ~100 means the value is truncated.
+    """
+    def _fingerprint(var: str) -> dict[str, Any]:
+        value = os.environ.get(var) or ""
+        return {"present": bool(value), "length": len(value)}
+
+    return {
+        "status": "ok",
+        "service": "oracle",
+        "keys": {
+            "anthropic": _fingerprint("ANTHROPIC_API_KEY"),
+            "openai": _fingerprint("OPENAI_API_KEY"),
+            "xai": _fingerprint("XAI_API_KEY"),
+        },
+    }

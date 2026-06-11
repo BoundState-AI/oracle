@@ -2,14 +2,18 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 
+@import url("https://fonts.googleapis.com/css2?family=Crimson+Text:ital,wght@0,400;0,600;0,700;1,400&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap");
+
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: "Inter", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
-  --font-mono: "Geist Mono", "Geist Mono Fallback", ui-monospace, monospace;
-  --font-heading: var(--font-sans);
+  --font-sans: "IBM Plex Mono", ui-monospace, monospace;
+  --font-serif: "Crimson Text", Georgia, serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+  --font-heading: var(--font-serif);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -41,6 +45,9 @@
   --color-card: var(--card);
   --color-success: var(--success);
   --color-success-foreground: var(--success-foreground);
+  --color-consensus-full: var(--consensus-full);
+  --color-consensus-stable: var(--consensus-stable);
+  --color-consensus-blocked: var(--consensus-blocked);
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);
   --radius-lg: var(--radius);
@@ -49,128 +56,153 @@
   --radius-3xl: calc(var(--radius) * 2.2);
   --radius-4xl: calc(var(--radius) * 2.6);
 
-  --animate-fade-in: fade-in 0.3s ease-out;
-  --animate-slide-in: slide-in 0.3s ease-out;
+  --animate-fade-in: fade-in 0.5s ease-out;
+  --animate-slide-in: slide-in 0.4s ease-out;
+  --animate-pulse-subtle: pulse-subtle 3s ease-in-out infinite;
 }
 
 /*
- * MIRA-matched color palette — dark-mode-first BoundState aesthetic
- * Deep navy backgrounds, electric blue accents
+ * Dark Academic — ORACLE aesthetic
+ * Deep charcoal base, slate/stone accents, semantic consensus colors
+ * Serif headers + monospace data for lab-notebook feeling
  */
 :root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.15 0.02 250);
+  /* Backgrounds & foreground */
+  --background: #0f1419;
+  --foreground: #e6e6e6;
 
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.15 0.02 250);
+  --card: #1a1f28;
+  --card-foreground: #e6e6e6;
 
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.15 0.02 250);
+  --popover: #1a1f28;
+  --popover-foreground: #e6e6e6;
 
-  --primary: oklch(0.21 0.05 255);
-  --primary-foreground: oklch(0.97 0.005 250);
+  /* Primary: slate blue (authority) */
+  --primary: #3d5a80;
+  --primary-foreground: #f5f5f5;
 
-  --secondary: oklch(0.97 0.005 250);
-  --secondary-foreground: oklch(0.21 0.05 255);
+  /* Secondary: warm stone gray (contrast) */
+  --secondary: #9b8b7e;
+  --secondary-foreground: #0f1419;
 
-  --muted: oklch(0.97 0.005 250);
-  --muted-foreground: oklch(0.55 0.02 250);
+  /* Muted: dim stone for secondary text */
+  --muted: #6b7280;
+  --muted-foreground: #9ca3af;
 
-  --accent: oklch(0.97 0.005 250);
-  --accent-foreground: oklch(0.21 0.05 255);
+  /* Accent: reserved for critical states */
+  --accent: #d97706;
+  --accent-foreground: #0f1419;
 
-  --destructive: oklch(0.58 0.22 25);
-  --success: oklch(0.55 0.17 155);
-  --success-foreground: oklch(0.97 0.005 250);
+  /* Status colors */
+  --destructive: #dc2626;
+  --success: #7fb3d5;
 
-  --border: oklch(0.92 0.005 250);
-  --input: oklch(0.92 0.005 250);
-  --ring: oklch(0.21 0.05 255);
+  /* Consensus state colors (semantic) */
+  --consensus-full: #6b9e7f;
+  --consensus-stable: #d4a45f;
+  --consensus-blocked: #c05050;
 
-  --chart-1: oklch(0.65 0.18 25);
-  --chart-2: oklch(0.55 0.12 175);
-  --chart-3: oklch(0.40 0.08 230);
-  --chart-4: oklch(0.72 0.14 80);
-  --chart-5: oklch(0.68 0.17 45);
+  /* Borders & inputs */
+  --border: #2c3e50;
+  --input: #1a1f28;
+  --ring: #3d5a80;
 
-  --radius: 0.5rem;
+  /* Chart colors (warm academic palette) */
+  --chart-1: #c05050;
+  --chart-2: #d4a45f;
+  --chart-3: #6b9e7f;
+  --chart-4: #7fb3d5;
+  --chart-5: #9b8b7e;
 
-  --sidebar: oklch(0.98 0 0);
-  --sidebar-foreground: oklch(0.35 0.02 250);
-  --sidebar-primary: oklch(0.18 0.03 250);
-  --sidebar-primary-foreground: oklch(0.98 0 0);
-  --sidebar-accent: oklch(0.96 0.005 250);
-  --sidebar-accent-foreground: oklch(0.18 0.03 250);
-  --sidebar-border: oklch(0.92 0.005 250);
-  --sidebar-ring: oklch(0.56 0.18 260);
+  --radius: 0.375rem;
+
+  /* Sidebar */
+  --sidebar: #1a1f28;
+  --sidebar-foreground: #9ca3af;
+  --sidebar-primary: #3d5a80;
+  --sidebar-primary-foreground: #f5f5f5;
+  --sidebar-accent: #d4a45f;
+  --sidebar-accent-foreground: #0f1419;
+  --sidebar-border: #2c3e50;
+  --sidebar-ring: #3d5a80;
 }
 
-.dark {
-  --background: oklch(0.14 0.02 250);
-  --foreground: oklch(0.97 0.005 250);
-
-  --card: oklch(0.18 0.025 250);
-  --card-foreground: oklch(0.97 0.005 250);
-
-  --popover: oklch(0.18 0.025 250);
-  --popover-foreground: oklch(0.97 0.005 250);
-
-  --primary: oklch(0.97 0.005 250);
-  --primary-foreground: oklch(0.21 0.05 255);
-
-  --secondary: oklch(0.25 0.03 250);
-  --secondary-foreground: oklch(0.97 0.005 250);
-
-  --muted: oklch(0.25 0.03 250);
-  --muted-foreground: oklch(0.70 0.02 250);
-
-  --accent: oklch(0.25 0.03 250);
-  --accent-foreground: oklch(0.97 0.005 250);
-
-  --destructive: oklch(0.45 0.18 25);
-  --success: oklch(0.55 0.17 155);
-  --success-foreground: oklch(0.97 0.005 250);
-
-  --border: oklch(0.25 0.03 250);
-  --input: oklch(0.25 0.03 250);
-  --ring: oklch(0.60 0.20 260);
-
-  --chart-1: oklch(0.55 0.18 260);
-  --chart-2: oklch(0.55 0.14 170);
-  --chart-3: oklch(0.60 0.16 55);
-  --chart-4: oklch(0.55 0.16 300);
-  --chart-5: oklch(0.55 0.18 350);
-
-  --sidebar: oklch(0.18 0.03 250);
-  --sidebar-foreground: oklch(0.70 0.02 250);
-  --sidebar-primary: oklch(0.55 0.20 260);
-  --sidebar-primary-foreground: oklch(1 0 0);
-  --sidebar-accent: oklch(0.22 0.025 250);
-  --sidebar-accent-foreground: oklch(0.70 0.02 250);
-  --sidebar-border: oklch(0.22 0.025 250);
-  --sidebar-ring: oklch(0.56 0.18 260);
+/* Typography system */
+html {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
-@layer base {
-  * {
-    @apply border-border outline-ring/50;
-  }
-  body {
-    @apply bg-background text-foreground antialiased;
-  }
-  html {
-    @apply font-sans;
-  }
+/* Serif for headings, large display text */
+h1, h2, h3, h4, h5, h6,
+.font-serif,
+.prose h1,
+.prose h2,
+.prose h3 {
+  font-family: var(--font-serif);
+  font-weight: 600;
+  letter-spacing: -0.02em;
 }
 
-.animate-fade-in {
-  animation: fade-in 0.3s ease-out;
+h1, .text-4xl {
+  font-size: 2.5rem;
+  line-height: 1.1;
+  font-weight: 700;
+  letter-spacing: -0.03em;
 }
 
+h2, .text-3xl {
+  font-size: 1.875rem;
+  line-height: 1.2;
+  font-weight: 600;
+}
+
+h3, .text-2xl {
+  font-size: 1.5rem;
+  line-height: 1.3;
+  font-weight: 600;
+}
+
+/* Monospace for data, code, metrics */
+.font-mono,
+code,
+pre,
+.tabular-nums {
+  font-family: var(--font-mono);
+  font-weight: 500;
+}
+
+body {
+  background: linear-gradient(135deg, #0f1419 0%, #141a22 100%);
+  color: var(--foreground);
+  letter-spacing: 0.01em;
+}
+
+/* Scientific paper aesthetic: generous vertical rhythm */
+p {
+  line-height: 1.7;
+  margin-bottom: 1.5rem;
+}
+
+p + p {
+  margin-top: 1rem;
+}
+
+/* Subtle animations */
 @keyframes fade-in {
   from {
     opacity: 0;
-    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
   }
   to {
     opacity: 1;
@@ -178,19 +210,185 @@
   }
 }
 
-@keyframes slide-in {
-  from {
-    opacity: 0;
-    transform: translateX(-8px);
-  }
-  to {
+@keyframes pulse-subtle {
+  0%, 100% {
     opacity: 1;
-    transform: translateX(0);
+  }
+  50% {
+    opacity: 0.7;
   }
 }
 
-@keyframes spin-slow {
-  to {
-    transform: rotate(360deg);
-  }
+/* Consistent card styling: lab instrument look */
+[role="region"][aria-label*="card"],
+.card,
+.bg-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  position: relative;
+}
+
+.card::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.1), transparent);
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+}
+
+/* Metrics dashboard grid */
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1rem;
+}
+
+.metric-item {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.metric-label {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  color: var(--muted-foreground);
+}
+
+.metric-value {
+  font-family: var(--font-mono);
+  font-size: 1.875rem;
+  font-weight: 600;
+  color: var(--foreground);
+  line-height: 1;
+}
+
+/* Consensus indicators */
+.consensus-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.consensus-full {
+  background: rgba(107, 158, 127, 0.15);
+  color: var(--consensus-full);
+  border: 1px solid rgba(107, 158, 127, 0.3);
+}
+
+.consensus-stable {
+  background: rgba(212, 164, 95, 0.15);
+  color: var(--consensus-stable);
+  border: 1px solid rgba(212, 164, 95, 0.3);
+}
+
+.consensus-blocked {
+  background: rgba(192, 80, 80, 0.15);
+  color: var(--consensus-blocked);
+  border: 1px solid rgba(192, 80, 80, 0.3);
+}
+
+/* Divider: visual separation for oracle consensus */
+.oracle-divider {
+  border-left: 2px solid var(--border);
+  padding-left: 1.5rem;
+  margin-left: 1.5rem;
+}
+
+/* Prose styling for findings report */
+.prose {
+  --tw-prose-body: var(--foreground);
+  --tw-prose-headings: var(--foreground);
+  --tw-prose-links: var(--primary);
+  --tw-prose-code: var(--secondary);
+  --tw-prose-borders: var(--border);
+}
+
+.prose code {
+  background: rgba(61, 90, 128, 0.2);
+  padding: 0.125rem 0.375rem;
+  border-radius: 0.25rem;
+  font-size: 0.875em;
+}
+
+.prose pre {
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow-x: auto;
+}
+
+.prose pre code {
+  background: none;
+  padding: 0;
+  font-size: inherit;
+}
+
+/* Vertical emphasis: stacked layout with breathing room */
+.findings-section {
+  margin-bottom: 3rem;
+  padding-bottom: 2rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.findings-section:last-child {
+  border-bottom: none;
+}
+
+/* Button styling: serious, no-nonsense */
+button, [role="button"] {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: 0.875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  transition: all 0.2s ease;
+}
+
+button:hover:not(:disabled) {
+  background-color: var(--primary);
+  border-color: var(--primary);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Loading state: subtle pulse */
+.loading {
+  animation: var(--animate-pulse-subtle);
+}
+
+/* Accessibility: focus states */
+:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+button:focus-visible {
+  outline-offset: -2px;
+}
+
+/* Dark mode explicit (always on) */
+.dark {
+  color-scheme: dark;
 }
