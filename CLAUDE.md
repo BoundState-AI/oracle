@@ -1,74 +1,97 @@
-# CLAUDE.md — boundstate_oracle
+# CLAUDE.md — boundstate_hearth
 
 ## What This Repo Is
 
-ORACLE — Orchestrated Review And Compliance Liaison Engine. Standalone multi-oracle adversarial document review system with extensible compliance rule packs.
+Two BoundState systems cohabit (this repo is a clone of `oracle` with HEARTH
+built on top):
 
-## Architecture
+- **HEARTH** — Buyer-Side Real Estate Intelligence Platform (`hearth/`).
+  Surfaces unexplained defaults in real-estate documents with citations, for
+  the buyer's licensed human to act on. Spec: `docs/HEARTH_spec_v0.3.md`;
+  Phase-1 state: `BUILD_NOTES.md`.
+- **ORACLE** — Orchestrated Review And Compliance Liaison Engine (`oracle/`).
+  Multi-oracle adversarial document review with extensible compliance rule
+  packs (it reviewed the HEARTH spec).
+
+## HEARTH Architecture
 
 ```
-oracle/
-├── cli.py               # Unified CLI entry point (7 commands)
-├── oracle2.py            # Multi-oracle review engine (6 oracles, convergence loop)
-├── oracle2_adapter.py    # Parses oracle2 output files → ReviewResult contract
-├── pack_validator.py     # JSON Schema validation for all pack types
-├── shall_extractor.py    # Obligation extraction from PDFs (regex + NLP)
-├── build_far_rulepack.py # FAR/DFARS rule pack builder
-├── build_gpcm_rulepack.py# GPCM (NASA tagged standards) pipeline
-└── gpcm_rulepack_adapter.py # Enrichment and Sonnet vision repair
+hearth/
+├── cli.py          # `hearth scrub <doc> --pack CO-Larimer` (exit 2 = REFUSED)
+├── api/app.py      # FastAPI single-tenant — /health only in P1
+├── core/scrubber/  # extraction → segmentation → matcher → engine (fails CLOSED)
+├── core/boundary.py# BuyerPack canary/leak-check primitive (§1.1/§6)
+├── data/           # Pydantic v2 contracts (§2, §11), all extra="forbid"
+├── packs/          # jurisdiction/CO-Larimer/pack.json + stub signer + loader
+├── audit/          # immutable per-run AuditArtifacts (§11)
+└── utils/render.py # report + mandatory banners (§8)
 ```
 
-## Safety
+## HEARTH Key Rules
 
-All modules that touch compliance decisions have `__safety_critical__: bool = True`.
+- **The scrubber FAILS CLOSED.** Unparseable document / unusable pack /
+  unwritable audit trail ⇒ one `refuse` finding, exit code 2 — never an
+  empty success. Tests for this live in `tests/hearth/test_scrubber_fails_closed.py`
+  and were written before the feature; keep it that way.
+- **BuyerPack never exfiltrates** (§1.1): no BuyerPack field in any outbound
+  call, log write, or non-local store. Enforced by
+  `tests/hearth/test_boundary_static.py` (no outbound-capable imports in
+  `hearth/`, allowlist empty) and `test_boundary_canary.py` (runtime canary,
+  fixture #2). Growing the allowlist requires boundary review + a WHY comment.
+- **Findings-only mode** until the §9 #3 counsel opinion: `suggested_template`
+  stays None everywhere; the engine enforces it (`FINDINGS_ONLY`).
+- **No LLM calls in P1.** `ClauseAnalyzer` is a stubbed protocol. Any future
+  BuyerPack-adjacent analyzer must run on local models only.
+- **Rules are data.** Detections live in signed pack micro-rules, never
+  hardcoded in the matcher (§6 "no hardcoded triggers"). Edit a pack ⇒
+  re-sign with `python -m hearth.packs.signing <pack.json>`.
+- **All P1 pack rules are provisional** and must render under the PROVISIONAL
+  banner; `reviewed` status requires a named `authority_review`.
+- **Every scrub run emits an immutable AuditArtifact** (§11) — refusals
+  included. Artifact write failure makes the run refuse.
+- Grey Rock golden file: regenerate only deliberately
+  (`HEARTH_UPDATE_GOLDEN=1`) and review the diff; the §12 minimum-findings
+  test is independent of the golden file by design.
 
-> The system SHALL NOT infer new regulatory interpretations. All outputs are draft artifacts pending responsible human review.
+## ORACLE (unchanged)
 
-## Running
+Multi-oracle review engine. Commands: `oracle review document.md --packs ...`,
+`oracle generate-pack regulation.pdf`, `oracle list-packs`,
+`oracle promote-pack <pack> --reviewer ...`.
 
-```bash
-# CLI
-oracle generate-pack regulation.pdf
-oracle review document.md --packs nasa_std_6016c
-oracle promote-pack nasa_std_6016c --reviewer "Dr. J. Wilde"
-oracle list-packs
+Env vars: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`,
+`GEMINI_API_KEY` (review oracles + extraction).
 
-# As Python module
-python -m oracle review document.md --packs pack1
-```
-
-## Environment Variables
-
-| Variable | Required For |
-|----------|-------------|
-| `ANTHROPIC_API_KEY` | Review (Beth, Sonnet) + generic extraction |
-| `OPENAI_API_KEY` | Review (Fran, Codex) |
-| `XAI_API_KEY` | Review (Grok) |
-| `GEMINI_API_KEY` | Review (Gemini; `GOOGLE_API_KEY` also accepted) |
+ORACLE key rules: never modify `oracle2.py` (black box); all packs register
+as "draft" — human promotion required; non-TTY promotion fails closed
+(requires `--yes`); token budget fails hard if compliance context can't fit.
 
 ## Testing
 
 ```bash
-pytest tests/ -v
+pytest tests/hearth -v   # HEARTH Phase-1 gates (P1-A…P1-D)
+pytest tests/ -v         # full repo (ORACLE + HEARTH); CI runs this
 ```
-
-## Key Rules
-
-- Never modify oracle2.py through ORACLE — it's a black box
-- All packs register as "draft" — human promotion required
-- Non-TTY promotion fails closed (requires --yes)
-- Token budget fails hard if compliance context can't fit
 
 ## Code Standards
 
-General A-level standards (file headers, WHY comments, `<50`-line functions, Pydantic
-`extra="forbid"`, no `print`, naming, no-`monkeypatch` testing, Tailwind) live in the
-**`code-quality` skill** + global `CLAUDE.md` — not duplicated here. ORACLE-specific deltas:
+General A-level standards (file headers, WHY comments, `<50`-line functions,
+Pydantic `extra="forbid"`, no `print` in library code, naming,
+no-`monkeypatch` testing, Tailwind) live in the **`code-quality` skill** +
+global `CLAUDE.md` — not duplicated here. Repo-specific deltas:
 
-- **Logger namespace:** `LOGGER = logging.getLogger("oracle.<module>")` (uppercase `LOGGER`).
-- **Mark `__safety_critical__: bool = True`** on: compliance-obligation extractors
-  (`shall_extractor`, pack builders), routing/grading deciders (`chat_engine`,
-  `chat_grader`), `pack_validator`, review/compliance orchestrators (`oracle2`,
-  `conductor`, engines), and remediation-language producers (`remediation_formatter`).
-- Parser/rule-pack models that accept extensible input use `extra="allow"` **with a WHY
-  comment** (everything at the API boundary stays `extra="forbid"`).
+- **Logger namespace:** `LOGGER = logging.getLogger("oracle.<module>")` /
+  `logging.getLogger("hearth.<module>")` (uppercase `LOGGER`).
+- **ORACLE:** mark `__safety_critical__: bool = True` on compliance-obligation
+  extractors, routing/grading deciders, `pack_validator`,
+  review/compliance orchestrators, and remediation-language producers.
+- **HEARTH:** every module header carries `Safety Critical:` and
+  `Financially Critical:` fields plus matching dunders. Financially-critical
+  modules (scrubber, pack loader/signing, audit, boundary, render, cli)
+  follow the **never-suppress-error** pattern: a failure is logged in full
+  and surfaced as a refusal — a scrub that fails OPEN is the cardinal
+  failure mode.
+- Parser/rule-pack models that accept extensible input use `extra="allow"`
+  **with a WHY comment** (everything at the API boundary stays
+  `extra="forbid"`). In HEARTH the one open surface is `MicroRule.payload`
+  (a typed `dict`), validated by its consumers.
