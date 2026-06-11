@@ -1,0 +1,37 @@
+{
+  "identity": {
+    "household": "CANARY-HOUSEHOLD-9f3b1a",
+    "pack_version": "canary-1",
+    "created": "2026-06-11"
+  },
+  "hard_constraints": {
+    "budget_ceiling_usd": 7654321,
+    "financing": {
+      "type": "conventional",
+      "preapproval_usd": 7000001,
+      "down_pct": 0.2,
+      "rate_lock_expiry": "2026-09-30"
+    },
+    "geography": {
+      "anchor": "CANARY-ANCHOR-URSA-MAJOR Berthoud CO",
+      "max_commute_min": 35,
+      "counties": ["Larimer", "Weld", "Boulder"]
+    },
+    "deal_breakers": ["CANARY-DEALBREAKER-active-well-c4a1"]
+  },
+  "soft_preferences": [
+    {"feature": "shop_space_sqft", "target": 600, "weight": 0.25},
+    {"feature": "single_story", "target": true, "weight": 0.1},
+    {"feature": "outbuilding_style", "target": "CANARY-TARGET-timber-x7e2", "weight": 0.05}
+  ],
+  "timeline": {
+    "need_occupancy_by": "2026-11-01",
+    "flexibility_days": 21,
+    "temp_housing_runway_days": 45
+  },
+  "posture": {
+    "contingency_tolerance": "standard",
+    "max_appraisal_gap_usd": 54321,
+    "disclosure_policy": "reveal_nothing"
+  }
+}

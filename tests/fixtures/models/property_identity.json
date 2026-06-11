@@ -1,0 +1,11 @@
+{
+  "property_uid": "hearth:prop:8c1f2a90",
+  "parcels": ["R1234567", "R1234568"],
+  "address_normalized": "123 EXAMPLE LN, BERTHOUD, CO 80513",
+  "unit": null,
+  "geocode": {"lat": 40.3083, "lon": -105.0811},
+  "listing_ids": ["IRES-1029384"],
+  "parcel_history": ["R0999999"],
+  "match_confidence": 0.97,
+  "manual_override": false
+}
