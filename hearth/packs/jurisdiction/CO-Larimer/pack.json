@@ -10,8 +10,10 @@
       "CREC standard forms library (dora.colorado.gov/divisions/division-of-real-estate)",
       "C.R.S. Title 12, Article 10 (leg.colorado.gov)",
       "CO Division of Real Estate position statements",
-      "ECMC (formerly COGCC) rules (ecmc.state.co.us)",
-      "DOLA special district transparency portal (dola.colorado.gov)"
+      "ECMC (formerly COGCC) rules and well database (ecmc.state.co.us)",
+      "DOLA special district transparency portal (dola.colorado.gov)",
+      "CDPHE radon program (cdphe.colorado.gov/radon)",
+      "Colorado State Forest Service Wildfire Risk Assessment (coloradoforestatlas.org)"
     ],
     "update_sla_days": 30,
     "status": "provisional"
@@ -121,6 +123,241 @@
           "severity": "flag",
           "default_analysis": "If the buyer defaults on a purchase contract, the broker's fee is still earned, due, and payable — the buyer pays for a closing that never happened, on top of any earnest money already lost. The blank could have limited the fee to transactions that actually close.",
           "exposure": null
+        }
+      }
+    },
+    {
+      "rule_id": "CO-LAR-CBS-DL-INSPOBJ-001",
+      "category": "contract_deadline",
+      "status": "provisional",
+      "effective_from": "2025-01-01",
+      "effective_to": null,
+      "source": "CREC Contract to Buy and Sell Real Estate, Residential (CBS1-6-24) §3.1 deadline table; §10.2 Inspection Objection",
+      "authority_review": null,
+      "signature": "STUB1:e6cc21afb080a962de6974503e204d98e988f383352bdcc1aab0cd0cb060e7f4",
+      "payload": {
+        "summary": "Inspection Objection Deadline — the buyer's cleanest exit ramp.",
+        "deadline": "inspection_objection",
+        "lever": "The Inspection Objection Deadline is a fill-in blank, negotiable line-by-line like every §3.1 date. Sellers read a short window as a strong offer; the buyer's counter is a window just long enough for the inspections that match this property (sewer scope, roof, well/septic where applicable).",
+        "risk_if_waived": "Waiving or missing it forfeits the unconditional right to object or terminate on physical-condition grounds — adverse discoveries after the deadline generally mean proceeding as-is or defaulting with earnest money at risk.",
+        "detection": {
+          "type": "clause_regex",
+          "all_of": [
+            "inspection objection deadline"
+          ]
+        },
+        "finding": {
+          "category": "deadline",
+          "severity": "info",
+          "default_analysis": "Negotiable lever: The Inspection Objection Deadline is a fill-in blank, negotiable line-by-line like every §3.1 date — counter with a window just long enough for the inspections this property actually needs. Risk if waived/missed: forfeits the unconditional right to object or terminate on condition grounds; adverse discoveries after the deadline mean proceeding as-is or defaulting with earnest money at risk.",
+          "exposure": null
+        }
+      }
+    },
+    {
+      "rule_id": "CO-LAR-CBS-DL-INSPRES-001",
+      "category": "contract_deadline",
+      "status": "provisional",
+      "effective_from": "2025-01-01",
+      "effective_to": null,
+      "source": "CREC CBS1-6-24 §3.1 deadline table; §10.3 Inspection Resolution",
+      "authority_review": null,
+      "signature": "STUB1:dd976336500500780cdcf11ba4f2c5ee564720fc1c04347bf9da735a371f8d3d",
+      "payload": {
+        "summary": "Inspection Resolution Deadline — where repair negotiations actually die.",
+        "deadline": "inspection_resolution",
+        "lever": "The gap between Objection and Resolution is the real negotiating window for repairs, credits, or price reductions. Width is negotiable; a too-narrow gap pressures the buyer to fold on legitimate objections.",
+        "risk_if_waived": "If the Resolution Deadline passes without a signed agreement, the buyer's objection is deemed withdrawn under §10.3 and the contract proceeds as-is — silence converts an objection into acceptance.",
+        "detection": {
+          "type": "clause_regex",
+          "all_of": [
+            "inspection resolution deadline"
+          ]
+        },
+        "finding": {
+          "category": "deadline",
+          "severity": "info",
+          "default_analysis": "Negotiable lever: the Objection-to-Resolution gap is the real window for negotiating repairs, credits, or price cuts — keep it wide enough to actually negotiate. Risk if waived/missed: an objection with no signed resolution by this deadline is deemed withdrawn (§10.3) and the contract proceeds as-is; silence converts an objection into acceptance.",
+          "exposure": null
+        }
+      }
+    },
+    {
+      "rule_id": "CO-LAR-CBS-DL-APPRAISAL-001",
+      "category": "contract_deadline",
+      "status": "provisional",
+      "effective_from": "2025-01-01",
+      "effective_to": null,
+      "source": "CREC CBS1-6-24 §3.1 deadline table; §6.2 Appraisal Deadline",
+      "authority_review": null,
+      "signature": "STUB1:d0696d92c0bb4147e90343e7988c08506a6bd38f2a3bfa1ca4fc3bfad7a5c10a",
+      "payload": {
+        "summary": "Appraisal Deadline — the valuation-gap escape hatch.",
+        "deadline": "appraisal",
+        "lever": "Deadline timing relative to the loan deadlines is negotiable, and so is what happens on a low appraisal: objection, renegotiation, or a capped appraisal-gap commitment sized by the BuyerPack max_appraisal_gap_usd, not by the listing agent's ask.",
+        "risk_if_waived": "Waiving appraisal protection commits the buyer to covering any gap between contract price and appraised value in cash; on a thin-comp property that number is open-ended.",
+        "detection": {
+          "type": "clause_regex",
+          "all_of": [
+            "appraisal deadline"
+          ]
+        },
+        "finding": {
+          "category": "deadline",
+          "severity": "info",
+          "default_analysis": "Negotiable lever: appraisal-deadline timing and the low-appraisal remedy are both blanks — objection, renegotiation, or a CAPPED gap commitment sized by your own ceiling, not the listing side's ask. Risk if waived/missed: waiving appraisal protection commits the buyer to paying any contract-vs-appraisal gap in cash, an open-ended number on thin-comp properties.",
+          "exposure": null
+        }
+      }
+    },
+    {
+      "rule_id": "CO-LAR-CBS-DL-LOAN-001",
+      "category": "contract_deadline",
+      "status": "provisional",
+      "effective_from": "2025-01-01",
+      "effective_to": null,
+      "source": "CREC CBS1-6-24 §3.1 deadline table; §5.2 New Loan Availability / Termination",
+      "authority_review": null,
+      "signature": "STUB1:8bb7ec0b7906aef5df9854c57510356761bcbe7681c7dd62f6f2facf1a318a68",
+      "payload": {
+        "summary": "New Loan Availability Deadline — the last clean financing exit.",
+        "deadline": "loan_availability",
+        "lever": "Position this deadline late enough for underwriting reality (rate locks, appraisal turn-times in Larimer County) — it is the last date the buyer can terminate on financing grounds and keep earnest money.",
+        "risk_if_waived": "After this deadline a financing failure is a buyer default: earnest money is forfeit and, under fee-survival clauses, broker fees may still be owed on a purchase that never closed.",
+        "detection": {
+          "type": "clause_regex",
+          "all_of": [
+            "(?:new loan availability|loan availability|new loan termination) deadline"
+          ]
+        },
+        "finding": {
+          "category": "deadline",
+          "severity": "info",
+          "default_analysis": "Negotiable lever: set this date late enough for underwriting reality — it is the last date to terminate on financing grounds and keep earnest money. Risk if waived/missed: a later financing failure is buyer default — earnest money forfeit, and under fee-survival clauses broker fees may still be owed on a purchase that never closed.",
+          "exposure": null
+        }
+      }
+    },
+    {
+      "rule_id": "CO-LAR-LM-METRO-001",
+      "category": "landmine",
+      "status": "provisional",
+      "effective_from": "2020-01-01",
+      "effective_to": null,
+      "source": "C.R.S. Title 32 Article 1 (special districts); DOLA special district transparency portal; Larimer County Assessor tax entity rolls",
+      "authority_review": null,
+      "signature": "STUB1:1c70020f5107d38472fcf2853b499c22a684b065ffea2bd1e8ba975f9f58a185",
+      "payload": {
+        "summary": "Metro-district debt service can add 40-70+ mills to the effective tax rate without appearing in the list price.",
+        "analysis": "Metro-district mill levies are a recurring cost the listing never headlines. Pull the property's total mill levy and the district's debt profile from the transparency portal before pricing an offer; a 60-mill district on a $700k home is roughly $2,900/yr above a comparable non-district home.",
+        "detection": {
+          "type": "data_query",
+          "adapter": "assessor_tax_entities",
+          "query_field": "metro_district_mill_levy",
+          "unit": "mills",
+          "thresholds": [
+            {
+              "severity": "warn",
+              "gte": 45
+            },
+            {
+              "severity": "flag",
+              "gte": 60
+            }
+          ],
+          "note": "Detection spec as data per §12 P1-C; the assessor adapter is NOT built in Phase 1."
+        }
+      }
+    },
+    {
+      "rule_id": "CO-LAR-LM-RADON-001",
+      "category": "landmine",
+      "status": "provisional",
+      "effective_from": "2020-01-01",
+      "effective_to": null,
+      "source": "EPA Map of Radon Zones (Larimer County = Zone 1, highest potential); CDPHE radon program; C.R.S. 38-35.7-109 (radon disclosure, eff. 2023-08-07)",
+      "authority_review": null,
+      "signature": "STUB1:10e9c35c1a31d0844d5a106141ec26681ffa916ace5454cd559e43635f6619c3",
+      "payload": {
+        "summary": "Larimer County is EPA radon Zone 1: testing is the norm, not an exotic ask.",
+        "analysis": "Radon testing during inspection is standard practice in Larimer County and sellers must disclose known radon history (C.R.S. 38-35.7-109). A failed test is a negotiation item: active mitigation typically runs $1,500-$2,500 — ask for it as a credit or repair, never absorb it silently.",
+        "detection": {
+          "type": "data_query",
+          "adapter": "risk_layers",
+          "query_field": "epa_radon_zone",
+          "thresholds": [
+            {
+              "severity": "warn",
+              "eq": 1
+            }
+          ],
+          "note": "Detection spec as data per §12 P1-C; the risk-layer adapter is NOT built in Phase 1."
+        }
+      }
+    },
+    {
+      "rule_id": "CO-LAR-LM-WILDFIRE-001",
+      "category": "landmine",
+      "status": "provisional",
+      "effective_from": "2023-01-01",
+      "effective_to": null,
+      "source": "Colorado State Forest Service Wildfire Risk Assessment (coloradoforestatlas.org); HB23-1288 Fair Access to Insurance (FAIR plan)",
+      "authority_review": null,
+      "signature": "STUB1:8295f5ee95704c4d117d72dd314e921d694528e0416f2af40ac20a26786227cb",
+      "payload": {
+        "summary": "Wildfire-exposed foothills properties can be uninsurable or carry premiums that break the monthly budget.",
+        "analysis": "For any property at moderate-or-higher wildfire risk, obtain an actual insurance quote BEFORE the inspection window closes — non-renewal patterns in the foothills mean the FAIR plan (last-resort coverage, higher cost, lower limits) may be the only option, and lenders require proof of insurability to close.",
+        "detection": {
+          "type": "data_query",
+          "adapter": "risk_layers",
+          "query_field": "csfs_wildfire_risk_rating",
+          "thresholds": [
+            {
+              "severity": "warn",
+              "gte_rating": "moderate"
+            },
+            {
+              "severity": "flag",
+              "gte_rating": "high"
+            }
+          ],
+          "note": "Detection spec as data per §12 P1-C; the risk-layer adapter is NOT built in Phase 1."
+        }
+      }
+    },
+    {
+      "rule_id": "CO-LAR-LM-OILGAS-001",
+      "category": "landmine",
+      "status": "provisional",
+      "effective_from": "2021-01-15",
+      "effective_to": null,
+      "source": "ECMC (formerly COGCC) Rule 604 location standards (2,000 ft setback framework, eff. 2021-01-15); ECMC well database (ecmc.state.co.us)",
+      "authority_review": null,
+      "signature": "STUB1:77b2f581de7954d494a5e0674f9b15e9323f22bd1d1eac6025225dfc3724efed",
+      "payload": {
+        "summary": "Active or permitted oil/gas locations near the parcel affect health, financing, insurance, and resale.",
+        "analysis": "Query the ECMC well database for active, permitted, or abandoned wells within the setback-relevant radius of the parcel. New-development setbacks are 2,000 ft (Rule 604), but existing wells can sit far closer to existing homes; verify plugging status for abandoned wells and disclose findings to the inspector.",
+        "detection": {
+          "type": "data_query",
+          "adapter": "ecmc_wells",
+          "query_field": "wells_within_radius",
+          "radius_ft": 2000,
+          "well_statuses": [
+            "active",
+            "permitted",
+            "abandoned_unplugged"
+          ],
+          "thresholds": [
+            {
+              "severity": "warn",
+              "count_gte": 1
+            },
+            {
+              "severity": "flag",
+              "count_gte": 3
+            }
+          ],
+          "note": "Detection spec as data per §12 P1-C; the ECMC adapter is NOT built in Phase 1."
         }
       }
     }
