@@ -139,7 +139,85 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--packs-dir", type=Path, default=None)
     status.add_argument("--verbose", action="store_true", help="debug logging")
     status.set_defaults(handler=cmd_pack_status)
+
+    ingest = subcommands.add_parser(
+        "ingest",
+        help="ingest a bulk source export into the evidence store (§13 P2-C)",
+        description=(
+            "Parse a county bulk-export file with a declared adapter, resolve "
+            "PropertyIdentities, and append provenance-carrying evidence rows. "
+            "Malformed input REFUSES with exit code 2."
+        ),
+    )
+    ingest.add_argument("file", type=Path, help="bulk export file (CSV)")
+    ingest.add_argument(
+        "--adapter",
+        required=True,
+        help="adapter source_id (e.g. larimer-assessor, larimer-permits)",
+    )
+    ingest.add_argument(
+        "--store",
+        type=Path,
+        required=True,
+        help="evidence store directory (created if absent)",
+    )
+    ingest.add_argument("--verbose", action="store_true", help="debug logging")
+    ingest.set_defaults(handler=cmd_ingest)
     return parser
+
+
+def cmd_ingest(args: argparse.Namespace) -> int:
+    from hearth.core.identity.resolver import property_uid, resolve_batches
+    from hearth.data import PropertyEvidence
+    from hearth.db.evidence_store import EvidenceStore, EvidenceStoreError
+    from hearth.ingest import IngestError, get_adapter
+
+    try:
+        adapter = get_adapter(args.adapter)
+        batch = adapter.parse(args.file)
+        store = EvidenceStore(args.store)
+
+        created, kept = 0, 0
+        for identity in resolve_batches([batch]):
+            current = store.get_identity(identity.property_uid)
+            # Never let a weaker source downgrade an established identity;
+            # a stronger or first resolution wins.
+            if current is not None and current.match_confidence >= identity.match_confidence:
+                kept += 1
+                continue
+            store.upsert_identity(identity)
+            created += 1
+
+        rows = 0
+        for record in batch.records:
+            uid = property_uid("CO", "Larimer", record.parcel_id)
+            for field_name, value in record.fields.items():
+                store.add_evidence(
+                    PropertyEvidence(
+                        property_uid=uid,
+                        field=field_name,
+                        value=value,
+                        source=batch.rights.source,
+                        retrieved=batch.retrieved,
+                        confidence=batch.rights.confidence_tier,
+                    )
+                )
+                rows += 1
+    except (IngestError, EvidenceStoreError) as exc:
+        LOGGER.error("ingest failed closed: %s", exc)
+        print(f"*** REFUSED — ingest failed closed: {exc}")
+        return EXIT_REFUSE
+
+    print(f"ingested {args.file.name} via {batch.source_id}")
+    print(f"  identities    : {created} upserted, {kept} kept (stronger record on file)")
+    print(f"  evidence rows : {rows} appended (source confidence {batch.rights.confidence_tier})")
+    print(f"  store         : {args.store}")
+    if not batch.rights.verified:
+        print(
+            "  NOTE: this source's data-rights row is founder-declared and "
+            "NOT yet verified (§4.1)."
+        )
+    return EXIT_OK
 
 
 def cmd_pack_status(args: argparse.Namespace) -> int:
