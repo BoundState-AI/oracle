@@ -99,21 +99,40 @@ def parse_wells_csv(path: Path) -> list[WellRecord]:
         raise WellsError(f"cannot read {path.name}: {exc}") from exc
     if not rows:
         raise WellsError(f"{path.name} contains zero wells")
-    records = []
+    records: list[WellRecord] = []
+    seen_apis: set[str] = set()
     for line, row in enumerate(rows, start=2):
         try:
-            records.append(
-                WellRecord(
-                    api=row["api"].strip(),
-                    well_name=row["well_name"].strip(),
-                    lat=float(row["latitude"]),
-                    lon=float(row["longitude"]),
-                    status=row["facil_stat"].strip().upper(),
-                    county=row["county"].strip(),
-                )
+            record = WellRecord(
+                api=row["api"].strip(),
+                well_name=row["well_name"].strip(),
+                lat=float(row["latitude"]),
+                lon=float(row["longitude"]),
+                status=row["facil_stat"].strip().upper(),
+                county=row["county"].strip(),
             )
         except (KeyError, ValueError) as exc:
             raise WellsError(f"{path.name} line {line} is malformed ({exc})") from exc
+        if not (-90.0 <= record.lat <= 90.0 and -180.0 <= record.lon <= 180.0):
+            # Out-of-range coordinates also catch lat/lon swaps (a swapped
+            # Colorado well lands near latitude -105): refuse, never guess.
+            raise WellsError(
+                f"{path.name} line {line}: coordinates out of range "
+                f"({record.lat}, {record.lon})"
+            )
+        if record.lat == 0.0 and record.lon == 0.0:
+            # ECMC uses 0,0 for un-surveyed permits: skip, loudly.
+            LOGGER.warning("skipping un-surveyed well %s (0,0 coordinates)", record.api)
+            continue
+        if record.api in seen_apis:
+            # Real exports contain duplicate API rows; counting one well
+            # twice would double the landmine signal.
+            LOGGER.warning("skipping duplicate well row for API %s", record.api)
+            continue
+        seen_apis.add(record.api)
+        records.append(record)
+    if not records:
+        raise WellsError(f"{path.name} yielded zero usable wells")
     return records
 
 

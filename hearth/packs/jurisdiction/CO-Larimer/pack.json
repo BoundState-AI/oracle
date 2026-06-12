@@ -372,7 +372,7 @@
       "effective_to": null,
       "source": "FEMA National Flood Hazard Layer / Flood Map Service Center (msc.fema.gov); 44 CFR Parts 59-77 (NFIP); C.R.S. 24-65.1 (areas of state interest)",
       "authority_review": null,
-      "signature": "STUB1:e6ad2f78b7e0a17e73a77d6bb7fa3dd97216ec677e73ca738652af5e031a65cd",
+      "signature": "STUB1:0ce9af2d549e79cf57dbad51c45a8c714cb05e6a2aca462958d38c2f16f60066",
       "payload": {
         "summary": "Special Flood Hazard Area membership forces flood insurance and caps resale demand.",
         "analysis": "A parcel in FEMA zone A/AE/AO requires flood insurance for any federally backed mortgage — a recurring cost the listing never headlines — and floodway restrictions can bar additions or rebuilds. Shaded X (0.2% annual chance) is uninsured-loss territory worth pricing. Verify the zone at msc.fema.gov and record it with hearth add-evidence.",
@@ -383,23 +383,25 @@
           "thresholds": [
             {
               "severity": "flag",
-              "eq": "A"
-            },
-            {
-              "severity": "flag",
-              "eq": "AE"
-            },
-            {
-              "severity": "flag",
-              "eq": "AO"
-            },
-            {
-              "severity": "flag",
-              "eq": "AH"
+              "eq_any": [
+                "A",
+                "AE",
+                "AO",
+                "AH",
+                "A99",
+                "VE",
+                "V"
+              ]
             },
             {
               "severity": "warn",
-              "eq": "X-shaded"
+              "eq_any": [
+                "X-shaded",
+                "X (shaded)",
+                "shaded X",
+                "X500",
+                "0.2 pct annual chance"
+              ]
             }
           ],
           "note": "Detection spec as data; automated NFHL queries are Phase-4 (egress)."

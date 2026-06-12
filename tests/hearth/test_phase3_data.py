@@ -215,3 +215,89 @@ def test_full_realtor_proofing_scan(tmp_path, capsys):
     assert by_rule["CO-LAR-LM-WILDFIRE-001"]["severity"] == "warn"   # moderate
     for alert in payload["alerts"]:
         assert alert["evidence"], alert["rule_id"]
+
+
+# -- P3 review regression pins (M1, M2, m3, m4) --------------------------------
+
+
+def test_html_interstitial_never_enters_cache(tmp_path):
+    """M1: a portal error page served 200 OK must refuse, not cache."""
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200, content=b"<html><body>Access Denied</body></html>",
+            headers={"content-type": "text/html"},
+        )
+    )
+    with pytest.raises(FetchError, match="HTML"):
+        fetch_source("ecmc-wells", tmp_path, transport=transport)
+    assert not list(tmp_path.rglob("manifest.json"))
+
+
+def test_flood_zone_real_world_spellings(tmp_path):
+    """M2: 'Zone AE' and 'X500' as a buyer actually types them must fire."""
+    from hearth.core.signals.landmines import scan_property
+    from hearth.packs.loader import load_pack
+
+    pack = load_pack("CO-Larimer").pack
+    for typed, expected in (("Zone AE", "flag"), ("x500", "warn"),
+                            ("X (shaded)", "warn"), ("AE", "flag")):
+        store = _store_with_assessor(tmp_path / typed.replace(" ", "_"))
+        from hearth.data import PropertyEvidence
+
+        store.add_evidence(
+            PropertyEvidence(
+                property_uid=UID_A, field="fema_flood_zone", value=typed,
+                source="buyer-supplied: msc.fema.gov", retrieved=RUN_DAY,
+                confidence=0.8,
+            )
+        )
+        run = scan_property(UID_A, store, pack, run_date=RUN_DAY)
+        flood = next(a for a in run.alerts if a.rule_id == "CO-LAR-LM-FLOOD-001")
+        assert (flood.status, flood.severity) == ("alert", expected), typed
+
+
+def test_same_day_correction_wins(tmp_path):
+    """m3: the newest of two same-day same-confidence rows is the one scanned."""
+    from hearth.core.signals.landmines import scan_property
+    from hearth.data import PropertyEvidence
+    from hearth.packs.loader import load_pack
+
+    store = _store_with_assessor(tmp_path)
+    for value in ("X500", "AE"):  # mistake, then correction
+        store.add_evidence(
+            PropertyEvidence(
+                property_uid=UID_A, field="fema_flood_zone", value=value,
+                source="buyer-supplied: correction flow", retrieved=RUN_DAY,
+                confidence=0.8,
+            )
+        )
+    run = scan_property(UID_A, store, load_pack("CO-Larimer").pack, run_date=RUN_DAY)
+    flood = next(a for a in run.alerts if a.rule_id == "CO-LAR-LM-FLOOD-001")
+    assert flood.severity == "flag"  # the AE correction, not the stale X500
+
+
+def test_duplicate_and_unsurveyed_well_rows_handled(tmp_path):
+    """m3/m4: duplicate API rows count once; 0,0 sentinel rows are skipped."""
+    rows = WELLS_CSV.read_text(encoding="utf-8").splitlines()
+    rows.append(rows[1])  # duplicate the PR well near property A
+    rows.append("05-069-09999,SYNTH UNSURVEYED,0.0,0.0,PR,LARIMER")
+    doctored = tmp_path / "wells.csv"
+    doctored.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    store = _store_with_assessor(tmp_path)
+    wells = parse_wells_csv(doctored)
+    assert len(wells) == 4  # dup + 0,0 dropped from the 6 lines
+    compute_well_proximity(store, wells, retrieved=RUN_DAY)
+    rows_a = {r.field: r for r in store.evidence_for(UID_A)}
+    assert rows_a["wells_within_radius"].value == 1  # not double-counted
+
+
+def test_swapped_coordinates_refuse(tmp_path):
+    bad = tmp_path / "swapped.csv"
+    bad.write_text(
+        "api,well_name,latitude,longitude,facil_stat,county\n"
+        "05-1,SWAPPED,-105.08,40.31,PR,LARIMER\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(WellsError, match="out of range"):
+        parse_wells_csv(bad)

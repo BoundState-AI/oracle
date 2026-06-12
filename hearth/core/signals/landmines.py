@@ -188,7 +188,12 @@ def _evaluate_rule(
             evidence=[],
         )
 
-    best = max(rows, key=lambda row: (row.confidence, row.retrieved))
+    # Newest row wins ties on (confidence, retrieved): a same-day
+    # correction must beat the stale entry it corrects (P3 review m3).
+    best = max(
+        enumerate(rows),
+        key=lambda pair: (pair[1].confidence, pair[1].retrieved, pair[0]),
+    )[1]
     severity = _strongest_matching_severity(rule, detection, best.value)
     if severity is None:
         return PropertyAlert(
@@ -238,6 +243,12 @@ def _matches(rule: MicroRule, threshold: dict[str, Any], value) -> bool:
         return _as_number(rule, value) >= _as_number(rule, threshold["gte"])
     if "count_gte" in threshold:
         return _as_number(rule, value) >= _as_number(rule, threshold["count_gte"])
+    if "eq_any" in threshold:
+        options = threshold["eq_any"]
+        if not isinstance(options, list) or not options:
+            raise ScanSpecError(f"rule {rule.rule_id}: eq_any must be a non-empty list")
+        cleaned = _normalize_label(value)
+        return any(cleaned == _normalize_label(option) for option in options)
     if "eq" in threshold:
         expected = threshold["eq"]
         if isinstance(expected, (int, float)) and not isinstance(expected, bool):
@@ -248,6 +259,16 @@ def _matches(rule: MicroRule, threshold: dict[str, Any], value) -> bool:
     raise ScanSpecError(
         f"rule {rule.rule_id}: threshold has no known comparator: {threshold!r}"
     )
+
+
+def _normalize_label(value) -> str:
+    """Buyer-typed labels arrive as 'Zone AE', 'X (shaded)', 'x500'…;
+    normalize before comparing so a real transcription never silently
+    clears a flood flag (P3 review M2)."""
+    text = str(value).strip().lower()
+    if text.startswith("zone "):
+        text = text[len("zone "):]
+    return text.replace("(", "").replace(")", "").replace("-", " ").replace("  ", " ").strip()
 
 
 def _as_number(rule: MicroRule, value) -> float:

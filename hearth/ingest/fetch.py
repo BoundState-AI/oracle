@@ -220,6 +220,15 @@ def fetch_source(
                 payload = response.content
             if not payload:
                 raise FetchError(f"{url} returned an empty body")
+            content_type = response.headers.get("content-type", "")
+            # M1 (P3 review): gov portals serve WAF/soft-404 interstitials
+            # with 200 OK — an HTML page must never enter the cache as data.
+            if "text/html" in content_type.lower() or payload.lstrip()[:1] == b"<":
+                raise FetchError(
+                    f"{url} returned HTML (content-type {content_type!r}), "
+                    "not a data export — likely a portal interstitial; use "
+                    "the manual steps"
+                )
             if len(payload) > MAX_DOWNLOAD_BYTES:
                 raise FetchError(f"{url} exceeds the {MAX_DOWNLOAD_BYTES:,}-byte cap")
             return _write_cache(source, url, payload, cache_dir)
