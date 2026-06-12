@@ -166,6 +166,64 @@ def _detail_lines(
     return lines
 
 
+def render_pack_status(pack: JurisdictionPack, pack_path, freshness) -> str:
+    """Render governance posture for one pack (§13 P2-B: hearth pack-status)."""
+    by_status: dict[str, int] = {}
+    schemes: dict[str, int] = {}
+    for rule in pack.rules:
+        by_status[rule.status] = by_status.get(rule.status, 0) + 1
+        scheme = rule.signature.split(":", 1)[0]
+        schemes[scheme] = schemes.get(scheme, 0) + 1
+
+    lines = [RULE_BAR, " HEARTH JurisdictionPack status", RULE_BAR]
+    lines.append(f" Pack         : {pack.pack_id}")
+    lines.append(f" File         : {pack_path}")
+    lines.append(f" Owner        : {pack.governance.owner}")
+    lines.append(
+        f" Governance   : {pack.governance.status}    update SLA: "
+        f"{pack.governance.update_sla_days} days"
+    )
+    lines.append(
+        f" Rules        : {len(pack.rules)} ("
+        + ", ".join(f"{count} {status}" for status, count in sorted(by_status.items()))
+        + ")"
+    )
+    lines.append(
+        " Signatures   : "
+        + ", ".join(f"{count} {scheme}" for scheme, count in sorted(schemes.items()))
+        + "  (STUB1 = drift detection only, not review attestation)"
+    )
+    lines.append(THIN_BAR)
+    lines.append(f" Source freshness (checked {freshness.checked_on.isoformat()}):")
+    if not freshness.issues:
+        lines.append("   all monitored sources snapshotted, hashed, and within SLA")
+    for issue in freshness.issues:
+        lines.extend(_wrap(f"[{issue.kind}] {issue.source} — {issue.detail}", prefix="   "))
+    if not freshness.fresh:
+        lines.append(THIN_BAR)
+        lines.extend(
+            _wrap(
+                "STALE BASIS: one or more monitored sources is missing or past "
+                "SLA. Findings from this pack may rest on a changed legal "
+                "reality — re-verify sources and re-snapshot (§2.2).",
+                prefix=" !! ",
+            )
+        )
+    provisional = by_status.get("provisional", 0)
+    if provisional:
+        lines.append(THIN_BAR)
+        lines.extend(
+            _wrap(
+                f"{provisional} of {len(pack.rules)} rules are provisional "
+                "(pending licensee/attorney review) and render under the "
+                "PROVISIONAL banner in all outputs (§2.2/§8).",
+                prefix=" !! ",
+            )
+        )
+    lines.append(RULE_BAR)
+    return "\n".join(lines)
+
+
 def _clip(text: str, limit: int = 600) -> str:
     """The verbatim clause lives in the JSON/audit output; the rendered
     report clips pathological clause lengths for readability."""

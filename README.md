@@ -78,8 +78,10 @@ hearth/
 
 ## Dependencies
 
-Phase 1 adds **zero** new runtime dependencies beyond the repo baseline
+Phase 1 added **zero** new runtime dependencies beyond the repo baseline
 (pydantic v2, FastAPI, PyMuPDF, python-docx already shipped with ORACLE).
+Phase 2 adds one: **cryptography** — Ed25519 per-reviewer rule signatures
+(§13 P2-B); the stdlib has no Ed25519 implementation.
 
 ## Testing
 

@@ -124,7 +124,37 @@ def build_parser() -> argparse.ArgumentParser:
     )
     scrub.add_argument("--verbose", action="store_true", help="debug logging")
     scrub.set_defaults(handler=cmd_scrub)
+
+    status = subcommands.add_parser(
+        "pack-status",
+        help="governance posture of a jurisdiction pack (§13 P2-B)",
+        description=(
+            "Validate a pack and report rule statuses, signature schemes, and "
+            "monitored-source freshness against the governance SLA."
+        ),
+    )
+    status.add_argument(
+        "--pack", required=True, help="pack name (e.g. CO-Larimer) or pack.json path"
+    )
+    status.add_argument("--packs-dir", type=Path, default=None)
+    status.add_argument("--verbose", action="store_true", help="debug logging")
+    status.set_defaults(handler=cmd_pack_status)
     return parser
+
+
+def cmd_pack_status(args: argparse.Namespace) -> int:
+    from hearth.packs.governance import GovernanceError, check_freshness
+    from hearth.utils.render import render_pack_status
+
+    try:
+        loaded = load_pack(args.pack, args.packs_dir)
+        freshness = check_freshness(loaded.pack, loaded.path.parent)
+    except (PackError, GovernanceError) as exc:
+        LOGGER.error("pack-status failed closed: %s", exc)
+        print(f"*** REFUSED — pack unusable: {exc}")
+        return EXIT_REFUSE
+    print(render_pack_status(loaded.pack, loaded.path, freshness))
+    return EXIT_OK
 
 
 def cmd_scrub(args: argparse.Namespace) -> int:
