@@ -167,3 +167,15 @@ calls, no UI beyond the CLI, no DB. Nothing out of scope was found necessary.
 *(Runner-up: the valuation engine should not start until its backtest
 harness exists — §3.1's calibrated-interval promise is unfalsifiable
 without it.)*
+
+## 6. Known Phase-2 trap (from the post-build adversarial review)
+
+Backstop exposure uses a **document-scoped capture produced by a different
+rule** (`fee_pct` is captured by the fee rule on §7; the backstop rule on
+§7.3 consumes it). On the locked fixture this is deterministic and
+golden-pinned; on varied real documents a missing/reordered fee clause
+makes the exposure silently `None`. P1 mitigation: the engine now logs a
+WARNING when an exposure spec's capture is absent while a target price is
+configured. Phase-2 fix: make the dependency explicit in the spec (e.g.
+`requires_capture_from: rule_id`) and surface the omission in the finding
+text itself, not just the log.

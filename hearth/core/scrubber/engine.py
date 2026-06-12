@@ -220,13 +220,18 @@ def _compute_exposure(
         return None
     # validate_finding_spec guarantees the method is known.
     pct_raw = captures.get(str(spec.get("pct_capture", "")))
-    if pct_raw is None or target_price_usd is None:
-        LOGGER.info(
-            "rule %s: exposure not computed (pct capture present=%s, "
-            "target price present=%s)",
+    if target_price_usd is None:
+        LOGGER.info("rule %s: exposure skipped (no --target-price)", rule_id)
+        return None
+    if pct_raw is None:
+        # Cross-clause dependency: the capture comes from a DIFFERENT rule
+        # firing elsewhere in the document. Its absence with a target price
+        # configured is a signal worth shouting about, not an info line.
+        LOGGER.warning(
+            "rule %s: exposure omitted — capture %r was not produced by any "
+            "rule on this document; the dollar figure is missing, not zero",
             rule_id,
-            pct_raw is not None,
-            target_price_usd is not None,
+            spec.get("pct_capture"),
         )
         return None
     return round(target_price_usd * float(pct_raw) / 100.0)
