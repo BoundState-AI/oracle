@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import queue
+import tempfile
 import threading
 import uuid
 from pathlib import Path
@@ -49,6 +50,13 @@ from oracle.chat_engine import answer_query as oracle_answer_query
 from oracle.oracle2 import compute_metrics
 from oracle.oracle2_adapter import build_review_result
 from oracle.redact import redact_secrets
+
+from hearth import __version__ as HEARTH_VERSION
+from hearth.audit.artifact import AuditWriteError, build_artifact, write_artifact
+from hearth.core.scrubber.engine import refusal_run, scrub_document
+from hearth.core.scrubber.extraction import MAX_DOCUMENT_BYTES, SUPPORTED_SUFFIXES
+from hearth.packs.loader import BUILTIN_JURISDICTION_DIR, PackError, load_pack
+from hearth.utils.render import LEGAL_BANNER, render_report
 
 LOGGER = logging.getLogger("oracle.server")
 logging.basicConfig(level=logging.INFO)
@@ -1337,8 +1345,148 @@ async def download(request: Request, session_id: str, fmt: str):
         raise HTTPException(status_code=400, detail=f"Invalid format: {fmt}")
 
 
-# Mount the authenticated oracle router onto the app
+# ---------------------------------------------------------------------------
+# HEARTH — buyer-side DocScrubber, mounted under /hearth (founder mode)
+# ---------------------------------------------------------------------------
+# Founder-directed post-P1 amendment (logged in BUILD_NOTES.md): HEARTH spec
+# v0.3 §12 shipped Phase 1 as CLI-only; this router exposes the SAME
+# findings-only pipeline over the existing single-tenant instance so it is
+# reachable at <host>/hearth/*. Auth reuses the ORACLE_API_KEY gate (auth by
+# default via router dependency). UPL posture is unchanged: findings-only,
+# banners included, every run leaves an immutable audit artifact, and no
+# BuyerPack material exists anywhere on this surface (spec §1.1).
+
+hearth_router = APIRouter(prefix="/hearth", dependencies=[Depends(verify_api_key)])
+
+
+def _hearth_audit_dir() -> Path:
+    # Resolved per request (not at import) so deployments and tests can
+    # point the audit trail without a process restart.
+    return Path(os.environ.get("HEARTH_AUDIT_DIR", "hearth_audit"))
+
+
+@app.get("/hearth/health")
+async def hearth_health() -> dict[str, str]:
+    """Liveness for the HEARTH organ. No auth required (matches /health)."""
+    return {
+        "status": "ok",
+        "service": "hearth",
+        "version": HEARTH_VERSION,
+        "phase": "P1",
+        "mode": "findings-only",
+    }
+
+
+@hearth_router.get("/packs")
+async def hearth_list_packs() -> dict[str, Any]:
+    """List installed JurisdictionPacks with their review posture."""
+    packs = []
+    for pack_file in sorted(BUILTIN_JURISDICTION_DIR.glob("*/pack.json")):
+        loaded = load_pack(pack_file.parent.name)
+        pack = loaded.pack
+        packs.append(
+            {
+                "name": pack_file.parent.name,
+                "pack_id": pack.pack_id,
+                "status": pack.governance.status,
+                "owner": pack.governance.owner,
+                "rules": len(pack.rules),
+                "provisional_rules": sum(
+                    1 for rule in pack.rules if rule.status == "provisional"
+                ),
+            }
+        )
+    return {"packs": packs, "legal_banner": LEGAL_BANNER}
+
+
+@hearth_router.post("/scrub")
+async def hearth_scrub(
+    file: UploadFile = File(...),
+    pack: str = Form("CO-Larimer"),
+    target_price: int | None = Form(None),
+) -> dict[str, Any]:
+    """Scrub an uploaded document — the CLI pipeline over HTTP.
+
+    Semantics mirror `hearth scrub`: a refusal is a RESULT, not a transport
+    error, so it returns 200 with refused=true (the CLI's exit-2 analogue).
+    HTTP errors are reserved for transport-level problems: bad params (422),
+    oversized upload (413), missing auth (401), unwritable audit trail (500
+    — a run that cannot leave its §11 trail must not report success).
+    """
+    if target_price is not None and target_price <= 0:
+        raise HTTPException(status_code=422, detail="target_price must be a positive integer")
+    document_name = Path(file.filename or "upload").name  # strip path components
+    suffix = Path(document_name).suffix.lower()
+    if suffix not in SUPPORTED_SUFFIXES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"unsupported format '{suffix or '(none)'}'; "
+            f"supported: {', '.join(SUPPORTED_SUFFIXES)}",
+        )
+    payload = await file.read()
+    if len(payload) > MAX_DOCUMENT_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"upload exceeds the {MAX_DOCUMENT_BYTES:,}-byte scrub limit",
+        )
+
+    loaded = None
+    try:
+        loaded = load_pack(pack)
+    except PackError as exc:
+        LOGGER.error("hearth scrub: pack load failed closed: %s", exc)
+        run = refusal_run(
+            document_name,
+            reason=f"jurisdiction pack unusable: {exc}",
+            target_price_usd=target_price,
+        )
+    else:
+        with tempfile.TemporaryDirectory(prefix="hearth_scrub_") as workdir:
+            document_path = Path(workdir) / document_name
+            document_path.write_bytes(payload)
+            run = scrub_document(
+                document_path, loaded.pack, target_price_usd=target_price
+            )
+
+    rendered = render_report(run, loaded.pack if loaded else None)
+    try:
+        artifact = build_artifact(
+            run, loaded, rendered, exit_code=2 if run.refused else 0
+        )
+        audit_path = write_artifact(artifact, _hearth_audit_dir())
+    except AuditWriteError as exc:
+        LOGGER.error("hearth scrub: %s", exc)
+        raise HTTPException(
+            status_code=500,
+            detail=f"audit artifact could not be written; result withheld (fail closed): {exc}",
+        ) from exc
+
+    rules_by_id = {rule.rule_id: rule for rule in loaded.pack.rules} if loaded else {}
+    provisional = sum(
+        1
+        for finding in run.findings
+        if rules_by_id.get(finding.jurisdiction_basis) is not None
+        and rules_by_id[finding.jurisdiction_basis].status == "provisional"
+    )
+    return {
+        "document": run.document_name,
+        "document_sha256": run.document_sha256,
+        "pack": run.pack_id,
+        "run_date": run.run_date.isoformat(),
+        "target_price_usd": run.target_price_usd,
+        "refused": run.refused,
+        "refusal_reason": run.refusal_reason,
+        "findings": [finding.to_json_dict() for finding in run.findings],
+        "provisional_findings": provisional,
+        "rendered_report": rendered,
+        "audit_artifact": str(audit_path),
+        "legal_banner": LEGAL_BANNER,
+    }
+
+
+# Mount the authenticated oracle + hearth routers onto the app
 app.include_router(oracle_router)
+app.include_router(hearth_router)
 
 
 @app.get("/health")
