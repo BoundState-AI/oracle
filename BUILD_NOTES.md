@@ -168,7 +168,33 @@ calls, no UI beyond the CLI, no DB. Nothing out of scope was found necessary.
 harness exists — §3.1's calibrated-interval promise is unfalsifiable
 without it.)*
 
-## 6. Known Phase-2 trap (from the post-build adversarial review)
+## 6. Post-P1 founder-directed amendment: web surface (2026-06-12)
+
+§12 shipped Phase 1 as CLI-only. On founder direction ("make it live under
+oracle.boundstate.ai/hearth" + "give hearth a frontend") the same
+findings-only pipeline is now additionally exposed:
+
+- **Backend:** `/hearth/health` (no auth), `/hearth/packs` and
+  `/hearth/scrub` behind the existing `ORACLE_API_KEY` router gate on the
+  ORACLE FastAPI instance (`server.py`). Refusals are results
+  (`200 + refused=true`, the CLI exit-2 analogue); transport errors are
+  422/413/401; an unwritable §11 audit trail is 500 (fail closed). Tests:
+  `tests/test_server_hearth.py`.
+- **Frontend:** `/hearth` page in the existing Next.js app (Clerk-gated,
+  same as `/workspace`), calling through a key-injecting server proxy
+  (`/api/hearth/*`) so the browser never sees credentials. The §8 legal
+  banner is structural (renders before any result), provisional and
+  refusal banners are unmissable, exposure amounts render only when
+  computed. Warm ember accent distinguishes HEARTH from Oracle's sky-blue
+  within the shared BoundState shell.
+
+UPL posture is unchanged: findings-only, human-review marking, audit
+artifacts on every run, and no BuyerPack material anywhere on the web
+surface (§1.1) — the scrubber consumes buyer-SUPPLIED documents only. The
+`hearth/` package itself remains network-free (the server imports hearth,
+never the reverse), so the P1-D boundary scan still holds.
+
+## 7. Known Phase-2 trap (from the post-build adversarial review)
 
 Backstop exposure uses a **document-scoped capture produced by a different
 rule** (`fee_pct` is captured by the fee rule on §7; the backstop rule on

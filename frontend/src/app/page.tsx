@@ -60,6 +60,12 @@ export default function OracleLandingPage() {
           </div>
           <div className="flex items-center gap-3">
             <Link
+              href="/hearth"
+              className="inline-flex h-9 items-center rounded-lg border border-amber-400/30 bg-amber-400/5 px-4 text-sm font-medium text-amber-200 transition-colors hover:bg-amber-400/10"
+            >
+              Hearth
+            </Link>
+            <Link
               href="/sign-in"
               className="inline-flex h-9 items-center rounded-lg border border-border px-4 text-sm font-medium text-foreground transition-colors hover:bg-accent"
             >
