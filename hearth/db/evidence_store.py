@@ -31,6 +31,7 @@ __safety_critical__: bool = False
 __financially_critical__: bool = True
 
 import logging
+import os
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -71,10 +72,14 @@ class EvidenceStore:
         identities = {i.property_uid: i for i in self.identities()}
         identities[identity.property_uid] = identity
         path = self.root / IDENTITIES_FILE
+        temp = path.with_suffix(".jsonl.tmp")
         try:
-            with path.open("w", encoding="utf-8") as handle:
+            # Write-then-rename: a crash mid-write must never truncate the
+            # identities file (os.replace is atomic on POSIX).
+            with temp.open("w", encoding="utf-8") as handle:
                 for record in sorted(identities.values(), key=lambda i: i.property_uid):
                     handle.write(record.model_dump_json() + "\n")
+            os.replace(temp, path)
         except OSError as exc:
             raise EvidenceStoreError(f"cannot write {path}: {exc}") from exc
 

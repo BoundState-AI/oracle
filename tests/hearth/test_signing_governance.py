@@ -51,7 +51,9 @@ def _write_pack_dir(tmp_path: Path, rules: list[dict], registry: dict | None = N
     pack_dir.mkdir(parents=True)
     (pack_dir / "pack.json").write_text(json.dumps(pack), encoding="utf-8")
     if registry is not None:
-        (pack_dir / "keys.json").write_text(json.dumps(registry), encoding="utf-8")
+        # The trusted registry lives at the packs-library ROOT, never inside
+        # the pack directory (self-attestation hardening).
+        (tmp_path / "keys.json").write_text(json.dumps(registry), encoding="utf-8")
     return pack_dir
 
 

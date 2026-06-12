@@ -251,6 +251,9 @@ def _matches(rule: MicroRule, threshold: dict[str, Any], value) -> bool:
 
 
 def _as_number(rule: MicroRule, value) -> float:
+    if isinstance(value, bool):
+        # bool would coerce to 0/1 and silently satisfy numeric thresholds.
+        raise ScanSpecError(f"rule {rule.rule_id}: boolean is not a numeric value")
     try:
         return float(value)
     except (TypeError, ValueError) as exc:

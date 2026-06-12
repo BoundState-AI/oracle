@@ -151,6 +151,8 @@ def verify_rule_signature(
     signatures are all the same answer: False. The caller fails closed.
     """
     signature = rule.get("signature", "")
+    if not isinstance(signature, str):
+        return False  # fail closed on malformed material, never crash
     if signature.startswith(SIGNATURE_PREFIX):
         return verify_rule_dict(rule)
     if signature.startswith(ED25519_PREFIX):
@@ -201,15 +203,25 @@ def load_key_registry(path: Path) -> dict[str, KeyRecord]:
 
 
 def registry_for_pack(pack_path: Path) -> dict[str, KeyRecord]:
-    """Find the registry governing a pack: beside it, then at the packs root.
+    """The registry governing a pack lives at the PACKS-LIBRARY ROOT
+    (pack_path's grandparent: <packs_root>/<name>/pack.json), which the
+    operator controls — NEVER inside the pack's own directory. A pack that
+    ships its own keys.json could otherwise self-attest 'reviewed' with a
+    key it minted (forged human review).
 
-    No registry is a valid state (stub-only packs); reviewed rules will
-    then fail verification, which is exactly the fail-closed intent.
+    No registry is a valid state (stub-only packs); reviewed rules then
+    fail verification, which is exactly the fail-closed intent.
     """
-    for candidate_dir in (pack_path.parent, pack_path.parent.parent):
-        candidate = candidate_dir / KEY_REGISTRY_FILENAME
-        if candidate.is_file():
-            return load_key_registry(candidate)
+    inside_pack = pack_path.parent / KEY_REGISTRY_FILENAME
+    if inside_pack.is_file():
+        LOGGER.warning(
+            "ignoring %s: key registries inside a pack directory are "
+            "untrusted (self-attestation risk)",
+            inside_pack,
+        )
+    trusted = pack_path.parent.parent / KEY_REGISTRY_FILENAME
+    if trusted.is_file():
+        return load_key_registry(trusted)
     return {}
 
 

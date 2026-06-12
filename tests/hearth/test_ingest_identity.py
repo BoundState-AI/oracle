@@ -232,7 +232,8 @@ def test_cli_ingest_both_sources_end_to_end(tmp_path, capsys):
         == 0
     )
     out = capsys.readouterr().out
-    assert "4 upserted" in out
+    assert "4 created" in out
+    assert "0 in conflict" in out
     assert "NOT yet verified" in out  # §4.1 obligation stays visible
 
     store = EvidenceStore(store_dir)

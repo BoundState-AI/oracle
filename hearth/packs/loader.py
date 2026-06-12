@@ -146,20 +146,22 @@ def _validate_executable_specs(pack: JurisdictionPack) -> None:
     mid-scrub as a mysteriously missing finding."""
     known_rule_ids = {rule.rule_id for rule in pack.rules}
     for rule in pack.rules:
-        if detection_type(rule) != CLAUSE_REGEX:
-            continue
-        try:
-            compile_detection(rule)
-            spec = validate_finding_spec(rule)
-        except MatchSpecError as exc:
-            raise PackError(f"pack {pack.pack_id}: {exc}") from exc
         # §13 P2-A: a declared exposure dependency must point at a rule
-        # that actually exists in this pack — a dangling reference would
-        # quietly resurrect the implicit-capture trap.
-        exposure = spec.get("exposure") or {}
-        origin = exposure.get("capture_from_rule")
+        # that actually exists in this pack — checked on EVERY rule type,
+        # not just clause_regex, or the trap quietly reopens on future
+        # detection kinds.
+        finding = rule.payload.get("finding")
+        exposure = finding.get("exposure") if isinstance(finding, dict) else None
+        origin = exposure.get("capture_from_rule") if isinstance(exposure, dict) else None
         if origin is not None and origin not in known_rule_ids:
             raise PackError(
                 f"pack {pack.pack_id}: rule {rule.rule_id} exposure depends on "
                 f"capture_from_rule {origin!r}, which is not in this pack"
             )
+        if detection_type(rule) != CLAUSE_REGEX:
+            continue
+        try:
+            compile_detection(rule)
+            validate_finding_spec(rule)
+        except MatchSpecError as exc:
+            raise PackError(f"pack {pack.pack_id}: {exc}") from exc

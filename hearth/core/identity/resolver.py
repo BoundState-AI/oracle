@@ -130,6 +130,50 @@ def _resolve_one(
     )
 
 
+def reconcile_identity(
+    existing: PropertyIdentity | None, incoming: PropertyIdentity
+) -> tuple[PropertyIdentity, str]:
+    """Merge a newly resolved identity into what the store already holds.
+
+    Returns (identity_to_store, outcome) where outcome is one of
+    "created" | "kept" | "upgraded" | "conflict". The §2.3 rule lives
+    here: a cross-source ADDRESS disagreement is new information that must
+    drop confidence below the join threshold and clear any prior manual
+    override — never be silently outvoted by whichever source got stored
+    first. Confidence strength and address agreement are different axes.
+    """
+    if existing is None:
+        return incoming, "created"
+    if existing.address_normalized != incoming.address_normalized:
+        merged = existing.model_copy(
+            update={
+                "parcels": sorted(set(existing.parcels) | set(incoming.parcels)),
+                "match_confidence": CONFIDENCE_ADDRESS_CONFLICT,
+                # The conflict is information the human has NOT yet ruled
+                # on; a stale override must not keep joins flowing.
+                "manual_override": False,
+            }
+        )
+        LOGGER.warning(
+            "identity %s: cross-source address conflict (%r vs %r) — "
+            "confidence dropped to %.2f, joins blocked until resolved (§2.3)",
+            existing.property_uid,
+            existing.address_normalized,
+            incoming.address_normalized,
+            CONFIDENCE_ADDRESS_CONFLICT,
+        )
+        return merged, "conflict"
+    if incoming.match_confidence > existing.match_confidence:
+        merged = incoming.model_copy(
+            update={
+                "parcels": sorted(set(existing.parcels) | set(incoming.parcels)),
+                "manual_override": existing.manual_override,
+            }
+        )
+        return merged, "upgraded"
+    return existing, "kept"
+
+
 def _primary_record(
     sourced_records: list[tuple[str, RawPropertyRecord]]
 ) -> RawPropertyRecord:

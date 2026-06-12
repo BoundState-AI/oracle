@@ -264,6 +264,13 @@ def _resolve_property_ref(store, reference: str) -> str:
     if reference.startswith("hearth:prop:"):
         return reference
     fragment = normalize_address(reference)
+    if not fragment:
+        # "" is a substring of every address — junk input must not quietly
+        # resolve to whatever single property happens to be in the store.
+        raise EvidenceStoreError(
+            f"address fragment {reference!r} normalizes to nothing — "
+            "give part of the street address or a property_uid"
+        )
     matches = [
         identity
         for identity in store.identities()
@@ -285,7 +292,11 @@ def _resolve_property_ref(store, reference: str) -> str:
 
 
 def cmd_ingest(args: argparse.Namespace) -> int:
-    from hearth.core.identity.resolver import property_uid, resolve_batches
+    from hearth.core.identity.resolver import (
+        property_uid,
+        reconcile_identity,
+        resolve_batches,
+    )
     from hearth.data import PropertyEvidence
     from hearth.db.evidence_store import EvidenceStore, EvidenceStoreError
     from hearth.ingest import IngestError, get_adapter
@@ -295,16 +306,16 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         batch = adapter.parse(args.file)
         store = EvidenceStore(args.store)
 
-        created, kept = 0, 0
+        outcomes = {"created": 0, "kept": 0, "upgraded": 0, "conflict": 0}
+        conflicts: list[str] = []
         for identity in resolve_batches([batch]):
             current = store.get_identity(identity.property_uid)
-            # Never let a weaker source downgrade an established identity;
-            # a stronger or first resolution wins.
-            if current is not None and current.match_confidence >= identity.match_confidence:
-                kept += 1
-                continue
-            store.upsert_identity(identity)
-            created += 1
+            merged, outcome = reconcile_identity(current, identity)
+            outcomes[outcome] += 1
+            if outcome == "conflict":
+                conflicts.append(merged.property_uid)
+            if merged is not current:
+                store.upsert_identity(merged)
 
         rows = 0
         for record in batch.records:
@@ -327,9 +338,18 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         return EXIT_REFUSE
 
     print(f"ingested {args.file.name} via {batch.source_id}")
-    print(f"  identities    : {created} upserted, {kept} kept (stronger record on file)")
+    print(
+        f"  identities    : {outcomes['created']} created, "
+        f"{outcomes['upgraded']} upgraded, {outcomes['kept']} kept, "
+        f"{outcomes['conflict']} in conflict"
+    )
     print(f"  evidence rows : {rows} appended (source confidence {batch.rights.confidence_tier})")
     print(f"  store         : {args.store}")
+    for uid in conflicts:
+        print(
+            f"  !! ADDRESS CONFLICT on {uid}: sources disagree on the situs — "
+            "confidence dropped, evidence joins are BLOCKED until resolved (§2.3)"
+        )
     if not batch.rights.verified:
         print(
             "  NOTE: this source's data-rights row is founder-declared and "

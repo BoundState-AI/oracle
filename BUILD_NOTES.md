@@ -39,6 +39,27 @@ All four §13 gates green; full repo suite green. What landed:
 5. §13 still defers: valuation (needs backtest harness), MLS adapters
    (§9 #1), local-model ClauseAnalyzer, web UI for scan/ingest (Phase 3).
 
+**Phase-2 adversarial review (post-build) — findings and dispositions:**
+- *Fixed:* cross-source address conflicts were swallowed by the CLI's
+  never-downgrade rule (the realistic assessor→permits flow could join
+  conflicting parcels at 0.97). `reconcile_identity` now treats address
+  agreement and confidence strength as separate axes: a conflict drops to
+  0.85, clears any stale manual_override, blocks joins, and is shouted in
+  the ingest summary. Regression-tested end to end.
+- *Fixed:* a pack directory shipping its own `keys.json` could self-attest
+  `reviewed`. The trusted registry now lives ONLY at the packs-library
+  root; an in-pack registry is ignored with a warning.
+- *Fixed:* dangling `capture_from_rule` on non-clause_regex rules;
+  empty/punctuation address fragments resolving to a lone property;
+  non-atomic identities rewrite (now write-temp + os.replace); boolean
+  values satisfying numeric thresholds; non-string signature crash path.
+- *Accepted, documented:* freshness is age-only and advisory (null source
+  hashes; §2.2 auto-invalidation is a manual `governance invalidate` op,
+  not automated content-change detection) — `hearth pack-status` will
+  report STALE from 2026-07-13 until sources are re-snapshotted, and
+  staleness never blocks a scan. `property_uid` truncates to 48 bits —
+  immaterial at founder/county scale, revisit at multi-county scale.
+
 ---
 
 # Phase 1 record (spec v0.3 §12)
