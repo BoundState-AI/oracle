@@ -219,7 +219,7 @@ def render_scan_report(run, pack: JurisdictionPack | None) -> str:
 
     lines.append(THIN_BAR)
     lines.append(
-        f"  {'#':>2}  {'STATUS':<14} {'SEV':<6} {'RULE':<26} {'EVIDENCE':<22}"
+        f"  {'#':>2}  {'STATUS':<22} {'SEV':<6} {'RULE':<26} EVIDENCE"
     )
     for number, alert in enumerate(run.alerts, start=1):
         evidence = (
@@ -228,8 +228,8 @@ def render_scan_report(run, pack: JurisdictionPack | None) -> str:
             else "-"
         )
         lines.append(
-            f"  {number:>2}  {alert.status:<14} {alert.severity or '-':<6} "
-            f"{alert.rule_id:<26} {evidence:<22}"
+            f"  {number:>2}  {alert.status:<22} {alert.severity or '-':<6} "
+            f"{alert.rule_id:<26} {evidence}"
         )
     lines.append(THIN_BAR)
     lines.extend(_scan_detail_lines(run.alerts, rules_by_id))

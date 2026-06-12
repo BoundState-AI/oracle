@@ -1,4 +1,47 @@
-# BUILD_NOTES — HEARTH Phase 1 (founder build, spec v0.3 §12)
+# BUILD_NOTES — HEARTH Phases 1 & 2 (founder builds)
+
+## 0. Phase-2 record (2026-06-12, §13 — docs/HEARTH_phase2_scope_v0.4draft.md)
+
+All four §13 gates green; full repo suite green. What landed:
+
+- **P2-A** Exposure-capture dependencies explicit (`capture_from_rule`,
+  loader-checked); missing capture is annotated in the finding text.
+  Closes the §7 trap recorded below.
+- **P2-B** Ed25519 reviewer signing + committed key registry; load-time
+  invariant: `reviewed` requires a verifying reviewer signature (stub =
+  drift detection only). Governance: `sources.lock.json` snapshots,
+  `hearth pack-status` freshness report, auto-invalidation flips reviewed
+  rules citing a changed source to provisional. New dep: `cryptography`.
+- **P2-C** Bulk-file ingest (Larimer assessor + permits CSV adapters) with
+  §4.1 DataRightsRows declared as data and enforced per batch
+  (`verified: false` until human/legal verification — visible in CLI
+  output); identity resolver with a documented confidence ladder
+  (0.97/0.92/0.85); JSONL evidence store whose join guard blocks
+  low-confidence identities (no silent merges, §2.3). `hearth ingest`.
+- **P2-D** Landmine scan engine: the P1-C `data_query` specs now execute
+  against the evidence store; alert/clear/insufficient_evidence statuses,
+  every alert cites its evidence rows (§6); fail-closed boundary mirrors
+  the scrubber. `hearth scan <uid|address> --pack CO-Larimer --store DIR`,
+  §11 artifacts with `run_type: scan`.
+
+**Phase-2 deviations (cumulative with §3 below):**
+1. `RunType` gains `"scan"` and `AuditArtifact` gains `alerts` — additive
+   extensions of §11 (scrub artifacts carry `alerts: []`).
+2. `PropertyAlert` is a new contract not in spec §2 — landmine alerts are
+   property-keyed evidence verdicts, not document findings; forcing them
+   into ScrubFinding's §2.5 categories would have been a lie.
+3. Risk-layer evidence (radon zone, wildfire rating, well counts) enters
+   as buyer-supplied manual rows (§4 tier 0.80) until those adapters are
+   built — the scan reports `insufficient_evidence` where rows are absent.
+4. Cross-batch identity-conflict detection is per-ingest-run only;
+   `hearth ingest` never downgrades an established identity. Cross-store
+   re-resolution is a Phase-3 item.
+5. §13 still defers: valuation (needs backtest harness), MLS adapters
+   (§9 #1), local-model ClauseAnalyzer, web UI for scan/ingest (Phase 3).
+
+---
+
+# Phase 1 record (spec v0.3 §12)
 
 Build date: 2026-06-11 · Builder: Claude (Claude Code session), directed by the
 Phase-1 handoff (`docs/HEARTH_phase1_handoff.md`) against spec v0.3
