@@ -166,6 +166,106 @@ def _detail_lines(
     return lines
 
 
+def render_scan_report(run, pack: JurisdictionPack | None) -> str:
+    """Render a landmine ScanRun — banners, alert table, evidence citations
+    (§13 P2-D; §6 evidence-first; §8 banner policy)."""
+    rules_by_id = {rule.rule_id: rule for rule in pack.rules} if pack else {}
+    lines = [RULE_BAR, " HEARTH Landmine Scan — evidence-first (Phase 2)", RULE_BAR]
+    lines.extend(_wrap(LEGAL_BANNER, prefix=" "))
+    lines.append(THIN_BAR)
+
+    counts = {"alert": 0, "clear": 0, "insufficient_evidence": 0}
+    for alert in run.alerts:
+        counts[alert.status] += 1
+    address = run.identity.address_normalized if run.identity else "(unresolved)"
+    confidence = (
+        f"{run.identity.match_confidence:.2f}" if run.identity else "n/a"
+    )
+    lines.append(f" Property     : {run.property_uid}")
+    lines.append(f" Address      : {address}    identity confidence: {confidence}")
+    lines.append(f" Pack         : {run.pack_id or '(unavailable)'}")
+    lines.append(
+        f" Run date     : {run.run_date.isoformat()}    "
+        f"alerts: {counts['alert']}  clear: {counts['clear']}  "
+        f"insufficient: {counts['insufficient_evidence']}"
+    )
+
+    if run.refused:
+        lines.append(THIN_BAR)
+        lines.append(" *** SCAN REFUSED — FAILING CLOSED (exit code 2) ***")
+        lines.extend(_wrap(run.refusal_reason or "unspecified reason", prefix="     "))
+        lines.extend(
+            _wrap(
+                "No landmine evaluation was performed; this property has NOT "
+                "been checked.",
+                prefix=" ",
+            )
+        )
+        lines.append(RULE_BAR)
+        return "\n".join(lines)
+
+    provisional = sum(
+        1
+        for alert in run.alerts
+        if (rule := rules_by_id.get(alert.rule_id)) is not None
+        and rule.status == "provisional"
+    )
+    if provisional:
+        lines.append(THIN_BAR)
+        text = PROVISIONAL_BANNER_TEMPLATE.format(
+            provisional=provisional, total=len(run.alerts)
+        ).replace("findings", "alerts")
+        lines.extend(" !! " + line for line in textwrap.wrap(text, WIDTH - 5))
+
+    lines.append(THIN_BAR)
+    lines.append(
+        f"  {'#':>2}  {'STATUS':<14} {'SEV':<6} {'RULE':<26} {'EVIDENCE':<22}"
+    )
+    for number, alert in enumerate(run.alerts, start=1):
+        evidence = (
+            f"{alert.evidence[0].field}={alert.evidence[0].value}"
+            if alert.evidence
+            else "-"
+        )
+        lines.append(
+            f"  {number:>2}  {alert.status:<14} {alert.severity or '-':<6} "
+            f"{alert.rule_id:<26} {evidence:<22}"
+        )
+    lines.append(THIN_BAR)
+    lines.extend(_scan_detail_lines(run.alerts, rules_by_id))
+    lines.append(RULE_BAR)
+    return "\n".join(lines)
+
+
+def _scan_detail_lines(alerts, rules_by_id: dict[str, MicroRule]) -> list[str]:
+    lines: list[str] = []
+    for number, alert in enumerate(alerts, start=1):
+        rule = rules_by_id.get(alert.rule_id)
+        status = (
+            f"{alert.severity.upper()} alert" if alert.status == "alert"
+            else alert.status.upper()
+        )
+        lines.append(f" [{number}] {status} — rule {alert.rule_id}")
+        lines.extend(_wrap(alert.summary, prefix="     "))
+        if rule is not None:
+            lines.extend(_wrap(f"source: {rule.source}", prefix="     "))
+        lines.extend(_wrap(f"analysis: {alert.analysis}", prefix="     "))
+        for row in alert.evidence:
+            lines.extend(
+                _wrap(
+                    f"evidence: {row.field} = {row.value} — {row.source} "
+                    f"(retrieved {row.retrieved.isoformat()}, "
+                    f"confidence {row.confidence:.2f})",
+                    prefix="     ",
+                )
+            )
+        lines.append("     requires human review: yes")
+        lines.append("")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
 def render_pack_status(pack: JurisdictionPack, pack_path, freshness) -> str:
     """Render governance posture for one pack (§13 P2-B: hearth pack-status)."""
     by_status: dict[str, int] = {}

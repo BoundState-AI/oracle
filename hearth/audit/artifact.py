@@ -39,6 +39,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from hearth.core.scrubber.engine import ScrubRun
+from hearth.core.signals.landmines import ScanRun
 from hearth.data import STUB_MODEL_HASH, STUB_PROMPT_HASH, AuditArtifact
 from hearth.packs.loader import LoadedPack
 
@@ -86,6 +87,60 @@ def build_artifact(
     return artifact.model_copy(
         update={"artifact_sha256": compute_artifact_hash(artifact)}
     )
+
+
+def build_scan_artifact(
+    run: ScanRun,
+    loaded_pack: LoadedPack | None,
+    store_root: Path | None,
+    rendered_output: str,
+    exit_code: int,
+    *,
+    now: datetime | None = None,
+    run_id: str | None = None,
+) -> AuditArtifact:
+    """Assemble the §11 artifact for one landmine scan (§13 P2-D)."""
+    artifact = AuditArtifact(
+        run_id=run_id or uuid.uuid4().hex,
+        run_type="scan",
+        created_at=now or datetime.now(timezone.utc),
+        source_snapshot_ids=_scan_snapshot_ids(run, loaded_pack, store_root),
+        jurisdiction_pack_id=run.pack_id,
+        contributing_rule_ids=run.contributing_rule_ids,
+        scoring_profile_version=None,
+        code_hash=compute_code_hash(),
+        model_hash=STUB_MODEL_HASH,
+        prompt_hash=STUB_PROMPT_HASH,
+        findings=[],
+        alerts=run.alerts,
+        rendered_output=rendered_output,
+        exit_code=exit_code,
+        artifact_sha256=_PLACEHOLDER_HASH,
+    )
+    return artifact.model_copy(
+        update={"artifact_sha256": compute_artifact_hash(artifact)}
+    )
+
+
+def _scan_snapshot_ids(
+    run: ScanRun, loaded_pack: LoadedPack | None, store_root: Path | None
+) -> list[str]:
+    """Which evidence/pack state fed the scan (§11)."""
+    snapshots = [f"property:{run.property_uid}"]
+    if store_root is not None:
+        for name in ("identities.jsonl", "evidence.jsonl"):
+            store_file = Path(store_root) / name
+            digest = (
+                hashlib.sha256(store_file.read_bytes()).hexdigest()
+                if store_file.is_file()
+                else "absent"
+            )
+            snapshots.append(f"store:{name}:sha256:{digest}")
+    if loaded_pack is not None:
+        snapshots.append(f"pack:{loaded_pack.pack.pack_id}:sha256:{loaded_pack.sha256}")
+    elif run.pack_id is not None:
+        snapshots.append(f"pack:{run.pack_id}:in-memory")
+    return snapshots
 
 
 def compute_artifact_hash(artifact: AuditArtifact) -> str:

@@ -34,10 +34,13 @@ from typing import Literal
 
 from pydantic import Field
 
+from hearth.data.alerts import PropertyAlert
 from hearth.data.base import HearthModel
 from hearth.data.scrub import ScrubFinding
 
-RunType = Literal["scrub", "valuation", "scenario"]
+# "scan" extends §11's enumeration additively for the P2-D landmine scan
+# (deviation logged in BUILD_NOTES.md).
+RunType = Literal["scrub", "valuation", "scenario", "scan"]
 
 # §12 P1-B: prompt/model hash may be stubbed constants in P1 — there is no
 # model and no prompt in the deterministic-only pipeline. Honest constants,
@@ -63,6 +66,8 @@ class AuditArtifact(HearthModel):
     model_hash: str = Field(min_length=1)
     prompt_hash: str = Field(min_length=1)
     findings: list[ScrubFinding]
+    # Landmine scan runs carry alerts; scrub runs leave this empty (P2-D).
+    alerts: list[PropertyAlert] = []
     rendered_output: str
     exit_code: int
     artifact_sha256: str = Field(min_length=64, max_length=64)

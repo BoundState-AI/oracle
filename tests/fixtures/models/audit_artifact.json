@@ -27,6 +27,7 @@
       "jurisdiction_basis": "CO-LAR-BDB-FEE-001"
     }
   ],
+  "alerts": [],
   "rendered_output": "HEARTH DocScrubber report (example)",
   "exit_code": 0,
   "artifact_sha256": "3333333333333333333333333333333333333333333333333333333333333333"

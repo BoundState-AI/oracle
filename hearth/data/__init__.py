@@ -21,6 +21,7 @@ from __future__ import annotations
 __safety_critical__: bool = False
 __financially_critical__: bool = False
 
+from hearth.data.alerts import AlertSeverity, AlertStatus, PropertyAlert
 from hearth.data.audit import (
     STUB_MODEL_HASH,
     STUB_PROMPT_HASH,
@@ -28,6 +29,7 @@ from hearth.data.audit import (
     RunType,
 )
 from hearth.data.base import HearthModel
+from hearth.data.rights import DataRightsRow
 from hearth.data.buyer_pack import (
     BuyerPack,
     BuyerPackIdentity,
@@ -61,8 +63,12 @@ from hearth.data.scrub import (
 )
 
 __all__ = [
+    "AlertSeverity",
+    "AlertStatus",
     "AuditArtifact",
     "AuthorityReview",
+    "DataRightsRow",
+    "PropertyAlert",
     "BuyerPack",
     "BuyerPackIdentity",
     "FAIL_CLOSED_BASIS",
