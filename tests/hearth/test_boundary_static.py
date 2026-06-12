@@ -31,8 +31,17 @@ BANNED_IMPORTS = frozenset(
 )
 
 # (module path relative to repo root, banned import) pairs that passed
-# boundary review. Empty in Phase 1 — and it should hurt to grow.
-ALLOWED_IMPORTS: frozenset[tuple[str, str]] = frozenset()
+# boundary review. Growing this list requires a WHY and a runtime canary
+# covering the new surface.
+ALLOWED_IMPORTS: frozenset[tuple[str, str]] = frozenset(
+    {
+        # §14 P3-A: the fetch layer pulls PUBLIC bulk market data only.
+        # BuyerPack material never reaches it — proven by the runtime canary
+        # (test_boundary_canary covers the fetch plan + a mocked-transport
+        # pull with canary BuyerPack in memory). Reviewed 2026-06-12.
+        ("hearth/ingest/fetch.py", "httpx"),
+    }
+)
 
 
 def iter_hearth_sources() -> list[Path]:

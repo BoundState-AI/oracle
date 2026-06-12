@@ -34,6 +34,16 @@
       "source": "ECMC (formerly COGCC) rules and well database (ecmc.state.co.us)",
       "sha256": null,
       "recorded": "2026-06-12"
+    },
+    {
+      "source": "EPA Map of Radon Zones (epa.gov)",
+      "sha256": null,
+      "recorded": "2026-06-12"
+    },
+    {
+      "source": "FEMA National Flood Hazard Layer (hazards.fema.gov)",
+      "sha256": null,
+      "recorded": "2026-06-12"
     }
   ]
 }

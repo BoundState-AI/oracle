@@ -31,6 +31,7 @@ EXPECTED_RULES = {
     "CO-LAR-LM-RADON-001": "landmine",
     "CO-LAR-LM-WILDFIRE-001": "landmine",
     "CO-LAR-LM-OILGAS-001": "landmine",
+    "CO-LAR-LM-FLOOD-001": "landmine",
 }
 
 
@@ -45,11 +46,11 @@ def test_pack_validates_against_section_2_2_schema():
     pack = JurisdictionPack.model_validate(raw)
     # And round-trips losslessly, like every other contract (P1-A).
     assert pack.to_json_dict() == raw
-    assert pack.pack_id == "CO-Larimer@2026.06"
+    assert pack.pack_id == "CO-Larimer@2026.06.1"
 
 
 def test_pack_has_at_least_12_rules_with_expected_composition(pack):
-    assert len(pack.rules) >= 12
+    assert len(pack.rules) >= 13
     actual = {rule.rule_id: rule.category for rule in pack.rules}
     assert actual == EXPECTED_RULES
 
@@ -88,7 +89,7 @@ def test_deadline_rules_carry_lever_and_risk_text(pack):
 
 def test_landmine_rules_are_data_specs_without_built_adapters(pack):
     landmines = {r.rule_id: r for r in pack.rules if r.category == "landmine"}
-    assert len(landmines) == 4
+    assert len(landmines) == 5
     for rule in landmines.values():
         detection = rule.payload["detection"]
         assert detection["type"] == "data_query", rule.rule_id

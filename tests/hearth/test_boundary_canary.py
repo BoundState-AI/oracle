@@ -71,6 +71,22 @@ def test_phase1_workflows_leak_no_canary(canary_pack, canaries, caplog, tmp_path
         artifact = build_artifact(run, loaded, rendered, exit_code=0)
         write_artifact(artifact, tmp_path / "audit")
 
+        # §14 P3-A: the fetch layer is the allowlisted network surface —
+        # exercise it (offline plan + mocked-transport pull) with the canary
+        # BuyerPack in memory so the leak check covers it too.
+        import httpx
+
+        from hearth.ingest.fetch import fetch_source, plan_lines
+
+        plan_lines()
+        fetch_source(
+            "ecmc-wells",
+            tmp_path / "cache",
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, content=b"api\n1\n")
+            ),
+        )
+
     assert sentry.attempts == [], "no outbound call may even be attempted"
     assert find_leaks(_all_log_text(caplog), canaries) == []
     assert find_leaks(rendered, canaries) == []

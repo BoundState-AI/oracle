@@ -47,10 +47,10 @@ def test_hearth_packs_lists_co_larimer():
     assert response.status_code == 200
     body = response.json()
     packs = {p["name"]: p for p in body["packs"]}
-    assert packs["CO-Larimer"]["pack_id"] == "CO-Larimer@2026.06"
+    assert packs["CO-Larimer"]["pack_id"] == "CO-Larimer@2026.06.1"
     assert packs["CO-Larimer"]["status"] == "provisional"
-    assert packs["CO-Larimer"]["rules"] == 12
-    assert packs["CO-Larimer"]["provisional_rules"] == 12
+    assert packs["CO-Larimer"]["rules"] == 13
+    assert packs["CO-Larimer"]["provisional_rules"] == 13
     assert "NOT LEGAL ADVICE" in body["legal_banner"]
 
 
