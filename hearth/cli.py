@@ -58,6 +58,15 @@ EXIT_OK = 0
 EXIT_REFUSE = 2
 
 
+def _positive_int(raw: str) -> int:
+    """argparse type: a price of 0 or less would silently poison every
+    exposure computation downstream, so reject it at the gate."""
+    value = int(raw)
+    if value <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {raw}")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="hearth",
@@ -94,7 +103,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     scrub.add_argument(
         "--target-price",
-        type=int,
+        type=_positive_int,
         default=None,
         metavar="USD",
         help="target purchase price; enables exposure_usd math (e.g. 700000)",

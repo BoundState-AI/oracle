@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from hearth.core.scrubber.analyzer import ClauseAnalyzer, NullClauseAnalyzer
-from hearth.core.scrubber.extraction import extract_text
+from hearth.core.scrubber.extraction import MAX_DOCUMENT_BYTES, extract_text
 from hearth.core.scrubber.matcher import (
     RuleMatch,
     collect_document_captures,
@@ -245,8 +245,10 @@ def _enforce_findings_only(findings: list[ScrubFinding]) -> None:
 
 
 def _file_sha256_or_none(path: Path) -> str | None:
-    """Hash the input for the audit trail; None when unreadable."""
+    """Hash the input for the audit trail; None when unreadable/oversized."""
     try:
+        if path.stat().st_size > MAX_DOCUMENT_BYTES:
+            return None  # extract_text refuses it moments later
         return hashlib.sha256(path.read_bytes()).hexdigest()
     except OSError:
         # Not suppression: the unreadable file fails the scrub via

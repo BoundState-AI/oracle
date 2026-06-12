@@ -23,6 +23,10 @@ BANNED_IMPORTS = frozenset(
         "aiohttp", "websockets", "websocket", "smtplib", "ftplib", "poplib",
         "imaplib", "telnetlib", "xmlrpc", "grpc", "paramiko", "boto3",
         "anthropic", "openai", "google",
+        # Dynamic-import / FFI escape hatches: banning them keeps the static
+        # scan honest — code that needs runtime imports must pass boundary
+        # review instead of slipping past the AST walk.
+        "importlib", "ctypes",
     }
 )
 

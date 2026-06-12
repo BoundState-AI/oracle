@@ -25,6 +25,7 @@ from __future__ import annotations
 __safety_critical__: bool = False
 __financially_critical__: bool = False
 
+from collections import Counter
 from datetime import date
 from typing import Any, Literal
 
@@ -101,6 +102,17 @@ class JurisdictionPack(HearthModel):
     jurisdiction: Jurisdiction
     governance: Governance
     rules: list[MicroRule] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _rule_ids_unique(self) -> "JurisdictionPack":
+        # WHY: rule_id is the citation key for findings, audit trails and
+        # renderer lookups; a duplicate would let two different rules
+        # silently share one identity. Fail at parse time.
+        counts = Counter(rule.rule_id for rule in self.rules)
+        duplicates = sorted(rule_id for rule_id, n in counts.items() if n > 1)
+        if duplicates:
+            raise ValueError(f"duplicate rule_ids in pack: {duplicates}")
+        return self
 
     @property
     def pack_id(self) -> str:

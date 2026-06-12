@@ -36,6 +36,11 @@ LOGGER = logging.getLogger("hearth.core.scrubber.extraction")
 
 SUPPORTED_SUFFIXES = (".txt", ".md", ".pdf", ".docx")
 
+# Real contracts are kilobytes to a few megabytes; anything past this is
+# either the wrong file or an adversarial input. Refusing beats paging the
+# machine to death mid-scrub.
+MAX_DOCUMENT_BYTES = 16 * 1024 * 1024
+
 
 class ExtractionError(Exception):
     """Document text could not be extracted; caller must fail CLOSED."""
@@ -47,6 +52,12 @@ def extract_text(path: Path) -> str:
         raise ExtractionError(f"document not found: {path}")
     if not path.is_file():
         raise ExtractionError(f"not a regular file: {path}")
+    size = path.stat().st_size
+    if size > MAX_DOCUMENT_BYTES:
+        raise ExtractionError(
+            f"{path.name} is {size:,} bytes — exceeds the "
+            f"{MAX_DOCUMENT_BYTES:,}-byte scrub limit"
+        )
 
     suffix = path.suffix.lower()
     if suffix in (".txt", ".md"):
