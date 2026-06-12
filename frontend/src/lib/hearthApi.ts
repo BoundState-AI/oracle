@@ -91,3 +91,117 @@ export async function scrubDocument(
   }
   return response.json();
 }
+
+/* ------------------------------------------------------------------ */
+/*  Phase-3 property-intelligence surface (§14 P3-C)                   */
+/* ------------------------------------------------------------------ */
+
+export interface HearthProperty {
+  property_uid: string;
+  address: string;
+  parcels: string[];
+  match_confidence: number;
+  manual_override: boolean;
+  joins_blocked: boolean;
+  evidence_fields: string[];
+}
+
+export interface PropertyAlert {
+  property_uid: string;
+  rule_id: string;
+  category: "landmine";
+  status: "alert" | "clear" | "insufficient_evidence";
+  severity: "info" | "warn" | "flag" | null;
+  summary: string;
+  analysis: string;
+  evidence: {
+    field: string;
+    value: number | string;
+    source: string;
+    retrieved: string;
+    confidence: number;
+  }[];
+  requires_human_review: true;
+}
+
+export interface ScanResponse {
+  property_uid: string;
+  pack: string | null;
+  run_date: string;
+  refused: boolean;
+  refusal_reason: string | null;
+  alerts: PropertyAlert[];
+  rendered_report: string;
+  audit_artifact: string;
+  legal_banner: string;
+}
+
+export interface PullSource {
+  source_id: string;
+  description: string;
+  format: string;
+  urls: string[];
+  manual_steps: string[];
+  then: string;
+  notes: string;
+}
+
+async function getJson<T>(path: string): Promise<T> {
+  const response = await fetch(`/api/hearth${path}`, { cache: "no-store" });
+  if (!response.ok) throw new Error(`${path} failed (${response.status})`);
+  return response.json();
+}
+
+async function postForm<T>(path: string, form: FormData): Promise<T> {
+  const response = await fetch(`/api/hearth${path}`, { method: "POST", body: form });
+  if (!response.ok) {
+    const detail = await response
+      .json()
+      .then((b) => b?.detail ?? b?.error)
+      .catch(() => null);
+    throw new Error(detail || `${path} failed (${response.status})`);
+  }
+  return response.json();
+}
+
+export const fetchProperties = () =>
+  getJson<{ store: string; properties: HearthProperty[] }>("/properties");
+
+export const fetchPullPlan = () =>
+  getJson<{ sources: PullSource[] }>("/pull-plan");
+
+export function scanProperty(property: string, pack = "CO-Larimer") {
+  const form = new FormData();
+  form.append("property", property);
+  form.append("pack", pack);
+  return postForm<ScanResponse>("/scan", form);
+}
+
+export function ingestExport(file: File, adapter: string) {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("adapter", adapter);
+  return postForm<{ refused: boolean; reason?: string; outcomes?: Record<string, number>; conflicts?: string[]; evidence_rows?: number }>("/ingest", form);
+}
+
+export function computeWells(file: File, radiusFt = 2000) {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("radius_ft", String(radiusFt));
+  return postForm<{ refused: boolean; reason?: string; identities_annotated?: number; wells_parsed?: number }>("/wells", form);
+}
+
+export function stampRadon(county = "Larimer") {
+  const form = new FormData();
+  form.append("county", county);
+  return postForm<{ refused: boolean; reason?: string; zone?: number; identities_stamped?: number }>("/radon", form);
+}
+
+export function addEvidence(property: string, field: string, value: string, note: string) {
+  const form = new FormData();
+  form.append("property", property);
+  form.append("field", field);
+  form.append("value", value);
+  form.append("source_note", note);
+  return postForm<{ refused: boolean; reason?: string; field?: string }>("/evidence", form);
+}

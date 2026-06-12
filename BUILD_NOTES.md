@@ -60,6 +60,37 @@ All four §13 gates green; full repo suite green. What landed:
   staleness never blocks a scan. `property_uid` truncates to 48 bits —
   immaterial at founder/county scale, revisit at multi-county scale.
 
+## 0b. Phase-3 record (2026-06-12, §14 — docs/HEARTH_phase3_scope_v0.4draft.md)
+
+Founder directive: every data stream needed against the seller side —
+pulled, integrated, app-reachable. Build-container egress to county/state
+domains is policy-blocked (uniform 403; recorded in §14), so the pull
+layer encodes REAL researched endpoints for execution on the founder's
+machine, and everything verifiable from here shipped as real data.
+
+- **P3-A** `hearth pull`: source registry (Larimer assessor Public Data
+  Center, ECMC daily well downloads, DOLA/LGIS, FEMA NFHL, CSFS atlas)
+  with sha256/manifest/governance-snapshot provenance, offline `--plan`
+  runbook, injectable transport; httpx in `hearth/ingest/fetch.py` is the
+  first boundary-allowlist entry, covered by the runtime canary.
+- **P3-B** Risk layers: REAL EPA radon zones (Larimer/Weld/Boulder = Zone
+  1, verified 2026-06-12) via `hearth radon`; ECMC well proximity
+  (haversine, 2,000 ft Rule 604 default, PA excluded / AB counted) via
+  `hearth wells`; buyer-supplied rows via `hearth add-evidence`; flood
+  landmine CO-LAR-LM-FLOOD-001 (pack v2026.06.1, goldens regenerated
+  deliberately; FEMA + EPA sources monitored and locked).
+- **P3-C** All app-reachable: /hearth/{properties,scan,ingest,wells,radon,
+  evidence,pull-plan,pack-status} endpoints (auth-gated, refusals are
+  results) + the Property Intelligence panel on the /hearth page (ingest
+  uploads, well/radon actions, evidence entry, scan with evidence-cited
+  alert cards, pull-plan runbook). Server store via HEARTH_STORE_DIR.
+
+Deviations/notes: automated FEMA/CSFS per-point queries deferred to
+Phase 4 (need GIS egress) — recorded as registry specs + add-evidence
+path; radon stamping reads existing rows with allow_low_confidence for
+dedup only (WHY-commented); wells/nearest_well_ft is informational
+evidence with no rule consuming it yet.
+
 ---
 
 # Phase 1 record (spec v0.3 §12)
