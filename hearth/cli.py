@@ -188,7 +188,163 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--audit-dir", type=Path, default=DEFAULT_AUDIT_DIR)
     scan.add_argument("--verbose", action="store_true", help="debug logging")
     scan.set_defaults(handler=cmd_scan)
+
+    pull = subcommands.add_parser(
+        "pull",
+        help="download public bulk sources with provenance (§14 P3-A)",
+        description=(
+            "Fetch a registered public source into the local cache (sha256 + "
+            "manifest + governance snapshot). --plan prints the full source "
+            "registry and manual runbook without touching the network."
+        ),
+    )
+    pull.add_argument("--source", default=None, help="source id (see --plan)")
+    pull.add_argument("--cache", type=Path, default=Path("hearth_cache"))
+    pull.add_argument("--plan", action="store_true", help="offline: print the registry")
+    pull.add_argument("--verbose", action="store_true", help="debug logging")
+    pull.set_defaults(handler=cmd_pull)
+
+    wells = subcommands.add_parser(
+        "wells",
+        help="compute well-proximity evidence from an ECMC export (§14 P3-B)",
+    )
+    wells.add_argument("file", type=Path, help="ECMC wells CSV (SHP converted)")
+    wells.add_argument("--store", type=Path, required=True)
+    wells.add_argument("--radius-ft", type=int, default=2000)
+    wells.add_argument("--verbose", action="store_true", help="debug logging")
+    wells.set_defaults(handler=cmd_wells)
+
+    radon = subcommands.add_parser(
+        "radon",
+        help="stamp EPA radon-zone evidence (county-constant, verified) (§14 P3-B)",
+    )
+    radon.add_argument("--store", type=Path, required=True)
+    radon.add_argument("--county", default="Larimer")
+    radon.add_argument("--verbose", action="store_true", help="debug logging")
+    radon.set_defaults(handler=cmd_radon)
+
+    add_evidence = subcommands.add_parser(
+        "add-evidence",
+        help="record a buyer-supplied evidence row (§4 tier 0.80) (§14 P3-B)",
+    )
+    add_evidence.add_argument("property", help="property_uid or address fragment")
+    add_evidence.add_argument("--field", required=True, help="e.g. fema_flood_zone")
+    add_evidence.add_argument("--value", required=True)
+    add_evidence.add_argument("--store", type=Path, required=True)
+    add_evidence.add_argument(
+        "--source-note", default="founder observation", help="where this came from"
+    )
+    add_evidence.add_argument("--verbose", action="store_true", help="debug logging")
+    add_evidence.set_defaults(handler=cmd_add_evidence)
     return parser
+
+
+def cmd_pull(args: argparse.Namespace) -> int:
+    from hearth.ingest.fetch import SOURCES, FetchError, fetch_source, plan_lines
+
+    if args.plan or args.source is None:
+        print("hearth pull — source registry (researched 2026-06-12)")
+        print()
+        for line in plan_lines():
+            print(line)
+        if args.source is None and not args.plan:
+            print("\nname a source with --source to actually pull it")
+        return EXIT_OK
+    try:
+        result = fetch_source(args.source, args.cache)
+        source = SOURCES[args.source]
+        if source.monitored_source is not None:
+            from hearth.packs.governance import record_source_snapshot
+            from hearth.packs.loader import resolve_pack_path
+
+            pack_dir = resolve_pack_path("CO-Larimer").parent
+            record_source_snapshot(pack_dir, source.monitored_source, result.sha256)
+    except FetchError as exc:
+        LOGGER.error("pull failed closed: %s", exc)
+        print(f"*** REFUSED — pull failed closed: {exc}")
+        return EXIT_REFUSE
+    except Exception as exc:  # snapshot bookkeeping must also fail closed
+        LOGGER.exception("pull failed closed")
+        print(f"*** REFUSED — pull failed closed: {exc}")
+        return EXIT_REFUSE
+    print(f"pulled {result.source_id}: {result.bytes_written:,} bytes")
+    print(f"  file   : {result.path}")
+    print(f"  sha256 : {result.sha256}")
+    print(f"  next   : {SOURCES[args.source].adapter_hint}")
+    return EXIT_OK
+
+
+def cmd_wells(args: argparse.Namespace) -> int:
+    from hearth.core.signals.wells import WellsError, compute_well_proximity, parse_wells_csv
+    from hearth.db.evidence_store import EvidenceStore, EvidenceStoreError
+
+    try:
+        records = parse_wells_csv(args.file)
+        store = EvidenceStore(args.store)
+        annotated = compute_well_proximity(store, records, radius_ft=args.radius_ft)
+    except (WellsError, EvidenceStoreError) as exc:
+        LOGGER.error("wells failed closed: %s", exc)
+        print(f"*** REFUSED — wells failed closed: {exc}")
+        return EXIT_REFUSE
+    print(
+        f"well proximity computed for {annotated} identities "
+        f"({len(records)} wells parsed, radius {args.radius_ft} ft)"
+    )
+    return EXIT_OK
+
+
+def cmd_radon(args: argparse.Namespace) -> int:
+    from hearth.db.evidence_store import EvidenceStore, EvidenceStoreError
+    from hearth.ingest.co_radon import EPA_RADON_ZONES, RadonError, stamp_radon_zone
+
+    try:
+        store = EvidenceStore(args.store)
+        stamped = stamp_radon_zone(store, args.county)
+    except (RadonError, EvidenceStoreError) as exc:
+        LOGGER.error("radon failed closed: %s", exc)
+        print(f"*** REFUSED — radon failed closed: {exc}")
+        return EXIT_REFUSE
+    zone = EPA_RADON_ZONES[args.county.strip().lower()]
+    print(
+        f"epa_radon_zone={zone} stamped on {stamped} identities "
+        f"({args.county} County; EPA Map of Radon Zones, verified 2026-06-12)"
+    )
+    return EXIT_OK
+
+
+def cmd_add_evidence(args: argparse.Namespace) -> int:
+    from datetime import date as _date
+
+    from hearth.data import PropertyEvidence
+    from hearth.db.evidence_store import EvidenceStore, EvidenceStoreError
+
+    try:
+        store = EvidenceStore(args.store)
+        uid = _resolve_property_ref(store, args.property)
+        value: int | float | str = args.value
+        try:
+            value = int(args.value)
+        except ValueError:
+            try:
+                value = float(args.value)
+            except ValueError:
+                pass  # stays a string — ratings/zones are strings by design
+        store.add_evidence(
+            PropertyEvidence(
+                property_uid=uid,
+                field=args.field,
+                value=value,
+                source=f"buyer-supplied: {args.source_note}",
+                retrieved=_date.today(),
+                confidence=0.8,  # §4 table: buyer-supplied tier
+            )
+        )
+    except EvidenceStoreError as exc:
+        LOGGER.error("add-evidence failed closed: %s", exc)
+        print(f"*** REFUSED — add-evidence failed closed: {exc}")
+        return EXIT_REFUSE
+    print(f"recorded {args.field}={value!r} on {uid} (confidence 0.80, buyer-supplied)")
+    return EXIT_OK
 
 
 def cmd_scan(args: argparse.Namespace) -> int:

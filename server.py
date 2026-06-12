@@ -1484,6 +1484,305 @@ async def hearth_scrub(
     }
 
 
+def _hearth_store():
+    """Server-side evidence store (single-tenant, §1.1). Resolved per
+    request so deployments/tests can point it without a restart."""
+    from hearth.db.evidence_store import EvidenceStore
+
+    return EvidenceStore(Path(os.environ.get("HEARTH_STORE_DIR", "hearth_store")))
+
+
+@hearth_router.get("/properties")
+async def hearth_properties() -> dict[str, Any]:
+    """Stored identities with their join posture (§14 P3-C)."""
+    from hearth.db.evidence_store import JOIN_CONFIDENCE_THRESHOLD, EvidenceStoreError
+
+    store = _hearth_store()
+    properties = []
+    for identity in store.identities():
+        joins_blocked = (
+            identity.match_confidence < JOIN_CONFIDENCE_THRESHOLD
+            and not identity.manual_override
+        )
+        fields: list[str] = []
+        if not joins_blocked:
+            try:
+                fields = sorted({r.field for r in store.evidence_for(identity.property_uid)})
+            except EvidenceStoreError as exc:
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
+        properties.append(
+            {
+                "property_uid": identity.property_uid,
+                "address": identity.address_normalized,
+                "parcels": identity.parcels,
+                "match_confidence": identity.match_confidence,
+                "manual_override": identity.manual_override,
+                "joins_blocked": joins_blocked,
+                "evidence_fields": fields,
+            }
+        )
+    return {"store": str(store.root), "properties": properties}
+
+
+@hearth_router.post("/scan")
+async def hearth_scan(
+    property: str = Form(...),
+    pack: str = Form("CO-Larimer"),
+) -> dict[str, Any]:
+    """Landmine scan over HTTP — refusals are results (200 + refused=true)."""
+    from hearth.cli import _resolve_property_ref
+    from hearth.core.signals.landmines import refusal_scan, scan_property
+    from hearth.db.evidence_store import EvidenceStoreError
+    from hearth.utils.render import render_scan_report
+
+    loaded = None
+    try:
+        loaded = load_pack(pack)
+        store = _hearth_store()
+        uid = _resolve_property_ref(store, property)
+    except PackError as exc:
+        run = refusal_scan(property, reason=f"jurisdiction pack unusable: {exc}")
+    except EvidenceStoreError as exc:
+        run = refusal_scan(property, reason=str(exc), pack=loaded.pack if loaded else None)
+    else:
+        run = scan_property(uid, store, loaded.pack)
+
+    rendered = render_scan_report(run, loaded.pack if loaded else None)
+    from hearth.audit.artifact import build_scan_artifact
+
+    try:
+        artifact = build_scan_artifact(
+            run,
+            loaded,
+            _hearth_store().root,
+            rendered,
+            2 if run.refused else 0,
+        )
+        audit_path = write_artifact(artifact, _hearth_audit_dir())
+    except AuditWriteError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"audit artifact could not be written; result withheld (fail closed): {exc}",
+        ) from exc
+    return {
+        "property_uid": run.property_uid,
+        "pack": run.pack_id,
+        "run_date": run.run_date.isoformat(),
+        "refused": run.refused,
+        "refusal_reason": run.refusal_reason,
+        "alerts": [alert.to_json_dict() for alert in run.alerts],
+        "rendered_report": rendered,
+        "audit_artifact": str(audit_path),
+        "legal_banner": LEGAL_BANNER,
+    }
+
+
+@hearth_router.post("/ingest")
+async def hearth_ingest(
+    file: UploadFile = File(...),
+    adapter: str = Form(...),
+) -> dict[str, Any]:
+    """Bulk-export ingest over HTTP (§14 P3-C); refusals are results."""
+    from hearth.core.identity.resolver import (
+        property_uid as derive_uid,
+        reconcile_identity,
+        resolve_batches,
+    )
+    from hearth.data import PropertyEvidence
+    from hearth.db.evidence_store import EvidenceStoreError
+    from hearth.ingest import IngestError, get_adapter
+
+    document_name = Path(file.filename or "upload").name
+    payload = await file.read()
+    if len(payload) > MAX_DOCUMENT_BYTES:
+        raise HTTPException(status_code=413, detail="upload exceeds the scrub limit")
+    try:
+        source_adapter = get_adapter(adapter)
+        with tempfile.TemporaryDirectory(prefix="hearth_ingest_") as workdir:
+            source_file = Path(workdir) / document_name
+            source_file.write_bytes(payload)
+            batch = source_adapter.parse(source_file)
+        store = _hearth_store()
+        outcomes = {"created": 0, "kept": 0, "upgraded": 0, "conflict": 0}
+        conflicts: list[str] = []
+        for identity in resolve_batches([batch]):
+            current = store.get_identity(identity.property_uid)
+            merged, outcome = reconcile_identity(current, identity)
+            outcomes[outcome] += 1
+            if outcome == "conflict":
+                conflicts.append(merged.property_uid)
+            if merged is not current:
+                store.upsert_identity(merged)
+        rows = 0
+        for record in batch.records:
+            uid = derive_uid("CO", "Larimer", record.parcel_id)
+            for field_name, value in record.fields.items():
+                store.add_evidence(
+                    PropertyEvidence(
+                        property_uid=uid,
+                        field=field_name,
+                        value=value,
+                        source=batch.rights.source,
+                        retrieved=batch.retrieved,
+                        confidence=batch.rights.confidence_tier,
+                    )
+                )
+                rows += 1
+    except (IngestError, EvidenceStoreError) as exc:
+        LOGGER.error("hearth ingest failed closed: %s", exc)
+        return {"refused": True, "reason": str(exc)}
+    return {
+        "refused": False,
+        "source": batch.source_id,
+        "outcomes": outcomes,
+        "conflicts": conflicts,
+        "evidence_rows": rows,
+        "rights_verified": batch.rights.verified,
+    }
+
+
+@hearth_router.post("/wells")
+async def hearth_wells(
+    file: UploadFile = File(...),
+    radius_ft: int = Form(2000),
+) -> dict[str, Any]:
+    """ECMC well-proximity computation over HTTP; refusals are results."""
+    from hearth.core.signals.wells import (
+        WellsError,
+        compute_well_proximity,
+        parse_wells_csv,
+    )
+    from hearth.db.evidence_store import EvidenceStoreError
+
+    payload = await file.read()
+    if len(payload) > MAX_DOCUMENT_BYTES:
+        raise HTTPException(status_code=413, detail="upload exceeds the scrub limit")
+    try:
+        with tempfile.TemporaryDirectory(prefix="hearth_wells_") as workdir:
+            wells_file = Path(workdir) / Path(file.filename or "wells.csv").name
+            wells_file.write_bytes(payload)
+            records = parse_wells_csv(wells_file)
+        annotated = compute_well_proximity(
+            _hearth_store(), records, radius_ft=radius_ft
+        )
+    except (WellsError, EvidenceStoreError) as exc:
+        LOGGER.error("hearth wells failed closed: %s", exc)
+        return {"refused": True, "reason": str(exc)}
+    return {
+        "refused": False,
+        "wells_parsed": len(records),
+        "identities_annotated": annotated,
+        "radius_ft": radius_ft,
+    }
+
+
+@hearth_router.post("/radon")
+async def hearth_radon(county: str = Form("Larimer")) -> dict[str, Any]:
+    """Stamp the verified EPA radon zone; refusals are results."""
+    from hearth.db.evidence_store import EvidenceStoreError
+    from hearth.ingest.co_radon import EPA_RADON_ZONES, RadonError, stamp_radon_zone
+
+    try:
+        stamped = stamp_radon_zone(_hearth_store(), county)
+    except (RadonError, EvidenceStoreError) as exc:
+        LOGGER.error("hearth radon failed closed: %s", exc)
+        return {"refused": True, "reason": str(exc)}
+    return {
+        "refused": False,
+        "county": county,
+        "zone": EPA_RADON_ZONES[county.strip().lower()],
+        "identities_stamped": stamped,
+    }
+
+
+@hearth_router.post("/evidence")
+async def hearth_add_evidence(
+    property: str = Form(...),
+    field: str = Form(...),
+    value: str = Form(...),
+    source_note: str = Form("founder observation"),
+) -> dict[str, Any]:
+    """Buyer-supplied evidence row (§4 tier 0.80); refusals are results."""
+    from datetime import date as _date
+
+    from hearth.cli import _resolve_property_ref
+    from hearth.data import PropertyEvidence
+    from hearth.db.evidence_store import EvidenceStoreError
+
+    typed: int | float | str = value
+    try:
+        typed = int(value)
+    except ValueError:
+        try:
+            typed = float(value)
+        except ValueError:
+            pass  # ratings/zones stay strings by design
+    try:
+        store = _hearth_store()
+        uid = _resolve_property_ref(store, property)
+        store.add_evidence(
+            PropertyEvidence(
+                property_uid=uid,
+                field=field,
+                value=typed,
+                source=f"buyer-supplied: {source_note}",
+                retrieved=_date.today(),
+                confidence=0.8,
+            )
+        )
+    except EvidenceStoreError as exc:
+        LOGGER.error("hearth add-evidence failed closed: %s", exc)
+        return {"refused": True, "reason": str(exc)}
+    return {"refused": False, "property_uid": uid, "field": field, "value": typed}
+
+
+@hearth_router.get("/pull-plan")
+async def hearth_pull_plan() -> dict[str, Any]:
+    """The §14 source registry + manual runbook, structured for the UI."""
+    from hearth.ingest.fetch import SOURCES
+
+    return {
+        "sources": [
+            {
+                "source_id": s.source_id,
+                "description": s.description,
+                "format": s.file_format,
+                "urls": list(s.urls),
+                "manual_steps": list(s.manual_steps),
+                "then": s.adapter_hint,
+                "notes": s.notes,
+            }
+            for s in SOURCES.values()
+        ]
+    }
+
+
+@hearth_router.get("/pack-status")
+async def hearth_pack_status(pack: str = "CO-Larimer") -> dict[str, Any]:
+    """Governance posture for the UI; refusals are results."""
+    from hearth.packs.governance import GovernanceError, check_freshness
+
+    try:
+        loaded = load_pack(pack)
+        freshness = check_freshness(loaded.pack, loaded.path.parent)
+    except (PackError, GovernanceError) as exc:
+        return {"refused": True, "reason": str(exc)}
+    statuses: dict[str, int] = {}
+    for rule in loaded.pack.rules:
+        statuses[rule.status] = statuses.get(rule.status, 0) + 1
+    return {
+        "refused": False,
+        "pack_id": loaded.pack.pack_id,
+        "owner": loaded.pack.governance.owner,
+        "rules_by_status": statuses,
+        "fresh": freshness.fresh,
+        "issues": [
+            {"kind": i.kind, "source": i.source, "detail": i.detail}
+            for i in freshness.issues
+        ],
+    }
+
+
 # Mount the authenticated oracle + hearth routers onto the app
 app.include_router(oracle_router)
 app.include_router(hearth_router)

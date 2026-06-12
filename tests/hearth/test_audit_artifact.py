@@ -40,7 +40,7 @@ def test_artifact_carries_section_11_fields(artifact_and_run):
         s.startswith(f"doc:{run.document_name}:sha256:") for s in artifact.source_snapshot_ids
     )
     assert f"pack:{loaded.pack.pack_id}:sha256:{loaded.sha256}" in artifact.source_snapshot_ids
-    assert artifact.jurisdiction_pack_id == "CO-Larimer@2026.06"
+    assert artifact.jurisdiction_pack_id == "CO-Larimer@2026.06.1"
     assert artifact.contributing_rule_ids == [
         "CO-LAR-BDB-SCOPE-001",
         "CO-LAR-BDB-FEE-001",

@@ -26,6 +26,7 @@ import {
 import { toast } from "sonner";
 
 import { HearthDropZone } from "@/components/hearth/HearthDropZone";
+import { PropertyWorkspace } from "@/components/hearth/PropertyWorkspace";
 import {
   fetchHearthPacks,
   scrubDocument,
@@ -242,6 +243,8 @@ export function ScrubWorkspace() {
         </section>
 
         {result && <ScrubResult result={result} showReport={showReport} onToggleReport={() => setShowReport((value) => !value)} />}
+
+        <PropertyWorkspace />
       </main>
     </div>
   );

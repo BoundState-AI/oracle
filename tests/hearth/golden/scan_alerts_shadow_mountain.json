@@ -1,6 +1,6 @@
 {
   "property_uid": "hearth:prop:5ff68d7425f7",
-  "pack": "CO-Larimer@2026.06",
+  "pack": "CO-Larimer@2026.06.1",
   "run_date": "2026-06-12",
   "refused": false,
   "alerts": [
@@ -77,6 +77,26 @@
           "property_uid": "hearth:prop:5ff68d7425f7",
           "field": "wells_within_radius",
           "value": 1,
+          "source": "manual:founder (buyer-supplied)",
+          "retrieved": "2026-06-12",
+          "confidence": 0.8
+        }
+      ],
+      "requires_human_review": true
+    },
+    {
+      "property_uid": "hearth:prop:5ff68d7425f7",
+      "rule_id": "CO-LAR-LM-FLOOD-001",
+      "category": "landmine",
+      "status": "alert",
+      "severity": "warn",
+      "summary": "Special Flood Hazard Area membership forces flood insurance and caps resale demand.",
+      "analysis": "A parcel in FEMA zone A/AE/AO requires flood insurance for any federally backed mortgage — a recurring cost the listing never headlines — and floodway restrictions can bar additions or rebuilds. Shaded X (0.2% annual chance) is uninsured-loss territory worth pricing. Verify the zone at msc.fema.gov and record it with hearth add-evidence.",
+      "evidence": [
+        {
+          "property_uid": "hearth:prop:5ff68d7425f7",
+          "field": "fema_flood_zone",
+          "value": "X-shaded",
           "source": "manual:founder (buyer-supplied)",
           "retrieved": "2026-06-12",
           "confidence": 0.8

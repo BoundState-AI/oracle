@@ -68,6 +68,7 @@ def seeded_store(tmp_path_factory) -> EvidenceStore:
     store.add_evidence(_manual(UID_A, "epa_radon_zone", 1))
     store.add_evidence(_manual(UID_A, "csfs_wildfire_risk_rating", "moderate"))
     store.add_evidence(_manual(UID_A, "wells_within_radius", 1))
+    store.add_evidence(_manual(UID_A, "fema_flood_zone", "X-shaded"))
     store.add_evidence(_manual(UID_B, "csfs_wildfire_risk_rating", "high"))
     store.add_evidence(_manual(UID_B, "wells_within_radius", 3))
     return store
@@ -86,7 +87,7 @@ def test_warn_thresholds_property_a(seeded_store, pack):
     run = scan_property(UID_A, seeded_store, pack, run_date=RUN_DAY)
     assert run.refused is False
     alerts = _alerts_by_rule(run)
-    assert len(alerts) == 4
+    assert len(alerts) == 5
     assert (alerts["CO-LAR-LM-METRO-001"].status,
             alerts["CO-LAR-LM-METRO-001"].severity) == ("alert", "warn")  # 52 ≥ 45 < 60
     assert (alerts["CO-LAR-LM-RADON-001"].status,
@@ -95,6 +96,8 @@ def test_warn_thresholds_property_a(seeded_store, pack):
             alerts["CO-LAR-LM-WILDFIRE-001"].severity) == ("alert", "warn")
     assert (alerts["CO-LAR-LM-OILGAS-001"].status,
             alerts["CO-LAR-LM-OILGAS-001"].severity) == ("alert", "warn")  # 1 well
+    assert (alerts["CO-LAR-LM-FLOOD-001"].status,
+            alerts["CO-LAR-LM-FLOOD-001"].severity) == ("alert", "warn")  # X-shaded
     # §6 evidence-first: every alert cites the row it rests on.
     for alert in run.alerts:
         assert alert.evidence, alert.rule_id
@@ -122,7 +125,7 @@ def test_clear_and_insufficient_property_c(seeded_store, pack):
     assert (metro.status, metro.severity) == ("clear", None)  # 0 mills
     assert metro.evidence  # clear still cites its evidence
     insufficient = [a for a in run.alerts if a.status == "insufficient_evidence"]
-    assert len(insufficient) == 3
+    assert len(insufficient) == 4
 
 
 def test_scan_golden_file(seeded_store, pack):
@@ -225,7 +228,7 @@ def test_scan_report_banners_and_evidence(seeded_store, pack):
     run = scan_property(UID_A, seeded_store, pack, run_date=RUN_DAY)
     report = render_scan_report(run, pack)
     assert "NOT LEGAL ADVICE" in report
-    assert "PROVISIONAL BASIS: 4 of 4 alerts" in report
+    assert "PROVISIONAL BASIS: 5 of 5 alerts" in report
     assert "metro_district_mill_levy = 52" in report
     assert "requires human review: yes" in report
 
@@ -243,7 +246,7 @@ def test_scan_audit_artifact_roundtrips(seeded_store, pack, tmp_path):
     rendered = render_scan_report(run, loaded.pack)
     artifact = build_scan_artifact(run, loaded, seeded_store.root, rendered, 0)
     assert artifact.run_type == "scan"
-    assert len(artifact.alerts) == 4 and artifact.findings == []
+    assert len(artifact.alerts) == 5 and artifact.findings == []
     assert any(s.startswith("store:evidence.jsonl:sha256:") for s in artifact.source_snapshot_ids)
     assert any(s.startswith(f"pack:{loaded.pack.pack_id}:sha256:") for s in artifact.source_snapshot_ids)
 
@@ -285,7 +288,7 @@ def test_cli_scan_by_address_fragment(tmp_path, capsys):
     assert "audit artifact:" in out
     payload = json.loads((tmp_path / "alerts.json").read_text(encoding="utf-8"))
     assert payload["property_uid"] == UID_A
-    assert len(payload["alerts"]) == 4
+    assert len(payload["alerts"]) == 5
     assert len(list((tmp_path / "audit").glob("*.json"))) == 1
 
 

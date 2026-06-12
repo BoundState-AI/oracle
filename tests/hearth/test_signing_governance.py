@@ -207,8 +207,8 @@ def test_cli_pack_status(capsys):
     exit_code = main(["pack-status", "--pack", "CO-Larimer"])
     out = capsys.readouterr().out
     assert exit_code == 0
-    assert "CO-Larimer@2026.06" in out
-    assert "12 provisional" in out
+    assert "CO-Larimer@2026.06.1" in out
+    assert "13 provisional" in out
     assert "STUB1" in out
     assert "Source freshness" in out
 
