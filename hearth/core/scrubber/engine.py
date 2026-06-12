@@ -194,16 +194,21 @@ def _build_finding(
     target_price_usd: int | None,
 ) -> ScrubFinding:
     spec = validate_finding_spec(match.rule)
-    exposure = _compute_exposure(
+    exposure, exposure_note = _compute_exposure(
         spec.get("exposure"), document_captures, target_price_usd, match.rule.rule_id
     )
+    analysis = spec["default_analysis"]
+    if exposure_note:
+        # §6 evidence-first: a missing dollar figure is itself a finding
+        # detail the buyer must see, not a log line they never will.
+        analysis = f"{analysis} [{exposure_note}]"
     return ScrubFinding(
         document=document_name,
         clause_ref=match.clause.ref,
         category=spec["category"],
         severity=spec["severity"],
         found=match.clause.text,
-        default_analysis=spec["default_analysis"],
+        default_analysis=analysis,
         exposure_usd=exposure,
         suggested_template=None,
         jurisdiction_basis=match.rule.rule_id,
@@ -215,26 +220,29 @@ def _compute_exposure(
     captures: dict[str, str],
     target_price_usd: int | None,
     rule_id: str,
-) -> int | None:
+) -> tuple[int | None, str | None]:
+    """Exposure amount plus a user-visible note when it cannot be computed."""
     if spec is None:
-        return None
+        return None, None
     # validate_finding_spec guarantees the method is known.
     pct_raw = captures.get(str(spec.get("pct_capture", "")))
     if target_price_usd is None:
         LOGGER.info("rule %s: exposure skipped (no --target-price)", rule_id)
-        return None
+        return None, None
     if pct_raw is None:
-        # Cross-clause dependency: the capture comes from a DIFFERENT rule
-        # firing elsewhere in the document. Its absence with a target price
-        # configured is a signal worth shouting about, not an info line.
-        LOGGER.warning(
-            "rule %s: exposure omitted — capture %r was not produced by any "
-            "rule on this document; the dollar figure is missing, not zero",
-            rule_id,
-            spec.get("pct_capture"),
+        # Cross-clause dependency (§13 P2-A): the capture comes from a
+        # DIFFERENT rule firing elsewhere in the document; its declared
+        # source is capture_from_rule when the pack specifies one.
+        origin = spec.get("capture_from_rule")
+        origin_text = f" (declared source: rule {origin})" if origin else ""
+        note = (
+            "Exposure not computed: the percentage this depends on"
+            f"{origin_text} did not match anything in this document — "
+            "the dollar figure is missing, not zero."
         )
-        return None
-    return round(target_price_usd * float(pct_raw) / 100.0)
+        LOGGER.warning("rule %s: %s", rule_id, note)
+        return None, note
+    return round(target_price_usd * float(pct_raw) / 100.0), None
 
 
 def _enforce_findings_only(findings: list[ScrubFinding]) -> None:

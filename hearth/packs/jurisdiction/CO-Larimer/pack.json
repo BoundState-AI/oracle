@@ -79,7 +79,7 @@
       "effective_to": null,
       "source": "CREC BDB24-6-24 §7 additional-compensation/payment terms",
       "authority_review": null,
-      "signature": "STUB1:5c52bae73d00c400ca5184451ba756d94a69df2813bd845a55c91435a0eaa180",
+      "signature": "STUB1:7b065a3837547e55bd069f387f73d076f224899cd760d03812e9cc57984d5ced",
       "payload": {
         "summary": "Buyer personally backstops the fee if seller-side payment falls through.",
         "detection": {
@@ -95,7 +95,8 @@
           "default_analysis": "If the seller or listing brokerage does not pay, the buyer pays the entire unpaid fee at closing — on top of down payment and closing costs. The blank could have capped buyer liability, made the fee contingent on seller-side payment, or struck the backstop entirely. Exposure shown is the pre-filled percentage applied to the configured target price.",
           "exposure": {
             "method": "pct_capture_times_target_price",
-            "pct_capture": "fee_pct"
+            "pct_capture": "fee_pct",
+            "capture_from_rule": "CO-LAR-BDB-FEE-001"
           }
         }
       }

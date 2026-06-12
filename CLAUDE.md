@@ -17,14 +17,18 @@ built on top):
 
 ```
 hearth/
-├── cli.py          # `hearth scrub <doc> --pack CO-Larimer` (exit 2 = REFUSED)
-├── api/app.py      # FastAPI single-tenant — /health only in P1
-├── core/scrubber/  # extraction → segmentation → matcher → engine (fails CLOSED)
-├── core/boundary.py# BuyerPack canary/leak-check primitive (§1.1/§6)
-├── data/           # Pydantic v2 contracts (§2, §11), all extra="forbid"
-├── packs/          # jurisdiction/CO-Larimer/pack.json + stub signer + loader
-├── audit/          # immutable per-run AuditArtifacts (§11)
-└── utils/render.py # report + mandatory banners (§8)
+├── cli.py            # hearth scrub | scan | ingest | pack-status (exit 2 = REFUSED)
+├── api/app.py        # FastAPI single-tenant — /health only (web surface in server.py)
+├── core/scrubber/    # extraction → segmentation → matcher → engine (fails CLOSED)
+├── core/signals/     # landmines.py — data_query rules vs evidence store (P2-D)
+├── core/identity/    # resolver.py — property_uid + confidence ladder (§2.3)
+├── core/boundary.py  # BuyerPack canary/leak-check primitive (§1.1/§6)
+├── data/             # Pydantic v2 contracts (§2, §11), all extra="forbid"
+├── db/evidence_store # JSONL identities+evidence, join guard (no silent merges)
+├── ingest/           # bulk-file adapters + §4.1 rights enforcement (no network)
+├── packs/            # CO-Larimer pack + Ed25519/stub signing + governance
+├── audit/            # immutable per-run AuditArtifacts (§11): scrub + scan
+└── utils/render.py   # reports + mandatory banners (§8)
 ```
 
 ## HEARTH Key Rules
@@ -51,7 +55,14 @@ hearth/
   included. Artifact write failure makes the run refuse.
 - Grey Rock golden file: regenerate only deliberately
   (`HEARTH_UPDATE_GOLDEN=1`) and review the diff; the §12 minimum-findings
-  test is independent of the golden file by design.
+  test is independent of the golden file by design. Same for the scan golden.
+- **Phase-2 rules (§13):** `reviewed` rule status requires a verifying
+  Ed25519 signature (stub = drift detection only — re-sign edits with
+  `python -m hearth.packs.signing <pack.json>`); ingest adapters must carry
+  a §4.1 DataRightsRow and may not emit fields outside it; evidence joins
+  on identities below confidence 0.90 raise (no silent merges, §2.3);
+  landmine scans report `insufficient_evidence`, never silence (§3.1);
+  exposure capture dependencies are declared via `capture_from_rule`.
 
 ## ORACLE (unchanged)
 

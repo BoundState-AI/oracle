@@ -13,10 +13,14 @@ This repository is a clone of the BoundState `oracle` repo: the ORACLE
 multi-oracle review engine (which reviewed the HEARTH spec) lives in
 `oracle/`, and HEARTH lives in `hearth/`. Spec: `docs/HEARTH_spec_v0.3.md`.
 
-**Phase 1 status (founder field test):** DocScrubber CLI (findings-only),
-CO-Larimer JurisdictionPack (provisional), data models, boundary-test
-scaffold. No valuation engine, no MLS adapters, no optimizer, no LLM calls,
-no UI beyond the CLI. See `BUILD_NOTES.md` for what is stubbed and why.
+**Status (founder field test):** Phase 1 shipped the DocScrubber CLI
+(findings-only), the CO-Larimer JurisdictionPack (provisional), the data
+models, and the BuyerPack boundary-test scaffold. Phase 2
+(`docs/HEARTH_phase2_scope_v0.4draft.md`) added explicit exposure
+dependencies, Ed25519 reviewer signing + governance freshness, bulk-file
+ingest with identity resolution, and the landmine scan engine. Still
+deliberately absent: valuation engine, MLS adapters, optimizer, LLM calls.
+See `BUILD_NOTES.md` for what is stubbed and why.
 
 ## Quickstart — scrub a document in two commands
 
@@ -36,6 +40,27 @@ Supported inputs: `.pdf`, `.docx`, `.txt`, `.md`. Useful flags:
 | `--json PATH` | machine-readable findings |
 | `--audit-dir DIR` | where the immutable audit artifact lands (default `hearth_audit/`) |
 | `--packs-dir DIR` | use a pack library other than the built-in one |
+
+## Phase 2 — evidence, identity, landmines (two commands each)
+
+```bash
+# Ingest a county bulk export (file-based; no live network adapters in P2)
+hearth ingest tests/fixtures/ingest/larimer_assessor_SYNTHETIC.csv \
+    --adapter larimer-assessor --store ./evidence
+
+# Scan a property's evidence against the pack's landmine rules
+hearth scan "shadow mountain" --pack CO-Larimer --store ./evidence
+```
+
+```bash
+# Governance posture: rule statuses, signature schemes, source freshness
+hearth pack-status --pack CO-Larimer
+```
+
+Risk-layer fields the adapters don't cover yet (radon zone, wildfire
+rating, well counts) enter the store as buyer-supplied manual evidence
+(§4 confidence tier 0.80); the scan engine evaluates whatever rows exist
+and reports `insufficient_evidence` for the rest — never silence.
 
 ### Exit codes — the scrubber FAILS CLOSED
 
@@ -78,8 +103,10 @@ hearth/
 
 ## Dependencies
 
-Phase 1 adds **zero** new runtime dependencies beyond the repo baseline
+Phase 1 added **zero** new runtime dependencies beyond the repo baseline
 (pydantic v2, FastAPI, PyMuPDF, python-docx already shipped with ORACLE).
+Phase 2 adds one: **cryptography** — Ed25519 per-reviewer rule signatures
+(§13 P2-B); the stdlib has no Ed25519 implementation.
 
 ## Testing
 

@@ -135,6 +135,14 @@ def validate_finding_spec(rule: MicroRule) -> dict[str, Any]:
             raise MatchSpecError(
                 f"rule {rule.rule_id}: unknown exposure spec {exposure!r}"
             )
+        # §13 P2-A: cross-rule capture dependencies must be declared, and a
+        # declaration must be a rule id string (existence is checked by the
+        # pack loader, which can see the whole pack).
+        origin = exposure.get("capture_from_rule")
+        if origin is not None and (not isinstance(origin, str) or not origin):
+            raise MatchSpecError(
+                f"rule {rule.rule_id}: capture_from_rule must be a rule id string"
+            )
     return finding
 
 

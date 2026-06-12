@@ -124,7 +124,253 @@ def build_parser() -> argparse.ArgumentParser:
     )
     scrub.add_argument("--verbose", action="store_true", help="debug logging")
     scrub.set_defaults(handler=cmd_scrub)
+
+    status = subcommands.add_parser(
+        "pack-status",
+        help="governance posture of a jurisdiction pack (§13 P2-B)",
+        description=(
+            "Validate a pack and report rule statuses, signature schemes, and "
+            "monitored-source freshness against the governance SLA."
+        ),
+    )
+    status.add_argument(
+        "--pack", required=True, help="pack name (e.g. CO-Larimer) or pack.json path"
+    )
+    status.add_argument("--packs-dir", type=Path, default=None)
+    status.add_argument("--verbose", action="store_true", help="debug logging")
+    status.set_defaults(handler=cmd_pack_status)
+
+    ingest = subcommands.add_parser(
+        "ingest",
+        help="ingest a bulk source export into the evidence store (§13 P2-C)",
+        description=(
+            "Parse a county bulk-export file with a declared adapter, resolve "
+            "PropertyIdentities, and append provenance-carrying evidence rows. "
+            "Malformed input REFUSES with exit code 2."
+        ),
+    )
+    ingest.add_argument("file", type=Path, help="bulk export file (CSV)")
+    ingest.add_argument(
+        "--adapter",
+        required=True,
+        help="adapter source_id (e.g. larimer-assessor, larimer-permits)",
+    )
+    ingest.add_argument(
+        "--store",
+        type=Path,
+        required=True,
+        help="evidence store directory (created if absent)",
+    )
+    ingest.add_argument("--verbose", action="store_true", help="debug logging")
+    ingest.set_defaults(handler=cmd_ingest)
+
+    scan = subcommands.add_parser(
+        "scan",
+        help="evaluate landmine rules against a property's evidence (§13 P2-D)",
+        description=(
+            "Run the pack's data_query landmine rules (metro mills, radon, "
+            "wildfire, wells) against the evidence store. Unknown property, "
+            "blocked identity join, or unusable pack REFUSES with exit code 2."
+        ),
+    )
+    scan.add_argument(
+        "property",
+        help="property_uid (hearth:prop:...) or an address fragment to resolve",
+    )
+    scan.add_argument(
+        "--pack", required=True, help="JurisdictionPack name or pack.json path"
+    )
+    scan.add_argument("--packs-dir", type=Path, default=None)
+    scan.add_argument(
+        "--store", type=Path, required=True, help="evidence store directory"
+    )
+    scan.add_argument("--json", dest="json_out", type=Path, default=None, metavar="PATH")
+    scan.add_argument("--audit-dir", type=Path, default=DEFAULT_AUDIT_DIR)
+    scan.add_argument("--verbose", action="store_true", help="debug logging")
+    scan.set_defaults(handler=cmd_scan)
     return parser
+
+
+def cmd_scan(args: argparse.Namespace) -> int:
+    from hearth.audit.artifact import build_scan_artifact
+    from hearth.core.signals.landmines import refusal_scan, scan_property
+    from hearth.db.evidence_store import EvidenceStore, EvidenceStoreError
+    from hearth.utils.render import render_scan_report
+
+    loaded: LoadedPack | None = None
+    store = None
+    try:
+        loaded = load_pack(args.pack, args.packs_dir)
+    except PackError as exc:
+        LOGGER.error("pack load failed closed: %s", exc)
+        run = refusal_scan(args.property, reason=f"jurisdiction pack unusable: {exc}")
+    else:
+        try:
+            store = EvidenceStore(args.store)
+            uid = _resolve_property_ref(store, args.property)
+        except EvidenceStoreError as exc:
+            LOGGER.error("scan failed closed: %s", exc)
+            run = refusal_scan(args.property, reason=str(exc), pack=loaded.pack)
+        else:
+            run = scan_property(uid, store, loaded.pack)
+
+    exit_code = EXIT_REFUSE if run.refused else EXIT_OK
+    rendered = render_scan_report(run, loaded.pack if loaded else None)
+
+    try:
+        artifact = build_scan_artifact(
+            run, loaded, args.store if store is not None else None, rendered, exit_code
+        )
+        audit_path = write_artifact(artifact, args.audit_dir)
+    except AuditWriteError as exc:
+        LOGGER.error("%s", exc)
+        print(rendered)
+        print(f"\n*** REFUSED — audit artifact could not be written: {exc}")
+        return EXIT_REFUSE
+
+    print(rendered)
+    print(f"audit artifact: {audit_path}")
+
+    if args.json_out is not None:
+        payload = {
+            "property_uid": run.property_uid,
+            "pack": run.pack_id,
+            "run_date": run.run_date.isoformat(),
+            "refused": run.refused,
+            "refusal_reason": run.refusal_reason,
+            "exit_code": exit_code,
+            "alerts": [alert.to_json_dict() for alert in run.alerts],
+            "audit_artifact": str(audit_path),
+        }
+        try:
+            args.json_out.write_text(
+                json.dumps(payload, indent=2, ensure_ascii=False) + "\n", "utf-8"
+            )
+        except OSError as exc:
+            LOGGER.error("JSON output failed: %s", exc)
+            print(f"\n*** REFUSED — JSON output could not be written: {exc}")
+            return EXIT_REFUSE
+        print(f"alerts JSON   : {args.json_out}")
+
+    return exit_code
+
+
+def _resolve_property_ref(store, reference: str) -> str:
+    """Resolve a CLI property reference: a uid passes through; anything else
+    is an address fragment that must match exactly one identity."""
+    from hearth.core.identity.resolver import normalize_address
+    from hearth.db.evidence_store import EvidenceStoreError
+
+    if reference.startswith("hearth:prop:"):
+        return reference
+    fragment = normalize_address(reference)
+    if not fragment:
+        # "" is a substring of every address — junk input must not quietly
+        # resolve to whatever single property happens to be in the store.
+        raise EvidenceStoreError(
+            f"address fragment {reference!r} normalizes to nothing — "
+            "give part of the street address or a property_uid"
+        )
+    matches = [
+        identity
+        for identity in store.identities()
+        if fragment in identity.address_normalized
+    ]
+    if len(matches) == 1:
+        return matches[0].property_uid
+    if not matches:
+        raise EvidenceStoreError(
+            f"no ingested property matches {reference!r} — run hearth ingest first"
+        )
+    listing = "; ".join(
+        f"{m.property_uid} ({m.address_normalized})" for m in matches[:5]
+    )
+    raise EvidenceStoreError(
+        f"{reference!r} is ambiguous across {len(matches)} properties: {listing} — "
+        "use the property_uid"
+    )
+
+
+def cmd_ingest(args: argparse.Namespace) -> int:
+    from hearth.core.identity.resolver import (
+        property_uid,
+        reconcile_identity,
+        resolve_batches,
+    )
+    from hearth.data import PropertyEvidence
+    from hearth.db.evidence_store import EvidenceStore, EvidenceStoreError
+    from hearth.ingest import IngestError, get_adapter
+
+    try:
+        adapter = get_adapter(args.adapter)
+        batch = adapter.parse(args.file)
+        store = EvidenceStore(args.store)
+
+        outcomes = {"created": 0, "kept": 0, "upgraded": 0, "conflict": 0}
+        conflicts: list[str] = []
+        for identity in resolve_batches([batch]):
+            current = store.get_identity(identity.property_uid)
+            merged, outcome = reconcile_identity(current, identity)
+            outcomes[outcome] += 1
+            if outcome == "conflict":
+                conflicts.append(merged.property_uid)
+            if merged is not current:
+                store.upsert_identity(merged)
+
+        rows = 0
+        for record in batch.records:
+            uid = property_uid("CO", "Larimer", record.parcel_id)
+            for field_name, value in record.fields.items():
+                store.add_evidence(
+                    PropertyEvidence(
+                        property_uid=uid,
+                        field=field_name,
+                        value=value,
+                        source=batch.rights.source,
+                        retrieved=batch.retrieved,
+                        confidence=batch.rights.confidence_tier,
+                    )
+                )
+                rows += 1
+    except (IngestError, EvidenceStoreError) as exc:
+        LOGGER.error("ingest failed closed: %s", exc)
+        print(f"*** REFUSED — ingest failed closed: {exc}")
+        return EXIT_REFUSE
+
+    print(f"ingested {args.file.name} via {batch.source_id}")
+    print(
+        f"  identities    : {outcomes['created']} created, "
+        f"{outcomes['upgraded']} upgraded, {outcomes['kept']} kept, "
+        f"{outcomes['conflict']} in conflict"
+    )
+    print(f"  evidence rows : {rows} appended (source confidence {batch.rights.confidence_tier})")
+    print(f"  store         : {args.store}")
+    for uid in conflicts:
+        print(
+            f"  !! ADDRESS CONFLICT on {uid}: sources disagree on the situs — "
+            "confidence dropped, evidence joins are BLOCKED until resolved (§2.3)"
+        )
+    if not batch.rights.verified:
+        print(
+            "  NOTE: this source's data-rights row is founder-declared and "
+            "NOT yet verified (§4.1)."
+        )
+    return EXIT_OK
+
+
+def cmd_pack_status(args: argparse.Namespace) -> int:
+    from hearth.packs.governance import GovernanceError, check_freshness
+    from hearth.utils.render import render_pack_status
+
+    try:
+        loaded = load_pack(args.pack, args.packs_dir)
+        freshness = check_freshness(loaded.pack, loaded.path.parent)
+    except (PackError, GovernanceError) as exc:
+        LOGGER.error("pack-status failed closed: %s", exc)
+        print(f"*** REFUSED — pack unusable: {exc}")
+        return EXIT_REFUSE
+    print(render_pack_status(loaded.pack, loaded.path, freshness))
+    return EXIT_OK
 
 
 def cmd_scrub(args: argparse.Namespace) -> int:

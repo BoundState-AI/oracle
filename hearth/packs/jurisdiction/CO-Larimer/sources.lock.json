@@ -1,0 +1,39 @@
+{
+  "sources": [
+    {
+      "source": "C.R.S. Title 12, Article 10 (leg.colorado.gov)",
+      "sha256": null,
+      "recorded": "2026-06-12"
+    },
+    {
+      "source": "CDPHE radon program (cdphe.colorado.gov/radon)",
+      "sha256": null,
+      "recorded": "2026-06-12"
+    },
+    {
+      "source": "CO Division of Real Estate position statements",
+      "sha256": null,
+      "recorded": "2026-06-12"
+    },
+    {
+      "source": "CREC standard forms library (dora.colorado.gov/divisions/division-of-real-estate)",
+      "sha256": null,
+      "recorded": "2026-06-12"
+    },
+    {
+      "source": "Colorado State Forest Service Wildfire Risk Assessment (coloradoforestatlas.org)",
+      "sha256": null,
+      "recorded": "2026-06-12"
+    },
+    {
+      "source": "DOLA special district transparency portal (dola.colorado.gov)",
+      "sha256": null,
+      "recorded": "2026-06-12"
+    },
+    {
+      "source": "ECMC (formerly COGCC) rules and well database (ecmc.state.co.us)",
+      "sha256": null,
+      "recorded": "2026-06-12"
+    }
+  ]
+}
