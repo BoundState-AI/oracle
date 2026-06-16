@@ -822,9 +822,23 @@ def _call_gemini(config: OracleConfig, user_message: str) -> dict:
         )
 
     if response.status_code >= 400:
+        # Surface Google's structured error reason (status + message) in the
+        # error string itself — otherwise the only signal that reaches the logs
+        # is a bare status code, and the actual cause (RESOURCE_EXHAUSTED,
+        # billing disabled, PERMISSION_DENIED, etc.) is buried in `raw` and
+        # never printed. Keep the literal "Gemini API error {code}" substring
+        # intact so _should_fallback_gemini() still matches on status code.
+        detail = ""
+        try:
+            err_obj = response.json().get("error", {}) or {}
+            parts = [p for p in (err_obj.get("status"), (err_obj.get("message") or "")[:300]) if p]
+            if parts:
+                detail = f" ({': '.join(parts)})"
+        except (ValueError, AttributeError):
+            detail = ""
         return {
             "oracle_name": config.name,
-            "error": f"Gemini API error {response.status_code}",
+            "error": f"Gemini API error {response.status_code}{detail}",
             "raw": redact_secrets(response.text[:2000]),
             "findings": [],
         }
