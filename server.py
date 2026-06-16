@@ -506,7 +506,8 @@ def _run_review_background(
 
         msg_queue.put("Review complete — parsing results...")
 
-        review_result = build_review_result(output_dir)
+        # Write the findings report + metrics FIRST — these only need the
+        # in-memory review_session and succeed for every terminal outcome.
         findings_report = format_findings_report(
             review_session,
             _pack_dir(),
@@ -518,6 +519,20 @@ def _run_review_background(
             json.dumps(metrics, indent=2),
             encoding="utf-8",
         )
+
+        # A "stop for human review" outcome legitimately omits a LOCKed
+        # final_draft.md, so build_review_result()'s preflight raises ValueError.
+        # That must NOT bury a completed review in status="error" (which nulls
+        # every download URL and strands the user at the console). The review
+        # ran; serve the findings report regardless of how rich the parse is.
+        try:
+            review_result = build_review_result(output_dir)
+        except BaseException:
+            LOGGER.exception(
+                "rich review_result unavailable (e.g. human-review stop without a "
+                "LOCKed final_draft); serving findings report only"
+            )
+            review_result = None
 
         _sessions[session_id] = {
             "session_id": session_id,
@@ -828,7 +843,12 @@ def _build_session_payload(session: dict[str, Any]) -> dict[str, Any]:
         }
 
     critique = session.get("critique")
-    report_available = status in ("complete", "ready_to_generate")
+    # Downloads follow the artifacts: a human-review stop is a valid terminal
+    # state whose findings_report.md exists on disk even if the rich parse was
+    # skipped, so don't gate the download links on the status enum alone.
+    _output_dir = session.get("output_dir")
+    _report_on_disk = bool(_output_dir and (Path(_output_dir) / "findings_report.md").exists())
+    report_available = status in ("complete", "ready_to_generate") or _report_on_disk
     return {
         **base,
         "critique": critique if mode == "review" else None,
