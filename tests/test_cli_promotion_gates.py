@@ -152,7 +152,27 @@ def test_removed_builtin_is_not_resurrected_by_bootstrap(tmp_path):
     _bootstrap_builtin_packs(pack_dir)
     manifest = _load_manifest(pack_dir)
     assert slug not in manifest["packs"]
-    assert slug in manifest["removed_builtins"]
+    # Tombstones live in a sidecar so a manifest rebuild can't lose them
+    sidecar = json.loads((pack_dir / "removed_builtins.json").read_text(encoding="utf-8"))
+    assert slug in sidecar
+
+
+def test_tombstone_survives_manifest_rebuild(tmp_path):
+    """A corrupt manifest + rebuild must NOT resurrect a removed builtin —
+    the original resurrection bug resurfacing exactly when trust state is
+    already in doubt."""
+    pack_dir = tmp_path / "packs"
+    pack_dir.mkdir()
+    _bootstrap_builtin_packs(pack_dir)
+    slug = _builtin_slug()
+    remove_pack(slug, pack_dir)
+
+    _corrupt_manifest(pack_dir)
+    _rebuild_manifest(pack_dir)
+    _bootstrap_builtin_packs(pack_dir)
+
+    manifest = _load_manifest(pack_dir)
+    assert slug not in manifest["packs"]
 
 
 def test_deliberate_readd_clears_builtin_tombstone(tmp_path):

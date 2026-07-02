@@ -147,8 +147,9 @@ def _bootstrap_builtin_packs(pack_dir: Path) -> None:
     # WHY tombstones: bootstrap re-registers any builtin missing from the
     # manifest, which silently resurrected packs the user had explicitly
     # removed with remove-pack on the very next command. A removed builtin
-    # stays removed until the user re-adds it deliberately.
-    removed_builtins = set(manifest.get("removed_builtins", []))
+    # stays removed until the user re-adds it deliberately. Stored in a
+    # sidecar file so a manifest rebuild can't lose them.
+    removed_builtins = _load_removed_builtins(pack_dir)
 
     for spec in BUILTIN_PACK_SPECS:
         slug = _slugify(spec["name"])
@@ -195,9 +196,50 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
 # Pack Library Operations
 # ---------------------------------------------------------------------------
 
+class UserAbortError(Exception):
+    """The user declined an interactive confirmation — a normal outcome.
+
+    WHY a distinct type: command handlers must exit 0 with "Aborted." for
+    a deliberate 'no', while genuine errors exit 1. Folding both into
+    ValueError makes CI wrappers treat a polite decline as a failure.
+    """
+
+
 def _manifest_path(pack_dir: Path) -> Path:
     """Return the manifest.json path for the given pack directory."""
     return pack_dir / "manifest.json"
+
+
+def _removed_builtins_path(pack_dir: Path) -> Path:
+    """Sidecar recording builtin packs the user deliberately removed.
+
+    WHY a sidecar, not a manifest key: removal intent is not derivable
+    from pack files, so a manifest rebuild after corruption would lose a
+    manifest-resident tombstone list and bootstrap would resurrect the
+    removed packs — the exact bug tombstones exist to prevent. The
+    sidecar survives manifest corruption.
+    """
+    return pack_dir / "removed_builtins.json"
+
+
+def _load_removed_builtins(pack_dir: Path) -> set[str]:
+    """Read the tombstoned builtin slugs (empty set when none)."""
+    path = _removed_builtins_path(pack_dir)
+    if not path.exists():
+        return set()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        LOGGER.warning(f"Unreadable removed_builtins.json ({e}) — treating as empty")
+        return set()
+    return {s for s in data if isinstance(s, str)} if isinstance(data, list) else set()
+
+
+def _save_removed_builtins(slugs: set[str], pack_dir: Path) -> None:
+    """Persist tombstoned builtin slugs atomically."""
+    _atomic_write_text(
+        _removed_builtins_path(pack_dir), json.dumps(sorted(slugs), indent=2)
+    )
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
@@ -265,10 +307,15 @@ def _rebuild_manifest(pack_dir: Path) -> dict:
 
     # Scan pack files and rebuild from oracle_metadata
     for pack_file in sorted(pack_dir.glob("*.json")):
-        if pack_file.name == "manifest.json":
+        if pack_file.name in ("manifest.json", "removed_builtins.json"):
             continue
         try:
             pack_data = json.loads(pack_file.read_text(encoding="utf-8"))
+            # Non-dict JSON in the library dir is not a pack — skip it
+            # instead of crashing the recovery path it lives beside.
+            if not isinstance(pack_data, dict):
+                LOGGER.warning(f"  Skipping non-pack JSON file {pack_file.name}")
+                continue
             meta = pack_data.get("oracle_metadata", {})
             slug = meta.get("slug", pack_file.stem)
 
@@ -316,6 +363,7 @@ def _rebuild_manifest(pack_dir: Path) -> dict:
                 "promoted_by": meta.get("promoted_by") if status == "promoted" else None,
                 "source_document": pack_data.get("source_document", ""),
                 "source_document_hash": meta.get("source_document_hash"),
+                "detection_override": meta.get("detection_override"),
                 "rebuilt": True,
             }
             LOGGER.info(f"  Rebuilt entry: {slug} ({_count_rules(pack_data)} rules)")
@@ -524,10 +572,10 @@ def register_pack(
 
     # Update manifest
     # A deliberate re-add clears any builtin tombstone (see remove_pack).
-    if slug in manifest.get("removed_builtins", []):
-        manifest["removed_builtins"] = [
-            s for s in manifest["removed_builtins"] if s != slug
-        ]
+    tombstones = _load_removed_builtins(pack_dir)
+    if slug in tombstones:
+        tombstones.discard(slug)
+        _save_removed_builtins(tombstones, pack_dir)
 
     manifest["packs"][slug] = {
         "name": meta.get("name", name),
@@ -547,6 +595,9 @@ def register_pack(
         "promoted_by": meta.get("promoted_by"),
         "source_document": pack_data.get("source_document", str(pack_path)),
         "source_document_hash": meta.get("source_document_hash"),
+        # Persisted so the findings report's Section 8 disclosure reads it
+        # from the manifest instead of re-parsing every pack file.
+        "detection_override": meta.get("detection_override"),
     }
     _save_manifest(manifest, pack_dir)
 
@@ -627,9 +678,9 @@ def remove_pack(pack_name: str, pack_dir: Path) -> bool:
 
     builtin_slugs = {_slugify(spec["name"]) for spec in BUILTIN_PACK_SPECS}
     if resolved in builtin_slugs:
-        tombstones = set(manifest.get("removed_builtins", []))
+        tombstones = _load_removed_builtins(pack_dir)
         tombstones.add(resolved)
-        manifest["removed_builtins"] = sorted(tombstones)
+        _save_removed_builtins(tombstones, pack_dir)
         LOGGER.info(
             f"Builtin pack '{resolved}' tombstoned — bootstrap will not "
             f"re-seed it (re-add deliberately with add-pack)"
@@ -676,27 +727,16 @@ def promote_pack(
     entry = manifest["packs"][resolved]
 
     # --- Gate 0: Content-hash tamper check ---
-    # WHY: promote used to read the file raw and then re-stamp its hash
-    # into the manifest at the end — so a pack file edited on disk after
-    # registration (which `review` correctly refuses via load_pack) could
-    # be laundered into promoted, blessed status by the very command that
-    # exists to be the human trust gate. Fail closed exactly like
-    # load_pack(verify=True) does.
+    # WHY load_pack, not a local re-implementation: promote used to read
+    # the file raw and re-stamp its hash into the manifest at the end —
+    # laundering post-registration edits into promoted status. Reusing
+    # load_pack(verify=True) gives the identical hash check `review` uses
+    # PLUS schema validation, and the two gates can never drift apart.
     pack_path = pack_dir / entry["file"]
-    if not pack_path.exists():
+    try:
+        pack_data, _ = load_pack(resolved, pack_dir, verify=True)
+    except FileNotFoundError:
         raise ValueError(f"Pack file missing: {pack_path}")
-    expected_hash = entry.get("content_hash", "")
-    if expected_hash:
-        actual_hash = _compute_content_hash(pack_path)
-        if actual_hash != expected_hash:
-            raise ValueError(
-                f"Pack '{resolved}' has been modified on disk since it was "
-                f"registered (content hash mismatch) — refusing to promote. "
-                f"Re-register it with add-pack --overwrite, review the new "
-                f"content, then promote."
-            )
-
-    pack_data = json.loads(pack_path.read_text(encoding="utf-8"))
     meta = pack_data.get("oracle_metadata", {})
 
     # Already promoted?
@@ -981,7 +1021,7 @@ def _detect_document_type(
             f"Proceed? [Y/n/override]: "
         ).strip().lower()
         if response == "n":
-            raise ValueError("Aborted by user at low-confidence detection prompt.")
+            raise UserAbortError("declined at low-confidence detection prompt")
         elif response == "override":
             override = input("Enter type (tagged_standard|far_style|cfr_style|generic): ").strip()
             if override in ("tagged_standard", "far_style", "cfr_style", "generic"):
@@ -1691,7 +1731,11 @@ def _render_pack_for_oracle(
         # We can't modify build_far_rulepack.render_for_oracle(), so we
         # render Tier 1 summary via that function and build Tier 2 ourselves
         # with citation IDs prepended to each requirement line.
-        from oracle.build_far_rulepack import render_tier1_summary, FAR_PART_TITLES
+        from oracle.build_far_rulepack import (
+            render_tier1_summary,
+            render_unassigned,
+            FAR_PART_TITLES,
+        )
 
         lines = [
             f"# {pack_data.get('standard_title', 'FAR')} Compliance Rule Pack",
@@ -1730,6 +1774,20 @@ def _render_pack_for_oracle(
                 "summary index above. Flag any areas where the document fails to "
                 "address requirements from relevant Parts."
             )
+
+        # Unassigned binding requirements are still binding — leaving them
+        # out silently excluded them from every review (they previously
+        # rendered only on oracle2's legacy path, never this one).
+        try:
+            unassigned_text = render_unassigned(pack_data, pack_id=pack_id)
+        except TypeError:
+            # Transitional: older render_unassigned lacks the pack_id
+            # parameter (added in a parallel change); rule lines then miss
+            # the citation prefix but are still reviewed.
+            unassigned_text = render_unassigned(pack_data)
+        if unassigned_text:
+            lines.append("")
+            lines.append(unassigned_text)
 
         return "\n".join(lines)
 
@@ -1804,6 +1862,41 @@ def _estimate_tokens(text: str) -> int:
     return len(text) // 4
 
 
+def _max_rounds_hard_cap() -> int:
+    """The operator ceiling on review rounds (ORACLE_MAX_ROUNDS_HARD_CAP).
+
+    Single owner of the env parse — argparse validation and run_review's
+    guard both call this, so the two can't drift. A garbage value logs
+    and falls back to the default rather than failing every review (the
+    cap is an operator spend bound, not a correctness input).
+    """
+    raw = os.environ.get("ORACLE_MAX_ROUNDS_HARD_CAP", "12")
+    try:
+        cap = int(raw)
+    except ValueError:
+        LOGGER.warning(
+            f"ORACLE_MAX_ROUNDS_HARD_CAP must be an integer, got '{raw}' — using 12."
+        )
+        return 12
+    if cap < 1:
+        LOGGER.warning(f"ORACLE_MAX_ROUNDS_HARD_CAP must be >= 1, got {cap} — using 1.")
+        return 1
+    return cap
+
+
+def _default_review_output_dir() -> Path:
+    """Mint the default session directory for a review run.
+
+    Single owner of the naming scheme: run_review and cmd_review must
+    agree on the directory or the findings report lands somewhere else
+    than the round artifacts (two independent datetime.now() calls used
+    to straddle second boundaries). Microseconds prevent two runs
+    starting in the same second from silently sharing — and mutually
+    overwriting — one audit directory.
+    """
+    return Path("oracle_reviews") / datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+
+
 def _configured_review_models() -> list[str]:
     """Model IDs of the configured reviewer roster.
 
@@ -1837,6 +1930,7 @@ def _configured_review_models() -> list[str]:
 
 def _compute_token_budget(
     document_text: str,
+    strict_models: bool = True,
 ) -> int:
     """Compute the effective compliance context token budget.
 
@@ -1849,12 +1943,18 @@ def _compute_token_budget(
 
     Capped by ORACLE_MAX_CONTEXT_TOKENS (default 80,000).
 
+    strict_models=False is the zero-pack mode: the budget number is unused
+    there (no compliance context to size) — only the document-size guard
+    matters — so an unknown model ID is skipped with a warning instead of
+    refusing a general review that never needed the context-window table.
+
     Raises:
-        ValueError: on unknown model without a fixed cap, or when the
-            document alone exceeds the smallest configured context window.
-            WHY raise, not sys.exit: this runs inside server review threads
-            whose error handling deliberately catches Exception only —
-            SystemExit escaped it and stranded sessions in-flight forever.
+        ValueError: on unknown model without a fixed cap (strict mode), or
+            when the document alone exceeds the smallest KNOWN configured
+            context window. WHY raise, not sys.exit: this runs inside
+            server review threads whose error handling deliberately
+            catches Exception only — SystemExit escaped it and stranded
+            sessions in-flight forever.
     """
     SYSTEM_RESERVE = 4_000
     RESPONSE_HEADROOM = 8_000
@@ -1883,6 +1983,12 @@ def _compute_token_budget(
                         f"Reduce document size or raise the cap."
                     )
                 return fixed
+            if not strict_models:
+                LOGGER.warning(
+                    f"Unknown model '{model_id}' — skipped for the document-size "
+                    f"guard (no compliance context to budget in this review)."
+                )
+                continue
             raise ValueError(
                 f"Unknown model '{model_id}'. Context window size is required for "
                 f"token budget calculation. Set ORACLE_MAX_CONTEXT_TOKENS or use a known model ID."
@@ -1890,7 +1996,14 @@ def _compute_token_budget(
         if min_window is None or window < min_window:
             min_window = window
 
-    assert min_window is not None
+    if min_window is None:
+        # Tolerant mode with every model unknown: nothing to size against.
+        LOGGER.warning(
+            "No configured model has a known context window — skipping the "
+            "document-size guard."
+        )
+        return max_context_cap
+
     computed_budget = min_window - doc_tokens - SYSTEM_RESERVE - RESPONSE_HEADROOM - ROUND_OVERHEAD
     effective = min(max_context_cap, computed_budget)
 
@@ -1931,12 +2044,16 @@ def _reduce_section(section: dict) -> tuple[str, str] | None:
         )
     elif schema == "generic":
         # (b) Critical + high severity rules only, with omitted count.
+        # Case-insensitive severity compare: packs are external data and
+        # "Critical" vs "critical" must not silently skip the graduated
+        # step (falling through to whole-pack omission).
         rules = pack_data.get("rules", [])
         kept_rules = [
             r for r in rules
-            if isinstance(r, dict) and r.get("severity") in ("critical", "high")
+            if isinstance(r, dict)
+            and str(r.get("severity", "")).lower() in ("critical", "high")
         ]
-        if len(kept_rules) == len(rules):
+        if not kept_rules or len(kept_rules) == len(rules):
             return None
         reduced_data = {**pack_data, "rules": kept_rules}
         reduced = _render_pack_for_oracle(reduced_data, pack_id)
@@ -2141,18 +2258,18 @@ def run_review(
     # run zero rounds yet exit 0 with a "completed" findings report — a
     # silent no-op indistinguishable from a real review — and an absurd
     # round count was accepted with no ceiling on multi-vendor spend.
-    raw_cap = os.environ.get("ORACLE_MAX_ROUNDS_HARD_CAP", "12")
-    try:
-        rounds_cap = int(raw_cap)
-    except ValueError:
-        raise ValueError(
-            f"ORACLE_MAX_ROUNDS_HARD_CAP must be an integer, got '{raw_cap}'"
+    # WHY clamp (not raise) above the cap: an operator lowering
+    # ORACLE_MAX_ROUNDS_HARD_CAP below a caller's default (bare CLI = 4,
+    # server clamp = 4) must bound spend, not break every review.
+    if max_rounds < 1:
+        raise ValueError(f"max_rounds must be at least 1 (got {max_rounds}).")
+    rounds_cap = _max_rounds_hard_cap()
+    if max_rounds > rounds_cap:
+        LOGGER.warning(
+            f"max_rounds {max_rounds} exceeds ORACLE_MAX_ROUNDS_HARD_CAP "
+            f"({rounds_cap}) — clamping to {rounds_cap}."
         )
-    if not 1 <= max_rounds <= rounds_cap:
-        raise ValueError(
-            f"max_rounds must be between 1 and {rounds_cap} (got {max_rounds}). "
-            f"Raise ORACLE_MAX_ROUNDS_HARD_CAP to allow more rounds."
-        )
+        max_rounds = rounds_cap
 
     if not document_path.exists():
         raise FileNotFoundError(f"Document not found: {document_path}")
@@ -2227,8 +2344,10 @@ def run_review(
     # Always computed: the document-size fail-hard inside applies to
     # zero-pack reviews too. WHY: an oversized general review previously
     # skipped the guard entirely and burned spend across every vendor
-    # until oracle2's consecutive-invalid-round abort.
-    budget = _compute_token_budget(draft)
+    # until oracle2's consecutive-invalid-round abort. Zero-pack runs use
+    # tolerant mode: an unknown model ID must not block a general review
+    # whose budget number nothing consumes.
+    budget = _compute_token_budget(draft, strict_models=bool(pack_names))
 
     if pack_names:
         manifest = _load_manifest(pack_dir)
@@ -2306,7 +2425,7 @@ def run_review(
     # snapshot deserve the same guarantee — a Ctrl-C in round 3 must not
     # lose the exact rules the reviewers saw (spend already happened).
     if output_dir is None:
-        output_dir = Path("oracle_reviews") / datetime.now().strftime("%Y%m%d-%H%M%S")
+        output_dir = _default_review_output_dir()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if compliance_context:
@@ -2663,17 +2782,27 @@ def format_findings_report(
                     has_draft = True
                 if entry.get("schema") == "generic":
                     has_generic = True
-                # detection_override lives in the pack file's oracle_metadata,
-                # not the manifest — read it from the pack itself.
-                pack_file = pack_dir / entry.get("file", f"{resolved}.json")
-                if pack_file.exists():
+                # detection_override is persisted in the manifest at
+                # register/rebuild time; fall back to the pack file only
+                # for legacy entries, and LOUDLY — silently skipping a
+                # Section 8 mandated disclosure is the suppression pattern
+                # this module forbids.
+                if "detection_override" in entry:
+                    override = entry.get("detection_override")
+                else:
+                    override = None
+                    pack_file = pack_dir / entry.get("file", f"{resolved}.json")
                     try:
                         pd = json.loads(pack_file.read_text(encoding="utf-8"))
                         override = pd.get("oracle_metadata", {}).get("detection_override")
-                        if override:
-                            override_packs.append(f"{resolved} (--force-type {override})")
-                    except (json.JSONDecodeError, OSError):
-                        pass
+                    except (json.JSONDecodeError, OSError, FileNotFoundError) as e:
+                        LOGGER.warning(
+                            f"Could not read pack file for '{resolved}' while "
+                            f"checking detection_override ({e}) — the Section 8 "
+                            f"force-type disclosure may be incomplete."
+                        )
+                if override:
+                    override_packs.append(f"{resolved} (--force-type {override})")
             except ValueError:
                 lines.append(f"- **{pn}** (not found in library)")
         lines.append("")
@@ -2877,28 +3006,18 @@ def _parse_parts_tokens(parts_str: str, spec: str) -> list[int]:
 
 
 def _max_rounds_arg(value: str) -> int:
-    """argparse type for --max-rounds: integer within 1..hard-cap.
+    """argparse type for --max-rounds: a positive integer.
 
-    The same bounds are re-checked inside run_review (the library
-    boundary); this validator just surfaces the error at parse time with
-    argparse's usage message instead of mid-command.
+    The hard cap itself is enforced (with a clamp + warning) inside
+    run_review via _max_rounds_hard_cap(), so cap policy has one owner;
+    this validator only rejects nonsense at parse time.
     """
     try:
         rounds = int(value)
     except ValueError:
         raise argparse.ArgumentTypeError(f"'{value}' is not an integer")
-    cap_raw = os.environ.get("ORACLE_MAX_ROUNDS_HARD_CAP", "12")
-    try:
-        cap = int(cap_raw)
-    except ValueError:
-        raise argparse.ArgumentTypeError(
-            f"ORACLE_MAX_ROUNDS_HARD_CAP must be an integer, got '{cap_raw}'"
-        )
-    if not 1 <= rounds <= cap:
-        raise argparse.ArgumentTypeError(
-            f"must be between 1 and {cap} (got {rounds}); "
-            f"raise ORACLE_MAX_ROUNDS_HARD_CAP to allow more"
-        )
+    if rounds < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1 (got {rounds})")
     return rounds
 
 
@@ -2947,7 +3066,15 @@ def cmd_review(args: argparse.Namespace) -> None:
             else:
                 pack_parts.pop("__unscoped__")
 
-    output_dir = Path(args.output_dir) if args.output_dir else None
+    # Resolve the session directory HERE and pass it down. WHY: when this
+    # was left None, run_review minted one timestamp and oracle2 minted a
+    # second for session_id; recomputing the dir from session_id below
+    # then pointed at a directory that was never created whenever the two
+    # datetime.now() calls straddled a second boundary — findings_report
+    # crashed with FileNotFoundError AFTER the full multi-vendor spend.
+    output_dir = (
+        Path(args.output_dir) if args.output_dir else _default_review_output_dir()
+    )
 
     # WHY the conversion here: run_review raises (never sys.exits) so the
     # server can surface errors; the CLI boundary is where exceptions
@@ -2968,8 +3095,6 @@ def cmd_review(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     # Generate findings report
-    if output_dir is None:
-        output_dir = Path("oracle_reviews") / session.session_id
     report_path = output_dir / "findings_report.md"
     format_findings_report(
         session, pack_dir,
@@ -3012,6 +3137,11 @@ def cmd_generate_pack(args: argparse.Namespace) -> None:
             non_interactive=getattr(args, 'non_interactive', False),
             detect_implicit=getattr(args, 'implicit', False),
         )
+    except UserAbortError:
+        # A deliberate 'no' at a confirmation prompt is success-shaped for
+        # scripts (exit 0), not an error.
+        print("Aborted.")
+        sys.exit(0)
     except (ValueError, FileNotFoundError, RuntimeError) as e:
         print(f"Error: {e}")
         sys.exit(1)

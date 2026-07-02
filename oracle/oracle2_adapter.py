@@ -32,7 +32,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 LOGGER = logging.getLogger("oracle2_adapter")
 
@@ -207,12 +207,18 @@ def verify_session_dir(session_dir: Path) -> list[str]:
 # was chosen because it doesn't conflict with Markdown link syntax and is
 # visually distinct in prose.  The colon separates pack from rule because
 # both IDs may contain hyphens.
-# WHY no whitespace allowed in either part: reviewer prose contains
-# bracketed asides ("[Note: this contradicts §4]", "[WARNING: unverified]")
-# that the earlier permissive pattern turned into fabricated citations —
-# corrupting exactly the audit trail this exists for. Real identifiers are
-# slug/id shaped and never contain spaces.
-_CITATION_PATTERN = re.compile(r"\[([A-Za-z0-9][\w.\-]*):([A-Za-z0-9][\w.\-]*)\]")
+# WHY no whitespace inside ids but one optional space after the colon:
+# reviewer prose contains bracketed asides ("[Note: this contradicts §4]",
+# "[WARNING: unverified]") that the earlier permissive pattern turned into
+# fabricated citations — but LLM reviewers routinely emit "[pack: rule-1]"
+# with a space, which the fully-strict pattern silently dropped from the
+# audit trail. The rule id must contain a digit: every schema's ids do
+# (RULE-0042, far-15-001, stmt-001), and prose words after an aside colon
+# ("[Note: this]") don't — that requirement is what keeps space tolerance
+# from re-admitting bracketed prose.
+_CITATION_PATTERN = re.compile(
+    r"\[([A-Za-z0-9][\w.\-]*):\s?((?=[\w.\-]*\d)[A-Za-z0-9][\w.\-]*)\]"
+)
 
 # Rendered compliance-context shapes (Section 7.2 renderers):
 #   [pack:rule] [MPR 1] §4.1.1 [SHALL]: text        (gpcm)
@@ -231,42 +237,64 @@ _SECTION_REF = re.compile(
 )
 
 
-def _build_context_index(
-    compliance_context: str,
-) -> tuple[dict[tuple[str, str], str], dict[str, str], dict[str, list[tuple[str, str]]]]:
-    """Index the rendered compliance text for citation reconstruction.
+class ContextIndex(NamedTuple):
+    """Citation-reconstruction index over the rendered compliance text.
 
-    Returns (rule→section, pack_id→authority_label, section→[(pack, rule)]).
+    known_packs is built from the Authority headers as well as rule lines.
+    WHY: a Tier-1-only FAR pack, or a gpcm/generic pack whose rules carry
+    no section (rendered without §), contributes zero rule lines — using
+    rule lines alone as the credibility set made pass 1 silently drop
+    every legitimate explicit citation to such a pack in multi-pack
+    reviews.
     """
+
+    rule_sections: dict          # (pack_id, rule_id) -> section
+    authority_labels: dict       # pack_id -> "Authority N"
+    section_rules: dict          # section -> [(pack_id, rule_id)]
+    known_packs: frozenset       # every pack id rendered into the context
+
+
+def _build_context_index(compliance_context: str) -> ContextIndex:
+    """Index the rendered compliance text once per session (it is fixed
+    per review — rebuilding it per issue rescanned up to ~320KB of text
+    hundreds of times)."""
     rule_sections: dict[tuple[str, str], str] = {}
     authority_labels: dict[str, str] = {}
     section_rules: dict[str, list[tuple[str, str]]] = {}
+    known_packs: set[str] = set()
 
     for m in _CONTEXT_AUTHORITY.finditer(compliance_context):
         authority_labels[m.group(2)] = f"Authority {m.group(1)}"
+        known_packs.add(m.group(2))
     for m in _CONTEXT_RULE_LINE.finditer(compliance_context):
         pack_id, rule_id, section = m.group(1), m.group(2), m.group(3).rstrip(".")
         rule_sections[(pack_id, rule_id)] = section
         section_rules.setdefault(section, []).append((pack_id, rule_id))
-    return rule_sections, authority_labels, section_rules
+        known_packs.add(pack_id)
+    return ContextIndex(
+        rule_sections, authority_labels, section_rules, frozenset(known_packs)
+    )
 
 
 def extract_pack_citations(
     evidence_text: str,
     compliance_context: str | None = None,
+    context_index: ContextIndex | None = None,
 ) -> list[PackCitation]:
     """Extract pack rule citations from reviewer evidence text.
 
     Pass 1 scans for explicit [pack_id:rule_id] identifiers embedded by
-    the pack renderers. Pass 2 (spec 7.3 fuzzy matching, only when
-    compliance_context is available) resolves bare section references
-    ("§15.304", "FAR 15.304") against the rendered context — but only
-    when the section maps to exactly one rule, because a guessed citation
-    is worse than an empty one in an audit trail.
+    the pack renderers. Pass 2 (spec 7.3 fuzzy matching, only when a
+    context is available) resolves bare section references ("§15.304",
+    "FAR 15.304") against the rendered context — but only when the
+    section maps to exactly one rule, because a guessed citation is worse
+    than an empty one in an audit trail.
 
     Args:
         evidence_text: The reviewer's prose (from best_evidence / core_problem).
         compliance_context: The full rendered compliance text, for fuzzy matching.
+        context_index: A prebuilt index (build_review_result builds it once
+            per session); when provided, compliance_context is not re-scanned.
 
     Returns:
         List of PackCitation objects. May be empty if no citations found.
@@ -274,13 +302,9 @@ def extract_pack_citations(
     citations: list[PackCitation] = []
     seen: set[tuple[str, str]] = set()
 
-    rule_sections: dict[tuple[str, str], str] = {}
-    authority_labels: dict[str, str] = {}
-    section_rules: dict[str, list[tuple[str, str]]] = {}
-    if compliance_context:
-        rule_sections, authority_labels, section_rules = _build_context_index(
-            compliance_context
-        )
+    index = context_index
+    if index is None and compliance_context:
+        index = _build_context_index(compliance_context)
 
     def _add(pack_id: str, rule_id: str) -> None:
         key = (pack_id, rule_id)
@@ -289,9 +313,9 @@ def extract_pack_citations(
         seen.add(key)
         citations.append(PackCitation(
             pack_id=pack_id,
-            authority_label=authority_labels.get(pack_id, ""),
+            authority_label=index.authority_labels.get(pack_id, "") if index else "",
             rule_id=rule_id,
-            section=rule_sections.get(key, ""),
+            section=index.rule_sections.get(key, "") if index else "",
         ))
 
     # Pass 1: Explicit [pack_id:rule_id] patterns
@@ -304,19 +328,22 @@ def extract_pack_citations(
             continue
         if pack_id.startswith("http"):
             continue
-        # With a context available, only pack ids that actually appeared in
-        # it are credible — this drops timestamp-shaped noise like [12:30].
-        if rule_sections and not any(p == pack_id for p, _ in rule_sections):
+        # With a context available, only pack ids that actually appeared
+        # in it (rule lines OR Authority headers) are credible — drops
+        # timestamp-shaped noise like [12:30] without dropping packs whose
+        # rendered rules carry no § section.
+        if index and index.known_packs and pack_id not in index.known_packs:
             continue
 
         _add(pack_id, rule_id)
 
     # Pass 2: bare section references, resolved against the context index.
-    for match in _SECTION_REF.finditer(evidence_text):
-        section = match.group(1).rstrip(".")
-        matches = section_rules.get(section, [])
-        if len(matches) == 1:
-            _add(*matches[0])
+    if index:
+        for match in _SECTION_REF.finditer(evidence_text):
+            section = match.group(1).rstrip(".")
+            matches = index.section_rules.get(section, [])
+            if len(matches) == 1:
+                _add(*matches[0])
 
     return citations
 
@@ -327,7 +354,7 @@ def extract_pack_citations(
 
 def _parse_normalized_issues(
     file_path: Path,
-    compliance_context: str | None = None,
+    context_index: ContextIndex | None = None,
 ) -> tuple[list[NormalizedIssue], bool, int]:
     """Parse a normalized-issues round file into NormalizedIssue objects.
 
@@ -408,7 +435,7 @@ def _parse_normalized_issues(
             recommended_fix=recommended_fix,
             source_oracles=source_oracles,
             evidence_text=evidence,
-            pack_citations=extract_pack_citations(evidence, compliance_context),
+            pack_citations=extract_pack_citations(evidence, context_index=context_index),
         )
         issues.append(issue)
 
@@ -493,6 +520,12 @@ def build_review_result(
     final_draft = final_draft_path.read_text(encoding="utf-8")
 
     # --- Build rounds ---
+    # The context index is fixed per session — build it once here instead
+    # of re-scanning the (up to ~320KB) compliance text per issue.
+    context_index = (
+        _build_context_index(compliance_context) if compliance_context else None
+    )
+
     rounds: list[RoundData] = []
     recognized_normalized = 0
     duplicate_count = 0
@@ -504,7 +537,7 @@ def build_review_result(
         normalized: list[NormalizedIssue] = []
         if norm_path.exists():
             normalized, recognized, dropped = _parse_normalized_issues(
-                norm_path, compliance_context
+                norm_path, context_index
             )
             if recognized:
                 recognized_normalized += 1
