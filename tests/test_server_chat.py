@@ -349,8 +349,10 @@ def test_chat_synthesizes_pure_tin_workflow_from_multiple_3012a_rules(workspace_
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "PASS"
-    assert "hazard-avoidance issue" in body["response"]
-    assert "test internally and externally for pure tin" in body["response"]
+    # WHY rule-derived assertions: the guidance now quotes the matched rules'
+    # own text instead of hardcoded engine claims (rules are data).
+    assert "hazard-avoidance clause" in body["response"]
+    assert "tested internally and externally for pure tin" in body["response"]
     assert "solder dip" in body["response"]
     assert any("MSFC-STD-3012A section 5.4.4.1" in citation for citation in body["citations"])
     assert body["follow_ups"] == [
@@ -1213,3 +1215,311 @@ def test_chat_falls_back_when_summary_validation_fails(workspace_tmp_path, monke
     assert "stage_4_prohibited_decision_language" in body["diagnostics"]["validation_failures"]
     assert body["stage_artifacts"]["reasoning"]["llm_model"] == "reasoner"
     assert "summary" not in body["stage_artifacts"]
+
+
+def _rfcb_approval_pack_rules() -> list[dict[str, Any]]:
+    """Rules whose verbatim text contains grader-sensitive words ("approval")."""
+    return [
+        {
+            "rule_id": "RULE-001",
+            "section": "4.1.5.5",
+            "page": 24,
+            "obligation_type": "mandatory",
+            "obligation_keyword": "shall",
+            "statement_text": "The process shall be subject to review and approval of the RFCB.",
+            "subject": "Standard NDE review",
+            "requirement": "The process requires RFCB review and approval.",
+            "keywords": ["review", "approval", "NDE"],
+            "applies_to": ["nde_process"],
+        },
+    ]
+
+
+def test_chat_grounded_answer_quoting_approval_rule_passes_grader(workspace_tmp_path, monkeypatch):
+    """Regression: verbatim rule quotes containing "approval" must not trip the
+    prohibited-decision-language gate — quoting the authority is grounded."""
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    server._chat_sessions.clear()
+
+    slug = _register_pack(
+        workspace_tmp_path,
+        pack_dir,
+        _chat_multi_rule_pack_payload(
+            standard_id="NASA-STD-5009C",
+            standard_title="NASA Fracture Control Standard",
+            rules=_rfcb_approval_pack_rules(),
+        ),
+        "5009c_rfcb.json",
+    )
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/oracle/chat",
+        json={
+            "message": "What does the standard say about NDE process review?",
+            "selected_packs": [slug],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "PASS"
+    assert "RFCB review and approval" in body["response"]
+    assert body["diagnostics"]["fallback_used"] is False
+    assert body["diagnostics"]["validation_failures"] == []
+
+
+def test_chat_single_pack_vs_query_returns_answer_not_500(workspace_tmp_path, monkeypatch):
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    server._chat_sessions.clear()
+
+    slug = _register_pack(
+        workspace_tmp_path,
+        pack_dir,
+        _chat_pack_payload(
+            standard_id="NASA-STD-5009C",
+            standard_title="NASA Fracture Control Standard",
+            statement_text="Pure tin finishes shall not be used on mission hardware connectors.",
+            section="Table V Note 6",
+            page=42,
+            keywords=["pure tin", "connector plating"],
+        ),
+        "5009c_vs.json",
+    )
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/oracle/chat",
+        json={
+            "message": "compare pure tin vs cadmium finishes",
+            "selected_packs": [slug],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    # A single-pack "vs" query compares topics, not standards — it must route
+    # through the normal single-pack answer path.
+    assert body["status"] == "PASS"
+    assert body["compare_only"] is False
+    assert not body["response"].startswith("Comparison across selected standards.")
+    assert "NASA-STD-5009C" in body["citations"][0]
+
+
+def test_chat_explicit_compare_mode_with_single_pack_does_not_crash(workspace_tmp_path, monkeypatch):
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    server._chat_sessions.clear()
+
+    slug = _register_pack(
+        workspace_tmp_path,
+        pack_dir,
+        _chat_pack_payload(
+            standard_id="NASA-STD-5009C",
+            standard_title="NASA Fracture Control Standard",
+            statement_text="Pure tin finishes shall not be used on mission hardware connectors.",
+            section="Table V Note 6",
+            page=42,
+            keywords=["pure tin", "connector plating"],
+        ),
+        "5009c_single_compare.json",
+    )
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/oracle/chat",
+        json={
+            "message": "Compare the selected standards on pure tin finishes.",
+            "selected_packs": [slug],
+            "compare_only": True,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "PASS"
+    assert body["compare_only"] is True
+    assert any("Select a second pack" in follow_up for follow_up in body["follow_ups"])
+
+
+def _connector_plating_rules(count: int) -> list[dict[str, Any]]:
+    return [
+        {
+            "rule_id": f"RULE-{index:03d}",
+            "section": f"5.{index}",
+            "page": index + 1,
+            "obligation_type": "mandatory",
+            "obligation_keyword": "shall",
+            "statement_text": f"Connector plating on assembly {index} shall be inspected before use.",
+            "subject": f"Connector plating {index}",
+            "requirement": f"Connector plating on assembly {index} shall be inspected before use.",
+            "keywords": ["connector plating"],
+            "applies_to": ["connectors"],
+        }
+        for index in range(1, count + 1)
+    ]
+
+
+def test_chat_caps_stage_artifact_matches_to_context_bundle(workspace_tmp_path, monkeypatch):
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    server._chat_sessions.clear()
+
+    slug = _register_pack(
+        workspace_tmp_path,
+        pack_dir,
+        _chat_multi_rule_pack_payload(
+            standard_id="NASA-STD-5009C",
+            standard_title="NASA Fracture Control Standard",
+            rules=_connector_plating_rules(8),
+        ),
+        "5009c_many_rules.json",
+    )
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/oracle/chat",
+        json={
+            "message": "What inspections apply to connector plating?",
+            "selected_packs": [slug],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "PASS"
+    assert len(body["stage_artifacts"]["retrieval"]["matches"]) == 5
+
+
+def test_chat_stage_artifact_match_cap_env_override(workspace_tmp_path, monkeypatch):
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    monkeypatch.setenv("ORACLE_CHAT_MAX_CONTEXT_RULES", "2")
+    server._chat_sessions.clear()
+
+    slug = _register_pack(
+        workspace_tmp_path,
+        pack_dir,
+        _chat_multi_rule_pack_payload(
+            standard_id="NASA-STD-5009C",
+            standard_title="NASA Fracture Control Standard",
+            rules=_connector_plating_rules(8),
+        ),
+        "5009c_many_rules_env.json",
+    )
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/oracle/chat",
+        json={
+            "message": "What inspections apply to connector plating?",
+            "selected_packs": [slug],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["stage_artifacts"]["retrieval"]["matches"]) == 2
+
+
+def test_chat_sessions_are_capped_with_lru_eviction(workspace_tmp_path, monkeypatch):
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    monkeypatch.setenv("ORACLE_CHAT_MAX_SESSIONS", "3")
+    server._chat_sessions.clear()
+
+    client = TestClient(server.app)
+    for index in range(5):
+        response = client.post(
+            "/oracle/chat",
+            json={"session_id": f"chat-lru-{index}", "message": "hello"},
+        )
+        assert response.status_code == 200
+
+    assert len(server._chat_sessions) == 3
+    assert set(server._chat_sessions) == {"chat-lru-2", "chat-lru-3", "chat-lru-4"}
+
+    # Re-touching an old session marks it most-recently-used, so the next new
+    # session evicts a different (least-recently-used) one.
+    client.post("/oracle/chat", json={"session_id": "chat-lru-2", "message": "hello again"})
+    client.post("/oracle/chat", json={"session_id": "chat-lru-5", "message": "hello"})
+    assert set(server._chat_sessions) == {"chat-lru-2", "chat-lru-4", "chat-lru-5"}
+
+
+def test_chat_scope_note_suppressed_when_any_rule_is_broader_than_connectors(
+    workspace_tmp_path,
+    monkeypatch,
+):
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    monkeypatch.setenv("ORACLE_SECONDARY_RATIONALE_JSON", "")
+    server._chat_sessions.clear()
+
+    slug = _register_pack(
+        workspace_tmp_path,
+        pack_dir,
+        _chat_multi_rule_pack_payload(
+            standard_id="MSFC-STD-3012A",
+            standard_title="EEE Parts Management Requirements",
+            rules=[
+                {
+                    "rule_id": "RULE-001",
+                    "section": "14/",
+                    "page": 50,
+                    "obligation_type": "prohibition",
+                    "obligation_keyword": "must not",
+                    "statement_text": (
+                        "Cadmium plated connectors and connector accessories must not be "
+                        "used in space flight applications."
+                    ),
+                    "subject": "Connector accessory finish restriction",
+                    "requirement": (
+                        "Cadmium plated connectors and connector accessories must not be "
+                        "used in space flight applications."
+                    ),
+                    "keywords": ["cadmium plated parts", "connector accessories", "space flight applications"],
+                    "applies_to": ["spaceflight hardware"],
+                },
+                {
+                    "rule_id": "RULE-002",
+                    "section": "15/",
+                    "page": 51,
+                    "obligation_type": "prohibition",
+                    "obligation_keyword": "shall not",
+                    "statement_text": (
+                        "Cadmium shall not be used anywhere on space flight hardware."
+                    ),
+                    "subject": "Cadmium restriction",
+                    "requirement": "Cadmium shall not be used anywhere on space flight hardware.",
+                    "keywords": ["cadmium", "space flight applications"],
+                    "applies_to": ["spaceflight hardware"],
+                },
+            ],
+        ),
+        "3012a_cadmium_mixed_scope.json",
+    )
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/oracle/chat",
+        json={
+            "message": "why can't we use cd in spaceflight applications",
+            "selected_packs": [slug],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "PASS"
+    # A broader (non-connector) cadmium ban is among the matches, so asserting
+    # "no blanket ban" would be false — the scope note must be suppressed.
+    assert "do not establish a blanket ban" not in body["response"]
