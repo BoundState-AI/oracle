@@ -144,9 +144,17 @@ def _bootstrap_builtin_packs(pack_dir: Path) -> None:
 
     manifest = _load_manifest(pack_dir) if manifest_exists else {"packs": {}}
 
+    # WHY tombstones: bootstrap re-registers any builtin missing from the
+    # manifest, which silently resurrected packs the user had explicitly
+    # removed with remove-pack on the very next command. A removed builtin
+    # stays removed until the user re-adds it deliberately.
+    removed_builtins = set(manifest.get("removed_builtins", []))
+
     for spec in BUILTIN_PACK_SPECS:
         slug = _slugify(spec["name"])
         if slug in manifest.get("packs", {}):
+            continue
+        if slug in removed_builtins:
             continue
         src = builtin_dir / spec["filename"]
         if not src.exists():
@@ -192,6 +200,20 @@ def _manifest_path(pack_dir: Path) -> Path:
     return pack_dir / "manifest.json"
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write text via temp file + os.replace so a crash never tears a file.
+
+    WHY: manifest.json and pack JSONs are the trust roots of the library.
+    A partial write followed by a crash would trigger manifest rebuild or
+    hash-mismatch refusals on the next command. os.replace is atomic on
+    POSIX within one filesystem. The temp name has no .json extension so
+    pack globs ("*.json") never see in-flight files.
+    """
+    tmp = path.with_name(f".{path.name}.tmp{os.getpid()}")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def _load_manifest(pack_dir: Path) -> dict:
     """Load the pack library manifest, creating it if missing."""
     mp = _manifest_path(pack_dir)
@@ -201,7 +223,7 @@ def _load_manifest(pack_dir: Path) -> dict:
             "description": "ORACLE Rule Pack Library — BoundState AI",
             "packs": {},
         }
-        mp.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        _atomic_write_text(mp, json.dumps(manifest, indent=2))
         return manifest
 
     try:
@@ -213,10 +235,10 @@ def _load_manifest(pack_dir: Path) -> dict:
 
 
 def _save_manifest(manifest: dict, pack_dir: Path) -> None:
-    """Write the manifest to disk."""
-    mp = _manifest_path(pack_dir)
-    mp.write_text(
-        json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
+    """Write the manifest to disk (atomically — see _atomic_write_text)."""
+    _atomic_write_text(
+        _manifest_path(pack_dir),
+        json.dumps(manifest, indent=2, ensure_ascii=False),
     )
 
 
@@ -253,6 +275,30 @@ def _rebuild_manifest(pack_dir: Path) -> dict:
             # Compute content hash from pack file
             content_hash = _compute_content_hash(pack_file)
 
+            # Promotion state during rebuild (Section 4.5 vs trust): the
+            # pack file's self-declared "promoted" is only honored when
+            # the file carries complete promotion evidence (who + when).
+            # WHY: a rebuild stamps a fresh content_hash, so an edited
+            # file claiming "promoted" would otherwise launder tampering
+            # into blessed status with zero ceremony. Evidence-backed
+            # restores are still flagged rebuilt=true and warned about so
+            # the operator can re-verify.
+            status = meta.get("status", "draft")
+            if status == "promoted" and not (
+                meta.get("promoted_at") and meta.get("promoted_by")
+            ):
+                LOGGER.warning(
+                    f"  Pack '{slug}' claims promoted status without promotion "
+                    f"evidence (promoted_at/promoted_by) — demoting to draft"
+                )
+                status = "draft"
+            elif status == "promoted":
+                LOGGER.warning(
+                    f"  Pack '{slug}' promotion state restored from its own "
+                    f"oracle_metadata during rebuild — re-verify with "
+                    f"promote-pack if the file's integrity is in doubt"
+                )
+
             manifest["packs"][slug] = {
                 "name": meta.get("name", slug),
                 "slug": slug,
@@ -262,14 +308,15 @@ def _rebuild_manifest(pack_dir: Path) -> dict:
                 "description": meta.get("description", ""),
                 "rule_count": _count_rules(pack_data),
                 "version": pack_data.get("version", "1.0.0"),
-                "status": meta.get("status", "draft"),
+                "status": status,
                 "extraction_status": pack_data.get("extraction_status", "complete"),
                 "content_hash": content_hash,
                 "added_at": meta.get("added_at", ""),
-                "promoted_at": meta.get("promoted_at"),
-                "promoted_by": meta.get("promoted_by"),
+                "promoted_at": meta.get("promoted_at") if status == "promoted" else None,
+                "promoted_by": meta.get("promoted_by") if status == "promoted" else None,
                 "source_document": pack_data.get("source_document", ""),
                 "source_document_hash": meta.get("source_document_hash"),
+                "rebuilt": True,
             }
             LOGGER.info(f"  Rebuilt entry: {slug} ({_count_rules(pack_data)} rules)")
         except (json.JSONDecodeError, OSError) as e:
@@ -452,9 +499,7 @@ def register_pack(
             archive_path.write_bytes(dest.read_bytes())
             LOGGER.info(f"Archived prior pack version: archive/{archive_path.name}")
 
-    dest.write_text(
-        json.dumps(pack_data, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    _atomic_write_text(dest, json.dumps(pack_data, indent=2, ensure_ascii=False))
 
     # Compute content hash
     content_hash = _compute_content_hash(dest)
@@ -471,13 +516,19 @@ def register_pack(
                 meta["source_document_hash"] = _compute_file_hash(source_path)
                 # Write back to the pack file so it's persisted
                 pack_data["oracle_metadata"] = meta
-                dest.write_text(
-                    json.dumps(pack_data, indent=2, ensure_ascii=False), encoding="utf-8"
+                _atomic_write_text(
+                    dest, json.dumps(pack_data, indent=2, ensure_ascii=False)
                 )
                 content_hash = _compute_content_hash(dest)  # Recompute after update
                 LOGGER.info(f"Computed source document hash for '{slug}'")
 
     # Update manifest
+    # A deliberate re-add clears any builtin tombstone (see remove_pack).
+    if slug in manifest.get("removed_builtins", []):
+        manifest["removed_builtins"] = [
+            s for s in manifest["removed_builtins"] if s != slug
+        ]
+
     manifest["packs"][slug] = {
         "name": meta.get("name", name),
         "slug": slug,
@@ -555,7 +606,11 @@ def load_pack(pack_name: str, pack_dir: Path, verify: bool = True) -> tuple[dict
 
 
 def remove_pack(pack_name: str, pack_dir: Path) -> bool:
-    """Remove a pack from the library (manifest + file)."""
+    """Remove a pack from the library (manifest + file).
+
+    Removing a builtin pack records a tombstone so bootstrap does not
+    silently re-seed it on the next command (see _bootstrap_builtin_packs).
+    """
     manifest = _load_manifest(pack_dir)
     try:
         resolved = _resolve_pack_name(pack_name, manifest)
@@ -569,6 +624,16 @@ def remove_pack(pack_name: str, pack_dir: Path) -> bool:
     pack_path = pack_dir / entry["file"]
     if pack_path.exists():
         pack_path.unlink()
+
+    builtin_slugs = {_slugify(spec["name"]) for spec in BUILTIN_PACK_SPECS}
+    if resolved in builtin_slugs:
+        tombstones = set(manifest.get("removed_builtins", []))
+        tombstones.add(resolved)
+        manifest["removed_builtins"] = sorted(tombstones)
+        LOGGER.info(
+            f"Builtin pack '{resolved}' tombstoned — bootstrap will not "
+            f"re-seed it (re-add deliberately with add-pack)"
+        )
 
     _save_manifest(manifest, pack_dir)
     LOGGER.info(f"Removed pack '{resolved}'")
@@ -610,8 +675,27 @@ def promote_pack(
     resolved = _resolve_pack_name(pack_name, manifest)
     entry = manifest["packs"][resolved]
 
-    # Load the actual pack file
+    # --- Gate 0: Content-hash tamper check ---
+    # WHY: promote used to read the file raw and then re-stamp its hash
+    # into the manifest at the end — so a pack file edited on disk after
+    # registration (which `review` correctly refuses via load_pack) could
+    # be laundered into promoted, blessed status by the very command that
+    # exists to be the human trust gate. Fail closed exactly like
+    # load_pack(verify=True) does.
     pack_path = pack_dir / entry["file"]
+    if not pack_path.exists():
+        raise ValueError(f"Pack file missing: {pack_path}")
+    expected_hash = entry.get("content_hash", "")
+    if expected_hash:
+        actual_hash = _compute_content_hash(pack_path)
+        if actual_hash != expected_hash:
+            raise ValueError(
+                f"Pack '{resolved}' has been modified on disk since it was "
+                f"registered (content hash mismatch) — refusing to promote. "
+                f"Re-register it with add-pack --overwrite, review the new "
+                f"content, then promote."
+            )
+
     pack_data = json.loads(pack_path.read_text(encoding="utf-8"))
     meta = pack_data.get("oracle_metadata", {})
 
@@ -722,8 +806,8 @@ def promote_pack(
 
     # Write updated pack file
     pack_data["oracle_metadata"] = meta
-    pack_path.write_text(
-        json.dumps(pack_data, indent=2, ensure_ascii=False), encoding="utf-8"
+    _atomic_write_text(
+        pack_path, json.dumps(pack_data, indent=2, ensure_ascii=False)
     )
 
     # Update manifest
@@ -878,14 +962,18 @@ def _detect_document_type(
     if best_conf == 0.0:
         return "generic", 1.0
 
-    # Low-confidence handling
+    # Low-confidence handling.
+    # WHY raise, not sys.exit: SystemExit is a BaseException that escapes
+    # the server's review-thread handler and CI wrappers. And WHY the
+    # isatty check counts as non-interactive: a piped/CI run without a
+    # terminal used to hit input() and die with a raw EOFError instead of
+    # this fail-closed message (promote_pack already did this correctly).
     if best_conf < 0.7:
-        if non_interactive:
-            LOGGER.error(
+        if non_interactive or not sys.stdin.isatty():
+            raise ValueError(
                 f"Detection confidence too low ({best_conf:.2f}) for non-interactive mode. "
                 f"Use --force-type <type> to override."
             )
-            sys.exit(1)
 
         # Interactive confirmation
         response = input(
@@ -893,8 +981,7 @@ def _detect_document_type(
             f"Proceed? [Y/n/override]: "
         ).strip().lower()
         if response == "n":
-            print("Aborted.")
-            sys.exit(0)
+            raise ValueError("Aborted by user at low-confidence detection prompt.")
         elif response == "override":
             override = input("Enter type (tagged_standard|far_style|cfr_style|generic): ").strip()
             if override in ("tagged_standard", "far_style", "cfr_style", "generic"):
@@ -1717,6 +1804,37 @@ def _estimate_tokens(text: str) -> int:
     return len(text) // 4
 
 
+def _configured_review_models() -> list[str]:
+    """Model IDs of the configured reviewer roster.
+
+    Derived from oracle2.ORACLE_ROSTER (which already applies the
+    ORACLE_*_MODEL env overrides at import) rather than a hand-maintained
+    duplicate list. WHY: the previous copy silently went stale whenever
+    the roster defaults changed, making the budget compute against the
+    wrong models with no error. Read-only import — oracle2 stays a black box.
+
+    Falls back to the env vars with roster defaults when oracle2 is
+    stubbed out (tests replace it with a minimal module).
+    """
+    import importlib
+
+    _oracle2 = importlib.import_module("oracle.oracle2")
+    roster = getattr(_oracle2, "ORACLE_ROSTER", None)
+    if roster:
+        return [cfg.model for cfg in roster.values()]
+    return [
+        os.environ.get(var, default)
+        for var, default in (
+            ("ORACLE_BETH_MODEL", "claude-opus-4-8"),
+            ("ORACLE_SONNET_MODEL", "claude-sonnet-4-6"),
+            ("ORACLE_FRAN_MODEL", "gpt-5.4"),
+            ("ORACLE_CODEX_MODEL", "gpt-5.4"),
+            ("ORACLE_GROK_MODEL", "grok-4.20"),
+            ("ORACLE_GEMINI_MODEL", "gemini-2.5-pro"),
+        )
+    ]
+
+
 def _compute_token_budget(
     document_text: str,
 ) -> int:
@@ -1730,6 +1848,13 @@ def _compute_token_budget(
                          - per_round_overhead (2,000)
 
     Capped by ORACLE_MAX_CONTEXT_TOKENS (default 80,000).
+
+    Raises:
+        ValueError: on unknown model without a fixed cap, or when the
+            document alone exceeds the smallest configured context window.
+            WHY raise, not sys.exit: this runs inside server review threads
+            whose error handling deliberately catches Exception only —
+            SystemExit escaped it and stranded sessions in-flight forever.
     """
     SYSTEM_RESERVE = 4_000
     RESPONSE_HEADROOM = 8_000
@@ -1737,22 +1862,11 @@ def _compute_token_budget(
 
     doc_tokens = _estimate_tokens(document_text)
 
-    # Determine minimum context window across configured models
-    model_vars = [
-        ("ORACLE_BETH_MODEL", "claude-opus-4-8"),
-        ("ORACLE_SONNET_MODEL", "claude-sonnet-4-6"),
-        ("ORACLE_FRAN_MODEL", "gpt-5.4"),
-        ("ORACLE_CODEX_MODEL", "gpt-5.4"),
-        ("ORACLE_GROK_MODEL", "grok-4.20"),
-        ("ORACLE_GEMINI_MODEL", "gemini-2.5-pro"),
-    ]
-
     max_context_env = os.environ.get("ORACLE_MAX_CONTEXT_TOKENS")
     max_context_cap = int(max_context_env) if max_context_env else 80_000
 
     min_window = None
-    for var_name, default_model in model_vars:
-        model_id = os.environ.get(var_name, default_model)
+    for model_id in _configured_review_models():
         window = MODEL_CONTEXT_WINDOWS.get(model_id)
         if window is None:
             if max_context_env:
@@ -1761,13 +1875,18 @@ def _compute_token_budget(
                     f"Unknown model '{model_id}'. Using ORACLE_MAX_CONTEXT_TOKENS "
                     f"({max_context_cap}) as fixed budget."
                 )
-                return max(0, max_context_cap - doc_tokens - SYSTEM_RESERVE - RESPONSE_HEADROOM - ROUND_OVERHEAD)
-            else:
-                LOGGER.error(
-                    f"Unknown model '{model_id}'. Context window size is required for "
-                    f"token budget calculation. Set ORACLE_MAX_CONTEXT_TOKENS or use a known model ID."
-                )
-                sys.exit(1)
+                fixed = max_context_cap - doc_tokens - SYSTEM_RESERVE - RESPONSE_HEADROOM - ROUND_OVERHEAD
+                if fixed <= 0:
+                    raise ValueError(
+                        f"Document too large (est. {doc_tokens} tokens) for the fixed "
+                        f"ORACLE_MAX_CONTEXT_TOKENS budget ({max_context_cap}). "
+                        f"Reduce document size or raise the cap."
+                    )
+                return fixed
+            raise ValueError(
+                f"Unknown model '{model_id}'. Context window size is required for "
+                f"token budget calculation. Set ORACLE_MAX_CONTEXT_TOKENS or use a known model ID."
+            )
         if min_window is None or window < min_window:
             min_window = window
 
@@ -1776,12 +1895,11 @@ def _compute_token_budget(
     effective = min(max_context_cap, computed_budget)
 
     if effective <= 0:
-        LOGGER.error(
+        raise ValueError(
             f"Document too large (est. {doc_tokens} tokens) for the smallest "
             f"configured model context window ({min_window} tokens). "
             f"Reduce document size or increase model context capacity."
         )
-        sys.exit(1)
 
     LOGGER.info(
         f"Token budget: {effective} tokens "
@@ -1790,61 +1908,135 @@ def _compute_token_budget(
     return effective
 
 
+def _reduce_section(section: dict) -> tuple[str, str] | None:
+    """Produce a per-schema reduced rendering of one pack section (§7.2 a–c).
+
+    Returns (reduced_labeled_text, warning) or None when no reduction is
+    available for this schema/state. Reduced forms always say what was
+    omitted — never silent truncation.
+    """
+    pack_data, pack_id = section["data"], section["pack_id"]
+    schema = _detect_pack_schema(pack_data)
+
+    if schema == "far" and section["parts"]:
+        # (a) Drop Tier 2 detail, keep the always-included Tier 1 summary.
+        reduced = _render_pack_for_oracle(pack_data, pack_id, parts=None)
+        note = (
+            f"NOTE: Tier 2 detail for Parts {section['parts']} omitted — over "
+            f"token budget. Tier 1 summary retained."
+        )
+        warning = (
+            f"Pack '{section['name']}': Tier 2 part detail dropped to fit "
+            f"token budget (Tier 1 summary retained)."
+        )
+    elif schema == "generic":
+        # (b) Critical + high severity rules only, with omitted count.
+        rules = pack_data.get("rules", [])
+        kept_rules = [
+            r for r in rules
+            if isinstance(r, dict) and r.get("severity") in ("critical", "high")
+        ]
+        if len(kept_rules) == len(rules):
+            return None
+        reduced_data = {**pack_data, "rules": kept_rules}
+        reduced = _render_pack_for_oracle(reduced_data, pack_id)
+        omitted = len(rules) - len(kept_rules)
+        note = f"NOTE: {omitted} medium/low severity rule(s) omitted — over token budget."
+        warning = (
+            f"Pack '{section['name']}': {omitted} medium/low severity rules "
+            f"omitted to fit token budget."
+        )
+    elif schema == "gpcm":
+        # (c) MUA-relevant requirements only, with omitted count.
+        reqs = pack_data.get("requirements", [])
+        kept_reqs = [r for r in reqs if isinstance(r, dict) and r.get("mua_relevant")]
+        if not kept_reqs or len(kept_reqs) == len(reqs):
+            return None
+        reduced_data = {**pack_data, "requirements": kept_reqs}
+        reduced = _render_pack_for_oracle(reduced_data, pack_id)
+        omitted = len(reqs) - len(kept_reqs)
+        note = f"NOTE: {omitted} non-MUA requirement(s) omitted — over token budget."
+        warning = (
+            f"Pack '{section['name']}': {omitted} non-MUA requirements "
+            f"omitted to fit token budget."
+        )
+    else:
+        return None
+
+    return f"{section['label']}\n\n{reduced}\n\n{note}", warning
+
+
 def _apply_budget_reduction(
-    rendered_sections: list[tuple[str, dict, str]],
+    rendered_sections: list[dict],
     budget_tokens: int,
 ) -> tuple[str, list[str]]:
     """Apply deterministic token budget reduction to rendered compliance text.
 
-    Reduction order (Section 7.2):
-      a. FAR packs without explicit parts: Tier 1 summary only
-      b. Generic packs: critical + high severity only
-      c. GPCM packs: MUA-relevant first, then fill
-      d. Truncate lowest-priority pack to summary
+    Reduction order (Section 7.2), each step re-measured before the next:
+      a. FAR packs with explicit parts: drop Tier 2, keep Tier 1 summary
+         (FAR without parts already renders Tier-1 only)
+      b. Generic packs: critical + high severity only, omitted count noted
+      c. GPCM packs: MUA-relevant requirements only, omitted count noted
+      d. Drop whole lowest-priority packs to summary stubs
+      e. Last resort: character truncation with banner
+    Steps a–c run per pack from lowest priority (last in --packs) to
+    highest, so the pack the user listed first keeps the most detail.
 
     Args:
-        rendered_sections: List of (rendered_text, pack_data, pack_name) tuples.
+        rendered_sections: List of section dicts with keys
+            label, text, data, name, pack_id, parts.
         budget_tokens: Available token budget.
 
     Returns:
         (combined_text, warnings) tuple.
     """
     warnings: list[str] = []
-    combined = "\n\n---\n\n".join(text for text, _, _ in rendered_sections)
+
+    def _texts() -> list[str]:
+        return [s["text"] for s in kept]
+
+    kept: list[dict] = [dict(s) for s in rendered_sections]
+    combined = "\n\n---\n\n".join(_texts())
 
     if _estimate_tokens(combined) <= budget_tokens:
         return combined, warnings  # Within budget, no reduction needed
 
-    # Deterministic reduction: remove full packs from the back (lowest
-    # priority first), collecting stubs separately. Stubs are appended
-    # AFTER the loop so they can't be re-popped on the next iteration.
-    kept: list[tuple[str, dict, str]] = list(rendered_sections)
+    # Steps a–c: per-schema reduction, lowest-priority pack first.
+    for section in reversed(kept):
+        reduction = _reduce_section(section)
+        if reduction is None:
+            continue
+        section["text"], warning = reduction
+        warnings.append(warning)
+        if _estimate_tokens("\n\n---\n\n".join(_texts())) <= budget_tokens:
+            return "\n\n---\n\n".join(_texts()), warnings
+
+    # Step d: remove reduced packs from the back (lowest priority first),
+    # collecting stubs separately. Stubs are appended AFTER the loop so
+    # they can't be re-popped on the next iteration.
     omitted_stubs: list[str] = []
 
     while len(kept) > 1:
         # Re-measure with current kept + stubs
-        trial = "\n\n---\n\n".join(
-            [t for t, _, _ in kept] + omitted_stubs
-        )
+        trial = "\n\n---\n\n".join(_texts() + omitted_stubs)
         if _estimate_tokens(trial) <= budget_tokens:
             break
         # Drop the last full pack, record a stub
-        _dropped_text, dropped_data, dropped_name = kept.pop()
-        rule_count = _count_rules(dropped_data)
-        standard = dropped_data.get("standard_id", dropped_name)
+        dropped = kept.pop()
+        rule_count = _count_rules(dropped["data"])
+        standard = dropped["data"].get("standard_id", dropped["name"])
         omitted_stubs.append(
             f"## Authority (OMITTED — over token budget): {standard}\n"
-            f"Pack '{dropped_name}' ({rule_count} rules) was omitted. "
+            f"Pack '{dropped['name']}' ({rule_count} rules) was omitted. "
             f"Use --pack-parts or reduce pack count for full coverage."
         )
         warnings.append(
-            f"Pack '{dropped_name}' omitted from compliance context ({rule_count} rules). "
+            f"Pack '{dropped['name']}' omitted from compliance context ({rule_count} rules). "
             f"Budget: {budget_tokens} tokens."
         )
 
     # Combine kept packs + omission stubs
-    all_parts = [t for t, _, _ in kept] + omitted_stubs
-    combined = "\n\n---\n\n".join(all_parts)
+    combined = "\n\n---\n\n".join(_texts() + omitted_stubs)
 
     # If the remaining content still exceeds budget (single large pack),
     # truncate to fit. Reserve space for the banner before slicing.
@@ -1935,7 +2127,32 @@ def run_review(
 
     Returns the OracleSession from oracle2.
     """
-    from oracle.oracle2 import run_review as oracle2_run_review
+    # importlib (not `from oracle import oracle2`): attribute access on the
+    # package bypasses a sys.modules stub, so tests couldn't fake the engine.
+    import importlib
+
+    _oracle2 = importlib.import_module("oracle.oracle2")
+    oracle2_run_review = _oracle2.run_review
+    # getattr fallback: tests stub oracle.oracle2 with a minimal module;
+    # the roster size only feeds the human-facing spend-estimate line.
+    roster_size = len(getattr(_oracle2, "ORACLE_ROSTER", {})) or 6
+
+    # Guard the round count before any spend. WHY: --max-rounds 0 used to
+    # run zero rounds yet exit 0 with a "completed" findings report — a
+    # silent no-op indistinguishable from a real review — and an absurd
+    # round count was accepted with no ceiling on multi-vendor spend.
+    raw_cap = os.environ.get("ORACLE_MAX_ROUNDS_HARD_CAP", "12")
+    try:
+        rounds_cap = int(raw_cap)
+    except ValueError:
+        raise ValueError(
+            f"ORACLE_MAX_ROUNDS_HARD_CAP must be an integer, got '{raw_cap}'"
+        )
+    if not 1 <= max_rounds <= rounds_cap:
+        raise ValueError(
+            f"max_rounds must be between 1 and {rounds_cap} (got {max_rounds}). "
+            f"Raise ORACLE_MAX_ROUNDS_HARD_CAP to allow more rounds."
+        )
 
     if not document_path.exists():
         raise FileNotFoundError(f"Document not found: {document_path}")
@@ -2007,20 +2224,32 @@ def run_review(
     pack_snapshot: list[dict] = []
     budget_warnings: list[str] = []
 
-    if pack_names:
-        # Compute token budget
-        budget = _compute_token_budget(draft)
+    # Always computed: the document-size fail-hard inside applies to
+    # zero-pack reviews too. WHY: an oversized general review previously
+    # skipped the guard entirely and burned spend across every vendor
+    # until oracle2's consecutive-invalid-round abort.
+    budget = _compute_token_budget(draft)
 
-        rendered_sections: list[tuple[str, dict, str]] = []
+    if pack_names:
         manifest = _load_manifest(pack_dir)
 
+        # Resolve --pack-parts keys through the same fuzzy resolution as
+        # --packs. WHY: the raw user string ("FAR=15") silently missed the
+        # resolved-slug lookup ("far"), dropping the requested Tier 2
+        # detail with no warning. Unknown keys are an error, not a no-op.
+        resolved_parts: dict[str, list[int]] = {}
+        if pack_parts:
+            for key, parts in pack_parts.items():
+                resolved_parts[_resolve_pack_name(key, manifest)] = parts
+
+        rendered_sections: list[dict] = []
         for i, pack_name in enumerate(pack_names, 1):
             pack_data, resolved = load_pack(pack_name, pack_dir)
             entry = manifest["packs"].get(resolved, {})
             pack_id = pack_data.get("rule_pack_id", resolved)
 
             # Determine parts for this pack
-            parts_for_pack = pack_parts.get(resolved) if pack_parts else None
+            parts_for_pack = resolved_parts.get(resolved)
 
             # Draft warning (Section 5.5)
             status = pack_data.get("oracle_metadata", {}).get("status", "draft")
@@ -2029,8 +2258,15 @@ def run_review(
 
             rendered = _render_pack_for_oracle(pack_data, pack_id, parts_for_pack)
             pack_title = pack_data.get("standard_title") or pack_data.get("standard_id") or resolved
-            labeled = f"## Authority {i}: {pack_title} (pack_id: {pack_id})\n\n{rendered}"
-            rendered_sections.append((labeled, pack_data, resolved))
+            label = f"## Authority {i}: {pack_title} (pack_id: {pack_id})"
+            rendered_sections.append({
+                "label": label,
+                "text": f"{label}\n\n{rendered}",
+                "data": pack_data,
+                "name": resolved,
+                "pack_id": pack_id,
+                "parts": parts_for_pack,
+            })
 
             # Build snapshot entry
             pack_file = pack_dir / entry.get("file", f"{resolved}.json")
@@ -2040,6 +2276,8 @@ def run_review(
                 "version": pack_data.get("version", "1.0.0"),
                 "status": status,
                 "rule_count": _count_rules(pack_data),
+                "schema": _detect_pack_schema(pack_data),
+                "detection_override": pack_data.get("oracle_metadata", {}).get("detection_override"),
             })
 
             LOGGER.info(f"Loaded pack '{resolved}': {_count_rules(pack_data)} rules (status={status})")
@@ -2054,20 +2292,21 @@ def run_review(
             f"Combined compliance context: {len(compliance_context)} chars "
             f"(~{_estimate_tokens(compliance_context)} tokens, budget={budget})"
         )
+    else:
+        # Zero-pack general review is a supported first-class flow — the
+        # council reviews on its own judgment. One info line for the
+        # session record; no gate, no friction.
+        LOGGER.info(
+            "No packs selected — running general review without compliance context"
+        )
 
-    # --- Run oracle2 ---
-    session = oracle2_run_review(
-        draft=draft,
-        document_path=str(document_path),
-        max_rounds=max_rounds,
-        output_dir=output_dir,
-        compliance_context=compliance_context,
-        workflow=workflow,
-    )
-
-    # --- Save audit artifacts (Section 7.4) ---
+    # --- Save audit artifacts BEFORE the run (Section 7.4 / §13) ---
+    # WHY before: oracle2 writes its own run manifest before round 1 so a
+    # dying run records its configuration. The compliance context and pack
+    # snapshot deserve the same guarantee — a Ctrl-C in round 3 must not
+    # lose the exact rules the reviewers saw (spend already happened).
     if output_dir is None:
-        output_dir = Path("oracle_reviews") / session.session_id
+        output_dir = Path("oracle_reviews") / datetime.now().strftime("%Y%m%d-%H%M%S")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if compliance_context:
@@ -2082,7 +2321,7 @@ def run_review(
                 f"sha256:{hashlib.sha256(compliance_context.encode()).hexdigest()}"
                 if compliance_context else None
             ),
-            "token_budget": _compute_token_budget(draft) if pack_names else None,
+            "token_budget": budget,
             "document_token_estimate": _estimate_tokens(draft),
             "truncation_applied": bool(budget_warnings),
             "truncation_details": budget_warnings,
@@ -2090,6 +2329,28 @@ def run_review(
         (output_dir / "pack_manifest_snapshot.json").write_text(
             json.dumps(snapshot, indent=2), encoding="utf-8"
         )
+
+    # Pre-run spend estimate. A mid-run cap would need engine hooks
+    # (oracle2 is a black box); the honest achievable guard is the rounds
+    # ceiling above plus making the worst case visible before it's spent.
+    per_round_tokens = _estimate_tokens(draft) + (
+        _estimate_tokens(compliance_context) if compliance_context else 0
+    )
+    LOGGER.info(
+        f"Spend estimate: ~{per_round_tokens:,} input tokens per reviewer call "
+        f"× {roster_size} oracle calls × up to {max_rounds} rounds "
+        f"(actuals recorded in session usage_totals)"
+    )
+
+    # --- Run oracle2 ---
+    session = oracle2_run_review(
+        draft=draft,
+        document_path=str(document_path),
+        max_rounds=max_rounds,
+        output_dir=output_dir,
+        compliance_context=compliance_context,
+        workflow=workflow,
+    )
 
     return session
 
@@ -2386,19 +2647,49 @@ def format_findings_report(
         manifest = _load_manifest(pack_dir)
         has_draft = False
         has_generic = False
-        has_override = False
+        override_packs: list[str] = []
         for pn in pack_names:
             try:
                 resolved = _resolve_pack_name(pn, manifest)
                 entry = manifest["packs"].get(resolved, {})
                 status = entry.get("status", "draft")
-                lines.append(f"- **{entry.get('name', resolved)}** ({entry.get('rule_count', '?')} rules, status: {status})")
+                content_hash = entry.get("content_hash", "")
+                hash_str = f", {content_hash[:19]}…" if content_hash else ""
+                lines.append(
+                    f"- **{entry.get('name', resolved)}** "
+                    f"({entry.get('rule_count', '?')} rules, status: {status}{hash_str})"
+                )
                 if status == "draft":
                     has_draft = True
+                if entry.get("schema") == "generic":
+                    has_generic = True
+                # detection_override lives in the pack file's oracle_metadata,
+                # not the manifest — read it from the pack itself.
+                pack_file = pack_dir / entry.get("file", f"{resolved}.json")
+                if pack_file.exists():
+                    try:
+                        pd = json.loads(pack_file.read_text(encoding="utf-8"))
+                        override = pd.get("oracle_metadata", {}).get("detection_override")
+                        if override:
+                            override_packs.append(f"{resolved} (--force-type {override})")
+                    except (json.JSONDecodeError, OSError):
+                        pass
             except ValueError:
                 lines.append(f"- **{pn}** (not found in library)")
         lines.append("")
 
+        # Section 8 mandated disclosures: the reader must be able to see
+        # when findings rest on unverified packs, chunk-extracted generic
+        # packs, or packs that bypassed automatic type detection.
+        if has_generic:
+            lines.append("> **Note:** Generic pack extraction may miss obligations spanning chunk boundaries. See pack metadata for extraction coverage.")
+            lines.append("")
+        if override_packs:
+            lines.append(
+                f"> **Note:** Pack(s) generated with manual type override, "
+                f"bypassing automatic document type detection: {'; '.join(override_packs)}."
+            )
+            lines.append("")
         if has_draft:
             lines.append("> **Warning:** This review used unverified (draft) rule packs. Findings should be validated against source regulations.")
             lines.append("")
@@ -2562,6 +2853,55 @@ def format_findings_report(
 # CLI Commands
 # ---------------------------------------------------------------------------
 
+def _parse_parts_tokens(parts_str: str, spec: str) -> list[int]:
+    """Parse a comma-separated part-number list, rejecting bad tokens.
+
+    WHY strict: "far=15,X" used to silently drop X and "far=abc" became an
+    empty list indistinguishable from no parts at all — the user's Tier 2
+    request vanished without a word.
+    """
+    parts: list[int] = []
+    for token in parts_str.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if not token.isdigit():
+            raise ValueError(
+                f"Invalid part number '{token}' in --pack-parts '{spec}' — "
+                f"parts must be integers (e.g. far=15,19)."
+            )
+        parts.append(int(token))
+    if not parts:
+        raise ValueError(f"--pack-parts '{spec}' contains no part numbers.")
+    return parts
+
+
+def _max_rounds_arg(value: str) -> int:
+    """argparse type for --max-rounds: integer within 1..hard-cap.
+
+    The same bounds are re-checked inside run_review (the library
+    boundary); this validator just surfaces the error at parse time with
+    argparse's usage message instead of mid-command.
+    """
+    try:
+        rounds = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"'{value}' is not an integer")
+    cap_raw = os.environ.get("ORACLE_MAX_ROUNDS_HARD_CAP", "12")
+    try:
+        cap = int(cap_raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"ORACLE_MAX_ROUNDS_HARD_CAP must be an integer, got '{cap_raw}'"
+        )
+    if not 1 <= rounds <= cap:
+        raise argparse.ArgumentTypeError(
+            f"must be between 1 and {cap} (got {rounds}); "
+            f"raise ORACLE_MAX_ROUNDS_HARD_CAP to allow more"
+        )
+    return rounds
+
+
 def cmd_review(args: argparse.Namespace) -> None:
     """Handle 'review' subcommand."""
     pack_dir = _resolve_pack_dir(getattr(args, 'pack_dir', None))
@@ -2571,14 +2911,17 @@ def cmd_review(args: argparse.Namespace) -> None:
     if hasattr(args, 'pack_parts') and args.pack_parts:
         pack_parts = {}
         for spec in args.pack_parts:
-            if "=" in spec:
-                pack_name, parts_str = spec.split("=", 1)
-                pack_parts[pack_name] = [int(p.strip()) for p in parts_str.split(",") if p.strip().isdigit()]
-            else:
-                # No prefix — only valid if exactly one FAR-family pack
-                parts_list = [int(p.strip()) for p in spec.split(",") if p.strip().isdigit()]
-                # Will be resolved later when we know which packs are FAR-family
-                pack_parts["__unscoped__"] = parts_list
+            try:
+                if "=" in spec:
+                    pack_name, parts_str = spec.split("=", 1)
+                    pack_parts[pack_name] = _parse_parts_tokens(parts_str, spec)
+                else:
+                    # No prefix — only valid if exactly one FAR-family pack.
+                    # Resolved later when we know which packs are FAR-family.
+                    pack_parts["__unscoped__"] = _parse_parts_tokens(spec, spec)
+            except ValueError as e:
+                print(f"Error: {e}")
+                sys.exit(1)
 
         # Resolve unscoped parts
         if "__unscoped__" in pack_parts and args.packs:
@@ -2606,16 +2949,23 @@ def cmd_review(args: argparse.Namespace) -> None:
 
     output_dir = Path(args.output_dir) if args.output_dir else None
 
-    session = run_review(
-        document_path=Path(args.document),
-        pack_names=args.packs or [],
-        pack_dir=pack_dir,
-        pack_parts=pack_parts,
-        max_rounds=args.max_rounds,
-        output_dir=output_dir,
-        force_text_only=getattr(args, 'force_text_only', False),
-        workflow=getattr(args, "workflow", "manual"),
-    )
+    # WHY the conversion here: run_review raises (never sys.exits) so the
+    # server can surface errors; the CLI boundary is where exceptions
+    # become exit codes.
+    try:
+        session = run_review(
+            document_path=Path(args.document),
+            pack_names=args.packs or [],
+            pack_dir=pack_dir,
+            pack_parts=pack_parts,
+            max_rounds=args.max_rounds,
+            output_dir=output_dir,
+            force_text_only=getattr(args, 'force_text_only', False),
+            workflow=getattr(args, "workflow", "manual"),
+        )
+    except (ValueError, FileNotFoundError, RuntimeError) as e:
+        print(f"Error: {e}")
+        sys.exit(1)
 
     # Generate findings report
     if output_dir is None:
@@ -2648,19 +2998,23 @@ def cmd_generate_pack(args: argparse.Namespace) -> None:
     pdf_path = Path(args.pdf)
     output_dir = Path(args.output_dir) if args.output_dir else None
 
-    pack_name = generate_pack(
-        pdf_path=pdf_path,
-        name=args.name,
-        output_dir=output_dir,
-        pack_dir=pack_dir,
-        use_vision=not args.no_vision,
-        force_type=args.force_type,
-        register=not args.no_register,
-        allow_partial=getattr(args, 'allow_partial', False),
-        overwrite=getattr(args, 'overwrite', False),
-        non_interactive=getattr(args, 'non_interactive', False),
-        detect_implicit=getattr(args, 'implicit', False),
-    )
+    try:
+        pack_name = generate_pack(
+            pdf_path=pdf_path,
+            name=args.name,
+            output_dir=output_dir,
+            pack_dir=pack_dir,
+            use_vision=not args.no_vision,
+            force_type=args.force_type,
+            register=not args.no_register,
+            allow_partial=getattr(args, 'allow_partial', False),
+            overwrite=getattr(args, 'overwrite', False),
+            non_interactive=getattr(args, 'non_interactive', False),
+            detect_implicit=getattr(args, 'implicit', False),
+        )
+    except (ValueError, FileNotFoundError, RuntimeError) as e:
+        print(f"Error: {e}")
+        sys.exit(1)
 
     print(f"\nPack generated and registered: {pack_name}")
     print(f"  Status: draft (use 'oracle promote-pack {pack_name} --reviewer <name>' to promote)")
@@ -2829,7 +3183,10 @@ Examples:
     p_review.add_argument("--packs", nargs="+", default=[], help="Pack names from library")
     p_review.add_argument("--pack-parts", action="append", default=[],
                           help="Per-pack part scoping: --pack-parts far=15,19 --pack-parts dfars=252")
-    p_review.add_argument("--max-rounds", type=int, default=4, help="Maximum review rounds (default: 4)")
+    p_review.add_argument(
+        "--max-rounds", type=_max_rounds_arg, default=4,
+        help="Maximum review rounds, 1..ORACLE_MAX_ROUNDS_HARD_CAP (default: 4)",
+    )
     p_review.add_argument("--workflow", choices=["manual", "ledger"], default=os.environ.get("ORACLE_WORKFLOW", "manual"),
                           help="Review workflow: manual=Beth bundles raw reviews, ledger=Sonnet issue ledger")
     p_review.add_argument("--output-dir", type=str, default=None, help="Output directory")
@@ -2902,10 +3259,6 @@ Examples:
         parser.print_help()
         sys.exit(0)
 
-    # Propagate global args to subcommands
-    if hasattr(args, 'pack_dir') and not args.pack_dir and hasattr(parser, '_default_pack_dir'):
-        args.pack_dir = parser._default_pack_dir
-
     # Validate API keys for commands that need them.
     # generate-pack only needs ANTHROPIC_API_KEY for generic extraction or
     # vision enrichment. FAR/GPCM --no-vision paths use local extractors only.
@@ -2920,17 +3273,16 @@ Examples:
         if not os.environ.get("ANTHROPIC_API_KEY"):
             LOGGER.error("ANTHROPIC_API_KEY is required")
             sys.exit(1)
-        if args.command == "review":
-            missing = []
-            if not os.environ.get("OPENAI_API_KEY"):
-                missing.append("OPENAI_API_KEY")
-            if not os.environ.get("XAI_API_KEY"):
-                missing.append("XAI_API_KEY")
-            if not (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")):
-                missing.append("GEMINI_API_KEY or GOOGLE_API_KEY")
-            if missing:
-                LOGGER.error(f"Missing API keys for review: {', '.join(missing)}")
-                sys.exit(1)
+        missing = []
+        if not os.environ.get("OPENAI_API_KEY"):
+            missing.append("OPENAI_API_KEY")
+        if not os.environ.get("XAI_API_KEY"):
+            missing.append("XAI_API_KEY")
+        if not (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")):
+            missing.append("GEMINI_API_KEY or GOOGLE_API_KEY")
+        if missing:
+            LOGGER.error(f"Missing API keys for review: {', '.join(missing)}")
+            sys.exit(1)
 
     args.func(args)
 

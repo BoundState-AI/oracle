@@ -676,7 +676,8 @@ class MetricsSummary:
     preference_only_count: int
     unresolved_count: int
     duplicate_count: int                  # Issues merged by normalizer
-    rounds_to_stability: int              # Round at which no new critical/high issues
+    rounds_to_stability: int              # Last round in which a new critical/high
+                                          # issue was accepted; 0 = stable from start
     total_issues_raised: int
     total_issues_accepted: int
 
@@ -718,10 +719,12 @@ class CoordinatorDecision:
 Before parsing session files, the `oracle2_adapter` performs a structural preflight check of the session directory:
 
 1. Verify that `session_summary.json` exists and contains `session_id` and `total_rounds` fields.
-2. Verify that at least one `round*_sonnet_normalized.json` file exists.
+2. Verify that at least one normalized-issues file exists: `round*_sonnet_normalized.json` (ledger workflow) or `round*_beth_normalized.json` (manual workflow — the default).
 3. Verify that `final_draft.md` exists.
 
-If preflight fails, the adapter emits an actionable error: `"oracle2 session directory structure is incompatible. Expected: [list of missing files]. Found: [list of actual files]. The oracle2_adapter may need updating for this version of oracle2."` This makes the oracle2 dependency explicit and fail-fast rather than producing cryptic parse errors during reconstruction.
+Missing `session_summary.json` or `final_draft.md` is a **hard failure**; a missing normalized-issues file alone is a warning at preflight, because a non-converged session (e.g., every round invalid after a vendor outage) legitimately produces none. The hard guard runs after parsing instead: a session that **claims convergence** must yield at least one *readable* normalized-issues file (existence is not enough — a truncated file or an unrecognized shape counts as unreadable). If it does not, reconstruction fails with an out-of-sync error rather than silently reporting a clean review.
+
+If preflight fails on the hard checks, the adapter emits an actionable error: `"oracle2 session directory structure is incompatible. Expected: [list of missing files]. Found: [list of actual files]. The oracle2_adapter may need updating for this version of oracle2."` This makes the oracle2 dependency explicit and fail-fast rather than producing cryptic parse errors during reconstruction.
 
 **Adapter Strategy and File Schema Expectations:**
 
