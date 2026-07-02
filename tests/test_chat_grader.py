@@ -208,6 +208,43 @@ def test_informational_query_is_not_refused_by_approval_pattern(tmp_path):
     assert result["status"] != "REFUSE"
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        # WHY these pins: the broadened waiver/disposition vocabulary used to
+        # refuse purely informational lookups about what the rules SAY.
+        "What are the waiver requirements in this standard?",
+        "Which clause governs disposition of nonconforming hardware?",
+    ],
+)
+def test_informational_waiver_disposition_queries_are_answered(tmp_path, message):
+    result = answer_query(
+        message=message,
+        pack_names=["some_pack"],
+        pack_dir=tmp_path,
+    )
+    # The unloadable fixture pack yields INSUFFICIENT_DATA; the point is the
+    # gatekeeper lets the query through instead of refusing it.
+    assert result["status"] in {"PASS", "INSUFFICIENT_DATA"}
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "I need a waiver.",
+        "Can you approve it?",
+        "Grant me a waiver for this hardware.",
+    ],
+)
+def test_waiver_and_approval_decision_requests_still_refuse(tmp_path, message):
+    result = answer_query(
+        message=message,
+        pack_names=["some_pack"],
+        pack_dir=tmp_path,
+    )
+    assert result["status"] == "REFUSE"
+
+
 def test_read_env_int_defaults_on_garbage(monkeypatch):
     monkeypatch.setenv("ORACLE_TEST_INT", "not-a-number")
     assert read_env_int("ORACLE_TEST_INT", 7) == 7

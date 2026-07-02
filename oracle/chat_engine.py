@@ -33,28 +33,13 @@ from oracle.chat_grader import (
 )
 from oracle.cli import load_pack as cli_load_pack
 
+# WHY re-export: read_env_int used to live here and existing importers
+# (server.py, tests) reach it via oracle.chat_engine; it moved to
+# oracle.envutil so the extraction pipeline can share it without a
+# wrong-direction dependency on the chat engine.
+from oracle.envutil import read_env_int
+
 LOGGER = logging.getLogger("oracle.chat_engine")
-
-
-def read_env_int(name: str, default: int) -> int:
-    """Read a positive integer env override, logging and defaulting on garbage.
-
-    WHY log-and-default: a malformed deployment value (e.g. "5;", "unlimited")
-    must not crash a compliance answer path, but silently ignoring it would
-    hide a misconfiguration — so the rejection is logged in full.
-    """
-    raw = os.environ.get(name)
-    if raw is None or not raw.strip():
-        return default
-    try:
-        value = int(raw.strip())
-    except ValueError:
-        LOGGER.warning("Ignoring non-integer %s=%r; using default %d", name, raw, default)
-        return default
-    if value <= 0:
-        LOGGER.warning("Ignoring non-positive %s=%r; using default %d", name, raw, default)
-        return default
-    return value
 
 # WHY: "Sn" is the chemical symbol for tin. Users may search for
 # "Sn compatibility" meaning tin.
@@ -319,18 +304,71 @@ _PURE_TIN_QUERY_PATTERN = re.compile(r"\bpure\s+(?:tin|sn)\b", re.IGNORECASE)
 # non-word char after "waive", but "r" is a word char), so waiver requests
 # were never refused. Covered now: approve + any direct object, waiver(s)
 # and waive inflections, disposition, and hyphen/space sign-off variants.
+#
+# WHY two tiers: the broadened waiver/disposition vocabulary over-refused
+# purely informational lookups ("What are the waiver requirements in this
+# standard?"). Decision REQUESTS (_APPROVAL_DECISION_PATTERN) always refuse;
+# the bare waiver/disposition vocabulary (_APPROVAL_VOCAB_PATTERN) refuses
+# only when the query is not information-seeking — asking what the rules
+# SAY about waivers is a legitimate pack lookup, not a decision request.
 # ---------------------------------------------------------------------------
-_APPROVAL_PATTERN = re.compile(
+_APPROVAL_DECISION_PATTERN = re.compile(
     r"\b(?:"
     r"approve\s+(?:this|that|it|them|the|my|our)\b"
     r"|can\s+(?:you|oracle)\s+approve\b"
     r"|certify"
     r"|sign[\s-]?offs?\b"
-    r"|waiv(?:e|es|ed|er|ers)\b"
-    r"|(?:final\s+)?disposition\b"
+    # WHY the bounded gap: "I need a waiver", "grant me a waiver for this",
+    # "requesting a waiver" — a decision verb followed (within the same
+    # clause) by a waive/waiver inflection is a request for a disposition.
+    r"|(?:need|want|grant|issue|give|get|obtain|request(?:ing)?|seek(?:ing)?|authorize|approve)\b[^.?!]{0,40}?\bwaiv(?:e|es|ed|er|ers)\b"
+    r"|waiv(?:e|es|ed)\s+(?:this|that|it|the|my|our)\b"
+    # WHY the demonstrative object: "the disposition for THIS nonconformance"
+    # asks Oracle to disposition a specific case even when phrased as a
+    # question; "disposition of nonconforming hardware" (generic) stays a
+    # legitimate rule lookup.
+    r"|(?:final\s+)?disposition\s+(?:for|of)\s+(?:this|that|it|them|my|our)\b"
     r")",
     re.IGNORECASE,
 )
+
+_APPROVAL_VOCAB_PATTERN = re.compile(
+    r"\b(?:waiv(?:e|es|ed|er|ers)|(?:final\s+)?disposition)\b",
+    re.IGNORECASE,
+)
+
+# Information-seeking shape: interrogative lead words, plus mid-query
+# what-the-rules-say phrasing ("Tell me what the standard says about waivers").
+_INFORMATION_LEAD_PATTERN = re.compile(
+    r"^(?:what|which|where|when|who|how|why|does|do|is|are|explain|describe|show|list)\b",
+    re.IGNORECASE,
+)
+_RULES_SAY_PATTERN = re.compile(
+    r"\b(?:what\s+(?:do|does|is|are)\b|says?\s+about\b|state(?:s)?\s+about\b)",
+    re.IGNORECASE,
+)
+
+
+def _is_information_seeking_query(query: str) -> bool:
+    stripped = query.strip()
+    return bool(
+        _INFORMATION_LEAD_PATTERN.match(stripped) or _RULES_SAY_PATTERN.search(stripped)
+    )
+
+
+def _is_approval_request(query: str) -> bool:
+    """True when the query asks Oracle to make or endorse a decision.
+
+    WHY decision-pattern-first: "I need a waiver because the requirements say
+    so" contains what-the-rules-say phrasing, but it is still a decision
+    request — the informational carve-out applies only to bare
+    waiver/disposition vocabulary, never to an explicit request.
+    """
+    if _APPROVAL_DECISION_PATTERN.search(query):
+        return True
+    if not _APPROVAL_VOCAB_PATTERN.search(query):
+        return False
+    return not _is_information_seeking_query(query)
 
 # ---------------------------------------------------------------------------
 # Clause lookup pattern: detects queries requesting verbatim rule text
@@ -379,12 +417,30 @@ _YES_NO_PATTERN = re.compile(r"^(?:if|is|are|can|could|does|do|would|will|should
 # False-negative risk: negated-permission phrasings not listed here fall back
 # to the default "allowed" polarity, which matches the common "can I / is it
 # ok" question shape.
+#
+# WHY ambiguity handling: bag-of-words polarity over the whole query inverted
+# compliance answers. "Can I use pure tin if lead is prohibited in my
+# contract?" carries "prohibited" only inside a conditional premise, and
+# "Is pure tin not prohibited?" negates the term. Direct negation ("not
+# <term>") flips that term's polarity; a polarity term preceded by a
+# subordinator (if/when/unless/where/assuming), or the presence of BOTH
+# vocabularies, makes the polarity ambiguous — the engine then declines the
+# Yes/No lead rather than guess on a compliance question.
 # ---------------------------------------------------------------------------
 _PROHIBITED_POLARITY_PATTERN = re.compile(
     r"\b(?:prohibited|prohibit|banned|disallowed|forbidden|barred|violate|violates|"
-    r"a\s+violation|not\s+(?:allowed|permitted|ok(?:ay)?))\b",
+    r"a\s+violation)\b",
     re.IGNORECASE,
 )
+_ALLOWED_POLARITY_PATTERN = re.compile(
+    r"\b(?:allowed|allowable|permitted|permissible|acceptable|compliant|ok(?:ay)?)\b",
+    re.IGNORECASE,
+)
+_POLARITY_SUBORDINATOR_PATTERN = re.compile(
+    r"\b(?:if|when|unless|where|assuming)\b",
+    re.IGNORECASE,
+)
+_POLARITY_NEGATION_PREFIX_PATTERN = re.compile(r"\bnot\s+$", re.IGNORECASE)
 
 # ---------------------------------------------------------------------------
 # Compliance risk pattern: detects queries about rule violations, allowed
@@ -752,21 +808,46 @@ def _is_yes_no_query(query: str) -> bool:
     return bool(_YES_NO_PATTERN.search(query.strip()))
 
 
-def _question_polarity(query: str) -> str:
+def _question_polarity(query: str) -> str | None:
     """Return "prohibited" when the user asks whether something is banned,
-    otherwise "allowed" (the default "can I / is it ok" question shape)."""
-    return "prohibited" if _PROHIBITED_POLARITY_PATTERN.search(query) else "allowed"
+    "allowed" for the default "can I / is it ok" question shape, or None when
+    the polarity is ambiguous (see _PROHIBITED_POLARITY_PATTERN WHY block)."""
+    evidence: set[str] = set()
+    for pattern, polarity in (
+        (_PROHIBITED_POLARITY_PATTERN, "prohibited"),
+        (_ALLOWED_POLARITY_PATTERN, "allowed"),
+    ):
+        for match in pattern.finditer(query):
+            prefix = query[: match.start()]
+            if _POLARITY_SUBORDINATOR_PATTERN.search(prefix):
+                # WHY: the term sits in a conditional/subordinate premise
+                # ("... if lead is prohibited ..."), not the question itself.
+                return None
+            if _POLARITY_NEGATION_PREFIX_PATTERN.search(prefix):
+                # Direct negation flips the term: "not prohibited" asks about
+                # permission; "not allowed" asks about prohibition.
+                polarity = "allowed" if polarity == "prohibited" else "prohibited"
+            evidence.add(polarity)
+    if len(evidence) == 2:
+        return None
+    if "prohibited" in evidence:
+        return "prohibited"
+    return "allowed"
 
 
 def _yes_no_lead(query: str, stance: str) -> str | None:
     """Yes/No lead sentence for a binary question, or None when the matched
-    rule's stance (requires/recommends) does not support a binary lead.
+    rule's stance (requires/recommends) does not support a binary lead or the
+    question's polarity is ambiguous.
 
     WHY the mapping: see _PROHIBITED_POLARITY_PATTERN — the lead answers the
     question as asked, so a prohibition rule yields "Yes." for asking-if-
-    prohibited and "No." for asking-if-allowed.
+    prohibited and "No." for asking-if-allowed. An ambiguous polarity never
+    gets a guessed Yes/No; callers fall back to a non-binary sentence.
     """
     polarity = _question_polarity(query)
+    if polarity is None:
+        return None
     if stance == "prohibits":
         return "Yes." if polarity == "prohibited" else "No."
     if stance == "allows":
@@ -2304,6 +2385,34 @@ def _max_context_rules() -> int:
     return read_env_int("ORACLE_CHAT_MAX_CONTEXT_RULES", 5)
 
 
+def _serialized_retrieval_matches(
+    retrieval: dict[str, Any],
+    limit: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Capped, deduped (matches, matches_by_pack) serialization of a retrieval.
+
+    WHY one helper: the LLM reasoning payload and the audit stage artifacts
+    must describe the SAME evidence bundle; two hand-rolled copies of this
+    serialization let the audit trail drift from what the model actually saw.
+    """
+    matches = [
+        _serialize_rule(rule, score)
+        for rule, score in _dedupe_rules(retrieval.get("matches", []), limit)
+    ]
+    matches_by_pack = [
+        {
+            "pack_slug": finding["pack"].pack_slug,
+            "standard_id": finding["pack"].standard_id,
+            "matches": [
+                _serialize_rule(rule, score)
+                for rule, score in _dedupe_rules(finding["matches"], limit)
+            ],
+        }
+        for finding in retrieval.get("pack_findings", [])
+    ]
+    return matches, matches_by_pack
+
+
 def _build_llm_reasoning_payload(
     query: str,
     gatekeeper: dict[str, Any],
@@ -2316,24 +2425,11 @@ def _build_llm_reasoning_payload(
         "filters": gatekeeper["filters"],
         "packs_queried": retrieval["packs_queried"],
     }
-    limit = _max_context_rules()
+    matches, matches_by_pack = _serialized_retrieval_matches(retrieval, _max_context_rules())
     if retrieval.get("compare_mode"):
-        payload["matches_by_pack"] = [
-            {
-                "pack_slug": finding["pack"].pack_slug,
-                "standard_id": finding["pack"].standard_id,
-                "matches": [
-                    _serialize_rule(rule, score)
-                    for rule, score in _dedupe_rules(finding["matches"], limit)
-                ],
-            }
-            for finding in retrieval.get("pack_findings", [])
-        ]
+        payload["matches_by_pack"] = matches_by_pack
     else:
-        payload["matches"] = [
-            _serialize_rule(rule, score)
-            for rule, score in _dedupe_rules(retrieval.get("matches", []), limit)
-        ]
+        payload["matches"] = matches
     return payload
 
 
@@ -2565,7 +2661,7 @@ def _validate_llm_summary_output(
 
 
 def _gatekeep_query(query: str, pack_names: list[str], compare_only: bool) -> dict[str, Any]:
-    if _APPROVAL_PATTERN.search(query):
+    if _is_approval_request(query):
         return {
             "status": "REFUSE",
             "intent": None,
@@ -2891,6 +2987,31 @@ def _compare_evidence(findings: list[dict[str, Any]]) -> list[OracleEvidenceItem
     return evidence
 
 
+def _empty_compare_envelope(
+    message: str,
+    diagnostics: dict[str, Any] | None,
+    stage_artifacts: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """INSUFFICIENT_DATA envelope for a comparison with no loadable packs."""
+    return _emit_envelope(
+        OracleChatEnvelope(
+            status="INSUFFICIENT_DATA",
+            query=message,
+            intent="comparison",
+            selected_packs=[],
+            compare_only=True,
+            review_only=False,
+            missing_inputs=["At least one loadable authority pack to compare."],
+            draft_answer_text=(
+                "None of the selected packs could be loaded for comparison. "
+                "Re-select packs from the pack library and try again."
+            ),
+            diagnostics=diagnostics or {},
+            stage_artifacts=stage_artifacts or {},
+        )
+    )
+
+
 def _compare_packs(
     message: str,
     packs: list[ChatPack],
@@ -2900,6 +3021,12 @@ def _compare_packs(
     diagnostics: dict[str, Any] | None = None,
     stage_artifacts: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if not packs:
+        # WHY the guard: compare mode with every requested pack failing to
+        # load can reach this point with no packs at all; building follow-ups
+        # or citations from nothing IndexErrors (packs[0]) into a 500. Degrade
+        # to an explicit INSUFFICIENT_DATA envelope instead.
+        return _empty_compare_envelope(message, diagnostics, stage_artifacts)
     citations: list[str] = []
     findings = pack_findings or [{"pack": pack, "matches": _dedupe_rules(_rank_rules(message, pack.rules), 3)} for pack in packs]
     for finding in findings:
@@ -3067,28 +3194,16 @@ def _build_stage_artifacts(
 ) -> dict[str, Any]:
     # WHY capped serialization: ranked matches are unbounded; the artifacts
     # are re-sent on every SSE done event, so only the deduped top bundle
-    # (ORACLE_CHAT_MAX_CONTEXT_RULES, default 5) is serialized.
-    context_limit = _max_context_rules()
+    # (ORACLE_CHAT_MAX_CONTEXT_RULES, default 5) is serialized — via the same
+    # helper as the LLM payload so the audit trail cannot drift from it.
+    matches, matches_by_pack = _serialized_retrieval_matches(retrieval, _max_context_rules())
     return {
         "gatekeeper": gatekeeper,
         "retrieval": {
             "compare_mode": retrieval["compare_mode"],
             "packs_queried": retrieval["packs_queried"],
-            "matches": [
-                _serialize_rule(rule, score)
-                for rule, score in _dedupe_rules(retrieval.get("matches", []), context_limit)
-            ],
-            "matches_by_pack": [
-                {
-                    "pack_slug": finding["pack"].pack_slug,
-                    "standard_id": finding["pack"].standard_id,
-                    "matches": [
-                        _serialize_rule(rule, score)
-                        for rule, score in _dedupe_rules(finding["matches"], context_limit)
-                    ],
-                }
-                for finding in retrieval.get("pack_findings", [])
-            ],
+            "matches": matches,
+            "matches_by_pack": matches_by_pack,
         },
         "reasoning": {
             "answer_type": reasoning["answer_type"],

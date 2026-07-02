@@ -1347,6 +1347,34 @@ def test_chat_explicit_compare_mode_with_single_pack_does_not_crash(workspace_tm
     assert any("Select a second pack" in follow_up for follow_up in body["follow_ups"])
 
 
+def test_chat_compare_mode_with_all_packs_unloadable_returns_insufficient_data(
+    workspace_tmp_path, monkeypatch
+):
+    """Compare mode where every requested pack fails to load must degrade to
+    INSUFFICIENT_DATA — never a 500 from indexing an empty pack list."""
+    pack_dir = workspace_tmp_path / "packs"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    # WHY the env seam: server._pack_dir -> oracle.cli._resolve_pack_dir reads
+    # ORACLE_PACK_DIR at call time, so this exercises the real resolution path.
+    monkeypatch.setenv("ORACLE_PACK_DIR", str(pack_dir))
+    server._chat_sessions.clear()
+
+    client = TestClient(server.app)
+    response = client.post(
+        "/oracle/chat",
+        json={
+            "message": "Compare the selected standards on pure tin finishes.",
+            "selected_packs": ["ghost_pack_a", "ghost_pack_b"],
+            "compare_only": True,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "INSUFFICIENT_DATA"
+    assert body["compare_only"] is True
+
+
 def _connector_plating_rules(count: int) -> list[dict[str, Any]]:
     return [
         {
@@ -1433,7 +1461,10 @@ def test_chat_sessions_are_capped_with_lru_eviction(workspace_tmp_path, monkeypa
     pack_dir = workspace_tmp_path / "packs"
     pack_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
-    monkeypatch.setenv("ORACLE_CHAT_MAX_SESSIONS", "3")
+    # WHY setattr instead of setenv: ORACLE_CHAT_MAX_SESSIONS is resolved once
+    # at module load (a deployment value cannot change mid-process), so the
+    # env var is not a live seam for an already-imported server module.
+    monkeypatch.setattr(server, "_CHAT_MAX_SESSIONS", 3)
     server._chat_sessions.clear()
 
     client = TestClient(server.app)
