@@ -1360,19 +1360,30 @@ DEFAULT_MAX_VISION_REPAIRS = 25
 
 
 def _resolve_max_vision_repairs(max_vision_repairs: int | None) -> int:
+    """Resolve the vision-repair spend cap: explicit param > env > default.
+
+    WHY positive-only for the env path: this value is a SPEND CAP.  A local
+    reimplementation of env parsing accepted 0/-5 and silently disabled the
+    cap; envutil.read_env_int handles the garbage-string case, and values
+    below 1 fall back to the default with a warning.  An explicit
+    max_vision_repairs parameter is a deliberate caller decision (tests pass
+    0 to disable repairs) and is honored as-is.
+    """
     if max_vision_repairs is not None:
         return max_vision_repairs
-    raw = os.environ.get("ORACLE_MAX_VISION_REPAIRS", "")
-    if not raw:
-        return DEFAULT_MAX_VISION_REPAIRS
-    try:
-        return int(raw)
-    except ValueError:
+    # WHY deferred import: oracle.envutil lands from a parallel branch; the
+    # in-function import keeps this module importable until both merge.
+    from oracle.envutil import read_env_int
+
+    value = read_env_int("ORACLE_MAX_VISION_REPAIRS", DEFAULT_MAX_VISION_REPAIRS)
+    if value < 1:
         LOGGER.warning(
-            "ORACLE_MAX_VISION_REPAIRS=%r is not an integer; using default %d",
-            raw, DEFAULT_MAX_VISION_REPAIRS,
+            "ORACLE_MAX_VISION_REPAIRS=%d would disable the vision spend cap; "
+            "using default %d",
+            value, DEFAULT_MAX_VISION_REPAIRS,
         )
         return DEFAULT_MAX_VISION_REPAIRS
+    return value
 
 
 def select_targeted_vision_targets(

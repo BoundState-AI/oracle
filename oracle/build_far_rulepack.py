@@ -289,11 +289,17 @@ def render_tier2_part(rulepack: dict, part_num: int) -> str:
     return "\n".join(lines)
 
 
-def render_unassigned(rulepack: dict) -> str:
+def render_unassigned(rulepack: dict, pack_id: str | None = None) -> str:
     """Render requirements that could not be mapped to a FAR Part.
 
     WHY: these are binding requirements; leaving them out of the rendered
     compliance context silently excluded them from every review.
+
+    WHY pack_id is optional: the cli renderer prepends [pack_id:rule_id]
+    citation tokens to every rule line so oracle2_adapter can extract
+    citations; unassigned lines must carry the same convention when rendered
+    into that context, but existing callers (render_for_oracle) render
+    without citations and must keep byte-identical output.
     """
     reqs = rulepack.get("unassigned", [])
     if not reqs:
@@ -307,6 +313,8 @@ def render_unassigned(rulepack: dict) -> str:
     ]
     for r in reqs:
         line, _ = _render_statement_line(r)
+        if pack_id:
+            line = f"[{pack_id}:{r.get('id', '?')}] {line}"
         lines.append(line)
     return "\n".join(lines)
 
