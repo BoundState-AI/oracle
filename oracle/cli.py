@@ -1778,13 +1778,7 @@ def _render_pack_for_oracle(
         # Unassigned binding requirements are still binding — leaving them
         # out silently excluded them from every review (they previously
         # rendered only on oracle2's legacy path, never this one).
-        try:
-            unassigned_text = render_unassigned(pack_data, pack_id=pack_id)
-        except TypeError:
-            # Transitional: older render_unassigned lacks the pack_id
-            # parameter (added in a parallel change); rule lines then miss
-            # the citation prefix but are still reviewed.
-            unassigned_text = render_unassigned(pack_data)
+        unassigned_text = render_unassigned(pack_data, pack_id=pack_id)
         if unassigned_text:
             lines.append("")
             lines.append(unassigned_text)
