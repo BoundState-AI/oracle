@@ -46,7 +46,7 @@ from oracle.cli import (
     remove_pack as cli_remove_pack,
     run_review as cli_run_review,
 )
-from oracle.chat_engine import answer_query as oracle_answer_query
+from oracle.chat_engine import answer_query as oracle_answer_query, read_env_int
 from oracle.oracle2 import compute_metrics
 from oracle.oracle2_adapter import build_review_result
 from oracle.redact import redact_secrets
@@ -948,9 +948,30 @@ def _split_chat_chunks(text: str) -> list[str]:
     return chunks or [text]
 
 
+def _touch_chat_session(session_id: str) -> dict[str, Any]:
+    """Return the chat session dict, marking it most-recently-used.
+
+    WHY LRU + cap: _chat_sessions is an in-memory scope store that previously
+    grew without bound — every anonymous request minted a new entry forever.
+    Insertion order doubles as recency order (the session is re-inserted on
+    each access), so evicting from the front drops the least-recently-used
+    session. An evicted session only loses its remembered pack scope.
+    """
+    session = _chat_sessions.pop(session_id, None)
+    if session is None:
+        session = {}
+    _chat_sessions[session_id] = session
+    max_sessions = read_env_int("ORACLE_CHAT_MAX_SESSIONS", 500)
+    while len(_chat_sessions) > max_sessions:
+        evicted = next(iter(_chat_sessions))
+        _chat_sessions.pop(evicted, None)
+        LOGGER.info("Evicted least-recently-used Oracle chat session %s", evicted)
+    return session
+
+
 def _resolve_chat_scope(request: OracleChatRequest) -> tuple[str, list[str], bool, bool]:
     session_id = request.session_id or f"chat-{uuid.uuid4().hex[:8]}"
-    session = _chat_sessions.setdefault(session_id, {})
+    session = _touch_chat_session(session_id)
 
     fields_set = getattr(request, "model_fields_set", set())
     if "selected_packs" in fields_set:
@@ -980,7 +1001,11 @@ async def chat_ping(request: Request):
 @oracle_router.post("/chat")
 async def oracle_chat(request: Request, body: OracleChatRequest):
     session_id, selected_packs, compare_only, review_only = _resolve_chat_scope(body)
-    result = oracle_answer_query(
+    # WHY to_thread: answer_query is synchronous and may make up to two
+    # provider calls with 120s timeouts; running it inline would block the
+    # event loop for every other request on the server.
+    result = await asyncio.to_thread(
+        oracle_answer_query,
         message=body.message,
         pack_names=selected_packs,
         pack_dir=_pack_dir(),
@@ -993,13 +1018,34 @@ async def oracle_chat(request: Request, body: OracleChatRequest):
     }
 
 
+def _chat_done_payload(result: dict[str, Any], session_id: str) -> dict[str, Any]:
+    return {
+        "envelope_version": result.get("envelope_version"),
+        "session_id": session_id,
+        "status": result["status"],
+        "answer_text": result.get("answer_text"),
+        "evidence_assessment": result.get("evidence_assessment"),
+        "citations": result["citations"],
+        "follow_ups": result["follow_ups"],
+        "selected_packs": result["selected_packs"],
+        "compare_only": result["compare_only"],
+        "review_only": result["review_only"],
+        "advisory_only": result["advisory_only"],
+        "diagnostics": result.get("diagnostics"),
+        "stage_artifacts": result.get("stage_artifacts"),
+    }
+
+
 @oracle_router.post("/chat/stream")
 async def oracle_chat_stream(request: Request, body: OracleChatRequest):
     session_id, selected_packs, compare_only, review_only = _resolve_chat_scope(body)
 
     async def _event_generator():
         try:
-            result = oracle_answer_query(
+            # WHY to_thread: keeps slow provider calls off the event loop so
+            # the SSE stream (and every other request) stays responsive.
+            result = await asyncio.to_thread(
+                oracle_answer_query,
                 message=body.message,
                 pack_names=selected_packs,
                 pack_dir=_pack_dir(),
@@ -1012,24 +1058,17 @@ async def oracle_chat_stream(request: Request, body: OracleChatRequest):
                 yield f"event: text\ndata: {json.dumps({'text': chunk})}\n\n"
                 await asyncio.sleep(0)
             yield "event: text_end\ndata: {}\n\n"
-            done_payload = {
-                "envelope_version": result.get("envelope_version"),
-                "session_id": session_id,
-                "status": result["status"],
-                "answer_text": result.get("answer_text"),
-                "evidence_assessment": result.get("evidence_assessment"),
-                "citations": result["citations"],
-                "follow_ups": result["follow_ups"],
-                "selected_packs": result["selected_packs"],
-                "compare_only": result["compare_only"],
-                "review_only": result["review_only"],
-                "advisory_only": result["advisory_only"],
-                "diagnostics": result.get("diagnostics"),
-                "stage_artifacts": result.get("stage_artifacts"),
-            }
-            yield f"event: done\ndata: {json.dumps(done_payload)}\n\n"
-        except Exception as exc:
-            yield f"event: error\ndata: {json.dumps({'detail': str(exc)})}\n\n"
+            yield f"event: done\ndata: {json.dumps(_chat_done_payload(result, session_id))}\n\n"
+        except Exception:
+            # WHY generic detail: exception text can leak file paths, env
+            # details, or provider internals to the client. Log the full
+            # traceback server-side (never-suppress-error), send a stable
+            # generic message outward.
+            LOGGER.exception("Oracle chat stream failed for session %s", session_id)
+            yield (
+                "event: error\ndata: "
+                f"{json.dumps({'detail': 'Oracle chat failed. See server logs for details.'})}\n\n"
+            )
 
     return StreamingResponse(
         _event_generator(),

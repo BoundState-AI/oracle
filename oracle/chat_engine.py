@@ -26,10 +26,35 @@ from typing import Any
 
 from oracle.chat_contract import OracleChatEnvelope, OracleEvidenceItem
 from oracle.chat_formatter import format_chat_response
-from oracle.chat_grader import PROHIBITED_DECISION_LANGUAGE_PATTERN, grade_chat_response
+from oracle.chat_grader import (
+    PROHIBITED_DECISION_LANGUAGE_PATTERN,
+    grade_chat_response,
+    strip_verbatim_spans,
+)
 from oracle.cli import load_pack as cli_load_pack
 
-LOGGER = logging.getLogger("oracle.chat")
+LOGGER = logging.getLogger("oracle.chat_engine")
+
+
+def read_env_int(name: str, default: int) -> int:
+    """Read a positive integer env override, logging and defaulting on garbage.
+
+    WHY log-and-default: a malformed deployment value (e.g. "5;", "unlimited")
+    must not crash a compliance answer path, but silently ignoring it would
+    hide a misconfiguration — so the rejection is logged in full.
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        LOGGER.warning("Ignoring non-integer %s=%r; using default %d", name, raw, default)
+        return default
+    if value <= 0:
+        LOGGER.warning("Ignoring non-positive %s=%r; using default %d", name, raw, default)
+        return default
+    return value
 
 # WHY: "Sn" is the chemical symbol for tin. Users may search for
 # "Sn compatibility" meaning tin.
@@ -45,6 +70,18 @@ _MATERIAL_QUERY_TERMS = frozenset(
         "lead",
         "zinc",
     }
+)
+
+# WHY ambiguous split: "lead" and "tin" are common English words outside
+# materials contexts ("lead time", "lead reviewer"). Treating them as metals
+# in any query turns the material hard-filter into a retrieval black hole
+# that discards every non-metal rule. They only count as material terms when
+# the query carries an explicit materials-context signal.
+_AMBIGUOUS_MATERIAL_TERMS = frozenset({"lead", "tin"})
+_MATERIALS_CONTEXT_PATTERN = re.compile(
+    r"\b(?:finish(?:es|ed|ing)?|plat(?:e|ed|ing)|solder(?:ed|ing)?|alloys?|"
+    r"coat(?:ed|ing|ings)?|pure|whiskers?|metals?|sn\b)",
+    re.IGNORECASE,
 )
 _QUERY_TERM_EXPANSIONS = {
     "spaceflight": {"space", "flight"},
@@ -275,9 +312,23 @@ _PURE_TIN_QUERY_PATTERN = re.compile(r"\bpure\s+(?:tin|sn)\b", re.IGNORECASE)
 # False-negative risk: oblique phrasing like "is this acceptable?" or
 # "can we proceed?" may slip through.  The grader's prohibited-language
 # check provides a second safety net on the output side.
+#
+# WHY the broadened forms: the original pattern only matched the literal
+# phrase "approve this", so "approve the change" and "can you approve it"
+# slipped through; and `waive\b` cannot match inside "waiver" (\b requires a
+# non-word char after "waive", but "r" is a word char), so waiver requests
+# were never refused. Covered now: approve + any direct object, waiver(s)
+# and waive inflections, disposition, and hyphen/space sign-off variants.
 # ---------------------------------------------------------------------------
 _APPROVAL_PATTERN = re.compile(
-    r"\b(?:approve\s+this|certify|sign\s+off|waive|final\s+disposition)\b",
+    r"\b(?:"
+    r"approve\s+(?:this|that|it|them|the|my|our)\b"
+    r"|can\s+(?:you|oracle)\s+approve\b"
+    r"|certify"
+    r"|sign[\s-]?offs?\b"
+    r"|waiv(?:e|es|ed|er|ers)\b"
+    r"|(?:final\s+)?disposition\b"
+    r")",
     re.IGNORECASE,
 )
 
@@ -316,6 +367,24 @@ _CLAUSE_LOOKUP_PATTERN = re.compile(
 # (e.g. "Titanium in LOX — allowed?") will not match.
 # ---------------------------------------------------------------------------
 _YES_NO_PATTERN = re.compile(r"^(?:if|is|are|can|could|does|do|would|will|should)\b", re.IGNORECASE)
+
+# ---------------------------------------------------------------------------
+# Question polarity: distinguishes "Is X prohibited?" from "Is X allowed?".
+#
+# WHY: a yes/no answer must match the polarity of the QUESTION, not restate
+# the stance of the matched rule.  A prohibition rule answers "Is X
+# prohibited?" with "Yes." but "Can I use X?" with "No." — deriving the lead
+# purely from rule stance inverted half of all yes/no answers.
+#
+# False-negative risk: negated-permission phrasings not listed here fall back
+# to the default "allowed" polarity, which matches the common "can I / is it
+# ok" question shape.
+# ---------------------------------------------------------------------------
+_PROHIBITED_POLARITY_PATTERN = re.compile(
+    r"\b(?:prohibited|prohibit|banned|disallowed|forbidden|barred|violate|violates|"
+    r"a\s+violation|not\s+(?:allowed|permitted|ok(?:ay)?))\b",
+    re.IGNORECASE,
+)
 
 # ---------------------------------------------------------------------------
 # Compliance risk pattern: detects queries about rule violations, allowed
@@ -634,7 +703,12 @@ def _query_terms(raw_query: str) -> set[str]:
 
 
 def _query_material_terms(raw_query: str) -> set[str]:
-    return {term for term in _query_terms(raw_query) if term in _MATERIAL_QUERY_TERMS}
+    terms = {term for term in _query_terms(raw_query) if term in _MATERIAL_QUERY_TERMS}
+    if terms.intersection(_AMBIGUOUS_MATERIAL_TERMS) and not _MATERIALS_CONTEXT_PATTERN.search(
+        raw_query
+    ):
+        terms -= _AMBIGUOUS_MATERIAL_TERMS
+    return terms
 
 
 def _phrase_score(query_terms: set[str], phrase: str) -> int:
@@ -672,7 +746,32 @@ def _has_strong_rule_anchor(
 
 
 def _is_yes_no_query(query: str) -> bool:
-    return bool(_YES_NO_PATTERN.search(query.strip()) or _COMPLIANCE_RISK_PATTERN.search(query))
+    # WHY no _COMPLIANCE_RISK_PATTERN disjunct: open questions like "what
+    # tests are required" contain compliance vocabulary but are not binary
+    # questions and must not receive a Yes/No-shaped answer.
+    return bool(_YES_NO_PATTERN.search(query.strip()))
+
+
+def _question_polarity(query: str) -> str:
+    """Return "prohibited" when the user asks whether something is banned,
+    otherwise "allowed" (the default "can I / is it ok" question shape)."""
+    return "prohibited" if _PROHIBITED_POLARITY_PATTERN.search(query) else "allowed"
+
+
+def _yes_no_lead(query: str, stance: str) -> str | None:
+    """Yes/No lead sentence for a binary question, or None when the matched
+    rule's stance (requires/recommends) does not support a binary lead.
+
+    WHY the mapping: see _PROHIBITED_POLARITY_PATTERN — the lead answers the
+    question as asked, so a prohibition rule yields "Yes." for asking-if-
+    prohibited and "No." for asking-if-allowed.
+    """
+    polarity = _question_polarity(query)
+    if stance == "prohibits":
+        return "Yes." if polarity == "prohibited" else "No."
+    if stance == "allows":
+        return "No." if polarity == "prohibited" else "Yes, within the cited limits."
+    return None
 
 
 def _is_action_query(query: str) -> bool:
@@ -942,6 +1041,11 @@ def _rank_rules(raw_query: str, rules: tuple[ChatRule, ...]) -> list[tuple[ChatR
     material_terms = _query_material_terms(raw_query)
     section_match = _SECTION_PATTERN.search(raw_query)
     table_note_match = _TABLE_NOTE_PATTERN.search(raw_query)
+    # WHY skip the material hard-filter on explicit section/table references:
+    # a cited section is a higher-confidence anchor than a material token, and
+    # the filter would otherwise discard the very rule the user pointed at
+    # (e.g. "lead time for section 5" must reach the section-5 rule).
+    apply_material_filter = bool(material_terms) and not (section_match or table_note_match)
     ranked: list[tuple[ChatRule, int]] = []
     yes_no_query = _is_yes_no_query(raw_query)
     why_query = _is_why_query(raw_query)
@@ -957,7 +1061,7 @@ def _rank_rules(raw_query: str, rules: tuple[ChatRule, ...]) -> list[tuple[ChatR
             *rule.applies_to,
         ]
         rule_tokens = set(_tokenize(" ".join(searchable_parts)))
-        if material_terms and not material_terms.intersection(rule_tokens):
+        if apply_material_filter and not material_terms.intersection(rule_tokens):
             continue
         haystack_tokens = query_tokens.intersection(rule_tokens)
         score = len(haystack_tokens) * 3
@@ -1223,15 +1327,20 @@ def _material_scope_label(material_terms: set[str]) -> str:
     return "all uses of " + ", ".join(ordered[:-1]) + f", and {ordered[-1]}"
 
 
-def _scope_note(query: str, pack: ChatPack, lead_rule: ChatRule) -> str:
+def _scope_note(query: str, pack: ChatPack, top_matches: list[tuple[ChatRule, int]]) -> str:
     query_terms = _query_terms(query)
-    if query_terms.intersection(_CONNECTOR_SCOPE_TERMS):
+    if query_terms.intersection(_CONNECTOR_SCOPE_TERMS) or not top_matches:
         return ""
-    rule_terms = set(
-        _tokenize(" ".join([lead_rule.statement_text, lead_rule.subject, *lead_rule.keywords, *lead_rule.applies_to]))
-    )
-    if not rule_terms.intersection(_CONNECTOR_SCOPE_TERMS):
-        return ""
+    # WHY every rule must be connector-scoped: the note asserts "no blanket
+    # ban" on the pack's behalf. If ANY retrieved clause is broader than
+    # connectors, that assertion may be false — so the note is suppressed
+    # unless all retrieved clauses carry connector-scope terms.
+    for rule, _score in top_matches:
+        rule_terms = set(
+            _tokenize(" ".join([rule.statement_text, rule.subject, *rule.keywords, *rule.applies_to]))
+        )
+        if not rule_terms.intersection(_CONNECTOR_SCOPE_TERMS):
+            return ""
     material_label = _material_scope_label(_query_material_terms(query))
     return (
         f"Those {pack.standard_id} clauses are specific to connectors and connector accessories, so "
@@ -1245,7 +1354,7 @@ def _build_why_context(query: str, pack: ChatPack, top_matches: list[tuple[ChatR
 
     lead_rule = top_matches[0][0]
     context: dict[str, Any] = {}
-    scope_note = _scope_note(query, pack, lead_rule)
+    scope_note = _scope_note(query, pack, top_matches)
     if scope_note:
         context["scope_note"] = scope_note
 
@@ -1386,12 +1495,8 @@ def _plan_why_answer(
         else None
     )
 
-    direct_answer = (
-        "No."
-        if stance == "prohibits"
-        else "Yes, within the cited limits."
-        if stance == "allows"
-        else f"The selected {pack.standard_id} clauses do not give a simple yes-or-no answer."
+    direct_answer = _yes_no_lead(query, stance) or (
+        f"The selected {pack.standard_id} clauses do not give a simple yes-or-no answer."
     )
 
     if _has_inline_rationale(why_rule.statement_text):
@@ -1490,6 +1595,44 @@ def _first_matching_rule(
     return None
 
 
+def _why_topic_sentence(query: str, pack: ChatPack, top_matches: list[tuple[ChatRule, int]]) -> str:
+    lead_rule = top_matches[0][0]
+    lead_summary = _summarize_rule(lead_rule)
+    stance = _rule_stance(lead_rule)
+    why_rule = next((rule for rule, _score in top_matches if _rule_has_rationale(rule)), lead_rule)
+    why_stance = _rule_stance(why_rule)
+    why_summary = _summarize_rule(why_rule)
+    rationale = _rule_rationale(why_rule)
+
+    if _has_inline_rationale(why_rule.statement_text):
+        lead = _yes_no_lead(query, why_stance)
+        if lead:
+            return f"{lead} {rationale}"
+        return f"The cited reason in {pack.standard_id} is: {rationale}"
+
+    if rationale:
+        lead = _yes_no_lead(query, why_stance)
+        if lead:
+            return f"{lead} {why_summary} The cited rationale is: {rationale}"
+        return f"The cited reason in {pack.standard_id} is: {rationale}"
+
+    lead = _yes_no_lead(query, stance)
+    if stance == "prohibits" and lead:
+        return (
+            f"{lead} {lead_summary} "
+            "The retrieved clauses prohibit the use, but they do not state the technical rationale."
+        )
+    if stance == "allows" and lead:
+        return (
+            f"{lead} {lead_summary} "
+            "The retrieved clauses do not include a separate technical rationale."
+        )
+    return (
+        f"The cited reason in {pack.standard_id} is not explicit in the retrieved clauses. "
+        f"Lead requirement: {lead_summary}"
+    )
+
+
 def _topic_answer_sentence(query: str, pack: ChatPack, top_matches: list[tuple[ChatRule, int]]) -> str:
     lead_rule = top_matches[0][0]
     lead_summary = _summarize_rule(lead_rule)
@@ -1502,44 +1645,11 @@ def _topic_answer_sentence(query: str, pack: ChatPack, top_matches: list[tuple[C
             f"Lead requirement: {lead_summary}"
         )
     if _is_why_query(query):
-        why_rule = next((rule for rule, _score in top_matches if _rule_has_rationale(rule)), lead_rule)
-        why_stance = _rule_stance(why_rule)
-        why_summary = _summarize_rule(why_rule)
-        rationale = _rule_rationale(why_rule)
-
-        if _has_inline_rationale(why_rule.statement_text):
-            if why_stance == "prohibits":
-                return f"No. {rationale}"
-            if why_stance == "allows":
-                return f"Yes, within the cited limits. {rationale}"
-            return f"The cited reason in {pack.standard_id} is: {rationale}"
-
-        if rationale:
-            if why_stance == "prohibits":
-                return f"No. {why_summary} The cited rationale is: {rationale}"
-            if why_stance == "allows":
-                return f"Yes, within the cited limits. {why_summary} The cited rationale is: {rationale}"
-            return f"The cited reason in {pack.standard_id} is: {rationale}"
-
-        if stance == "prohibits":
-            return (
-                f"No. {lead_summary} "
-                "The retrieved clauses prohibit the use, but they do not state the technical rationale."
-            )
-        if stance == "allows":
-            return (
-                f"Yes, within the cited limits. {lead_summary} "
-                "The retrieved clauses do not include a separate technical rationale."
-            )
-        return (
-            f"The cited reason in {pack.standard_id} is not explicit in the retrieved clauses. "
-            f"Lead requirement: {lead_summary}"
-        )
+        return _why_topic_sentence(query, pack, top_matches)
     if _is_yes_no_query(query):
-        if stance == "prohibits":
-            return f"No. {lead_summary}"
-        if stance == "allows":
-            return f"Yes, within the limits of the cited clause. {lead_summary}"
+        lead = _yes_no_lead(query, stance)
+        if lead:
+            return f"{lead} {lead_summary}"
         return f"The selected standard does not read as an informal yes. It {stance} the following: {lead_summary}"
     if _is_clause_lookup_query(query):
         if topic:
@@ -1548,13 +1658,16 @@ def _topic_answer_sentence(query: str, pack: ChatPack, top_matches: list[tuple[C
     return f"{pack.standard_id} answers this topic with: {lead_summary}"
 
 
-def _render_pure_tin_guidance(
-    *,
-    pack: ChatPack,
-    top_matches: list[tuple[ChatRule, int]],
-) -> str:
-    pure_tin_matches = [(rule, score) for rule, score in top_matches if _is_pure_tin_rule(rule)]
+def _pure_tin_step_matches(
+    pure_tin_matches: list[tuple[ChatRule, int]],
+) -> list[tuple[ChatRule, int] | None]:
+    """Ordered workflow matches: prohibition, testing, lot testing, mitigation.
 
+    WHY the solder-dip token requirement: the engine previously hardcoded
+    "the preferred path is solder dip" on any loose "mitigat" token match —
+    a domain claim the pack never made. A solder-dip step now only appears
+    when a matched rule itself contains the "solder dip" token.
+    """
     prohibition_match = _first_matching_rule(pure_tin_matches, lambda rule: _rule_stance(rule) == "prohibits")
     test_match = _first_matching_rule(
         pure_tin_matches,
@@ -1567,48 +1680,60 @@ def _render_pure_tin_guidance(
             and "non qpl" in _rule_text(rule)
         ),
     )
+    solder_dip_match = _first_matching_rule(
+        pure_tin_matches,
+        lambda rule: "solder dip" in _rule_text(rule),
+    )
     mitigation_match = _first_matching_rule(
         pure_tin_matches,
-        lambda rule: any(token in _rule_text(rule) for token in ("solder dip", "ipc j-std-001es", "mitigat")),
+        lambda rule: any(token in _rule_text(rule) for token in ("mitigat", "ipc j-std-001es")),
     )
     lead_threshold_match = _first_matching_rule(
         pure_tin_matches,
         lambda rule: any(token in _rule_text(rule) for token in ("3% lead", "3 percent lead")),
     )
-
-    lines = [
-        f"{pack.standard_id} treats pure tin as a hazard-avoidance issue, not a routine use-as-is condition.",
-        "",
-        "What to do next:",
+    return [
+        prohibition_match,
+        test_match,
+        lot_test_match,
+        solder_dip_match or mitigation_match or lead_threshold_match,
     ]
 
-    if prohibition_match:
-        lines.append(
-            "- Check whether this part family or finish falls under the pack's pure-tin prohibition. If it does, do not use it as-is."
-        )
-    if test_match:
-        lines.append(
-            "- If pure tin is not already precluded by the governing spec or control document, test internally and externally for pure tin."
-        )
-    if lot_test_match:
-        lines.append(
-            "- For non-QPL/QML/QPD lots, the DPA samples also need internal and external pure-tin testing."
-        )
-    if mitigation_match:
-        lines.append(
-            "- If the finish fails the cited 3% lead threshold, follow the pack's mitigation path before use; the preferred path is solder dip, with the cited workmanship mitigation as the fallback."
-        )
-    elif lead_threshold_match:
-        lines.append(
-            "- Confirm whether the finish meets the cited 3% lead threshold before treating it as usable."
-        )
 
-    lines.extend(
-        [
-            "",
-            "Do not treat pure Sn as automatically usable. Use the cited clauses to determine whether the finish is prohibited outright, requires pure-tin testing, or needs documented mitigation before use.",
-        ]
-    )
+def _pure_tin_bullets(pure_tin_matches: list[tuple[ChatRule, int]]) -> list[str]:
+    """Deduped next-step bullets quoting the matched rules' own text.
+
+    WHY derived text: rules are data — each bullet is the matched rule's own
+    summary; the engine asserts nothing on the pack's behalf.
+    """
+    bullets: list[str] = []
+    seen: set[str] = set()
+    for match in _pure_tin_step_matches(pure_tin_matches):
+        if match is None:
+            continue
+        summary = _summarize_rule(match[0])
+        if summary in seen:
+            continue
+        seen.add(summary)
+        bullets.append(f"- {summary}")
+    return bullets
+
+
+def _render_pure_tin_guidance(
+    *,
+    pack: ChatPack,
+    top_matches: list[tuple[ChatRule, int]],
+) -> str:
+    pure_tin_matches = [(rule, score) for rule, score in top_matches if _is_pure_tin_rule(rule)]
+    lines = [
+        f"{pack.standard_id} does not treat pure tin as a routine use-as-is condition; "
+        "the cited clauses govern whether and how it can be used.",
+        "",
+        "What to do next, per the cited clauses:",
+        *_pure_tin_bullets(pure_tin_matches),
+        "",
+        "Do not treat pure Sn as automatically usable. Use the cited clauses to determine whether the finish is prohibited outright, requires pure-tin testing, or needs documented mitigation before use.",
+    ]
     return "\n".join(lines).strip()
 
 
@@ -1898,6 +2023,23 @@ def _json_safe_artifact(value: Any) -> Any:
     return str(value)
 
 
+def _citations_only_response(envelope: OracleChatEnvelope) -> str:
+    """Guaranteed-safe terminal response: citations only, no free prose.
+
+    WHY: when both the drafted answer and the reformatted fallback fail the
+    grader, re-wording again could still carry the failing language. The only
+    output guaranteed not to assert a decision is the citation list itself.
+    """
+    citations = envelope.citations_or_authority()
+    lines = ["Oracle could not produce a compliant prose answer for this question."]
+    if citations:
+        lines.append("Governing citations from the selected packs:")
+        lines.extend(f"- {citation}" for citation in citations[:5])
+    else:
+        lines.append("No grounded citations are available; narrow the question or reselect packs.")
+    return "\n".join(lines)
+
+
 def _emit_envelope(envelope: OracleChatEnvelope) -> dict[str, Any]:
     formatted = format_chat_response(envelope, allow_draft_answer=True)
     grade = grade_chat_response(formatted, envelope)
@@ -1905,11 +2047,29 @@ def _emit_envelope(envelope: OracleChatEnvelope) -> dict[str, Any]:
     diagnostics = dict(envelope.diagnostics or {})
     validation_failures = list(diagnostics.get("validation_failures", []))
     if not grade.passed:
+        LOGGER.error(
+            "Oracle chat response failed grading (%s); reformatting without draft prose. Query: %r",
+            grade.failures,
+            envelope.query,
+        )
         validation_failures.extend(grade.failures)
         diagnostics["fallback_used"] = True
         diagnostics["fallback_reason"] = diagnostics.get("fallback_reason") or "formatter_grader_failure"
-        diagnostics["validation_failures"] = validation_failures
         formatted = format_chat_response(envelope, allow_draft_answer=False)
+        # WHY re-grade: the reformatted fallback previously shipped ungraded,
+        # so evidence summaries containing decision language went out unchecked.
+        regrade = grade_chat_response(formatted, envelope)
+        if not regrade.passed:
+            LOGGER.error(
+                "Oracle chat fallback response also failed grading (%s); "
+                "emitting citations-only terminal response. Query: %r",
+                regrade.failures,
+                envelope.query,
+            )
+            validation_failures.extend(f"fallback_{failure}" for failure in regrade.failures)
+            diagnostics["fallback_reason"] = "grader_terminal_citations_only"
+            formatted = _citations_only_response(envelope)
+        diagnostics["validation_failures"] = validation_failures
     elif "validation_failures" not in diagnostics:
         diagnostics["validation_failures"] = validation_failures
 
@@ -1948,6 +2108,61 @@ def _summary_model_name(provider: str) -> str:
     if provider == "openai":
         return os.environ.get("ORACLE_SUMMARY_MODEL", "gpt-5.4-mini")
     return os.environ.get("ORACLE_SUMMARY_MODEL", "claude-haiku-4-5-20251001")
+
+
+# Matches a whole response wrapped in a single markdown code fence,
+# optionally tagged "json" — providers occasionally wrap "strict JSON" output.
+_JSON_FENCE_PATTERN = re.compile(r"^```(?:json)?\s*(.*?)\s*```\s*$", re.IGNORECASE | re.DOTALL)
+
+
+def _parse_model_json(text: str) -> dict[str, Any]:
+    """Parse model output as a JSON object, tolerating markdown fences.
+
+    WHY ValueError on non-object JSON: json.loads happily returns lists and
+    scalars, and downstream `.get(...)` calls would then raise AttributeError
+    deep in the answer path. Raising here keeps the failure inside the
+    narrow model-failure except (deterministic fallback) while genuine
+    programming errors still surface.
+    """
+    cleaned = text.strip()
+    fence = _JSON_FENCE_PATTERN.match(cleaned)
+    if fence:
+        cleaned = fence.group(1).strip()
+    parsed = json.loads(cleaned)
+    if not isinstance(parsed, dict):
+        raise ValueError(f"Chat model returned non-object JSON ({type(parsed).__name__}).")
+    return parsed
+
+
+@lru_cache(maxsize=1)
+def _model_call_errors() -> tuple[type[BaseException], ...]:
+    """Exception types meaning "the model call or its JSON output failed".
+
+    WHY narrow instead of `except Exception`: programming errors
+    (AttributeError, NameError, IndexError) must surface instead of being
+    silently converted into the deterministic fallback path — the
+    never-suppress-error rule. Provider SDK base errors are appended lazily
+    because the SDKs are optional imports.
+    """
+    errors: list[type[BaseException]] = [
+        json.JSONDecodeError,
+        KeyError,
+        TypeError,
+        ValueError,
+        RuntimeError,
+        OSError,
+    ]
+    for module_name, attr in (
+        ("httpx", "HTTPError"),
+        ("anthropic", "AnthropicError"),
+        ("openai", "OpenAIError"),
+    ):
+        try:
+            module = __import__(module_name)
+            errors.append(getattr(module, attr))
+        except (ImportError, AttributeError):
+            continue
+    return tuple(errors)
 
 
 def _extract_text_blocks(blocks: Any) -> str:
@@ -2013,7 +2228,7 @@ def _call_model_json(
 
     if not text:
         raise RuntimeError("Chat model returned empty response.")
-    return json.loads(text)
+    return _parse_model_json(text)
 
 
 def _serialize_rule(rule: ChatRule, score: int | None = None) -> dict[str, Any]:
@@ -2078,6 +2293,50 @@ def _allowed_citations_from_retrieval(retrieval: dict[str, Any]) -> set[str]:
     return citations
 
 
+def _max_context_rules() -> int:
+    """Cap on ranked rules serialized into prompts and stage artifacts.
+
+    WHY: _rank_rules returns every scoring rule; on large packs that means an
+    unbounded prompt (token cost + drowned signal) and unbounded
+    stage_artifacts/SSE payloads. 5 matches is the widest deduped bundle the
+    deterministic answer paths ever use.
+    """
+    return read_env_int("ORACLE_CHAT_MAX_CONTEXT_RULES", 5)
+
+
+def _build_llm_reasoning_payload(
+    query: str,
+    gatekeeper: dict[str, Any],
+    retrieval: dict[str, Any],
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "query": query,
+        "intent": gatekeeper["intent"],
+        "compare_mode": gatekeeper["compare_mode"],
+        "filters": gatekeeper["filters"],
+        "packs_queried": retrieval["packs_queried"],
+    }
+    limit = _max_context_rules()
+    if retrieval.get("compare_mode"):
+        payload["matches_by_pack"] = [
+            {
+                "pack_slug": finding["pack"].pack_slug,
+                "standard_id": finding["pack"].standard_id,
+                "matches": [
+                    _serialize_rule(rule, score)
+                    for rule, score in _dedupe_rules(finding["matches"], limit)
+                ],
+            }
+            for finding in retrieval.get("pack_findings", [])
+        ]
+    else:
+        payload["matches"] = [
+            _serialize_rule(rule, score)
+            for rule, score in _dedupe_rules(retrieval.get("matches", []), limit)
+        ]
+    return payload
+
+
 def _maybe_run_llm_reasoning(
     *,
     query: str,
@@ -2088,39 +2347,31 @@ def _maybe_run_llm_reasoning(
     if not provider:
         return None
 
-    payload: dict[str, Any] = {
-        "query": query,
-        "intent": gatekeeper["intent"],
-        "compare_mode": gatekeeper["compare_mode"],
-        "filters": gatekeeper["filters"],
-        "packs_queried": retrieval["packs_queried"],
-    }
-    if retrieval.get("compare_mode"):
-        payload["matches_by_pack"] = [
-            {
-                "pack_slug": finding["pack"].pack_slug,
-                "standard_id": finding["pack"].standard_id,
-                "matches": [_serialize_rule(rule, score) for rule, score in finding["matches"]],
-            }
-            for finding in retrieval.get("pack_findings", [])
-        ]
-    else:
-        payload["matches"] = [
-            _serialize_rule(rule, score) for rule, score in retrieval.get("matches", [])
-        ]
-
+    payload = _build_llm_reasoning_payload(query, gatekeeper, retrieval)
     try:
         result = _call_model_json(
             provider=provider,
             model=_reasoning_model_name(provider),
             system_prompt=_llm_reasoning_system_prompt(),
             user_message=json.dumps(payload, indent=2),
-            max_tokens=int(os.environ.get("ORACLE_CHAT_REASONING_MAX_TOKENS", "2400")),
+            max_tokens=read_env_int("ORACLE_CHAT_REASONING_MAX_TOKENS", 2400),
         )
-    except Exception as exc:
-        LOGGER.warning("Oracle reasoning model failed; using deterministic reasoning: %s", exc)
+    except _model_call_errors() as exc:
+        LOGGER.warning(
+            "Oracle reasoning model failed; using deterministic reasoning: %s",
+            exc,
+            exc_info=True,
+        )
         return None
 
+    return _normalize_reasoning_result(result, provider, retrieval)
+
+
+def _normalize_reasoning_result(
+    result: dict[str, Any],
+    provider: str,
+    retrieval: dict[str, Any],
+) -> dict[str, Any] | None:
     allowed_citations = _allowed_citations_from_retrieval(retrieval)
     governing = [
         item for item in result.get("governing_citations", []) if isinstance(item, str) and item in allowed_citations
@@ -2175,10 +2426,14 @@ def _maybe_run_llm_summary(
             model=_summary_model_name(provider),
             system_prompt=_llm_summary_system_prompt(),
             user_message=json.dumps(payload, indent=2),
-            max_tokens=int(os.environ.get("ORACLE_CHAT_SUMMARY_MAX_TOKENS", "1200")),
+            max_tokens=read_env_int("ORACLE_CHAT_SUMMARY_MAX_TOKENS", 1200),
         )
-    except Exception as exc:
-        LOGGER.warning("Oracle summary model failed; using deterministic summary: %s", exc)
+    except _model_call_errors() as exc:
+        LOGGER.warning(
+            "Oracle summary model failed; using deterministic summary: %s",
+            exc,
+            exc_info=True,
+        )
         return None
 
     allowed = set(llm_reasoning["governing_citations"])
@@ -2199,11 +2454,56 @@ def _maybe_run_llm_summary(
     }
 
 
+def _retrieval_rule_spans(retrieval: dict[str, Any]) -> list[str]:
+    spans: list[str] = []
+    findings = (
+        retrieval.get("pack_findings", [])
+        if retrieval.get("compare_mode")
+        else [{"matches": retrieval.get("matches", [])}]
+    )
+    for finding in findings:
+        for rule, _score in finding.get("matches", []):
+            spans.extend((rule.statement_text, rule.requirement, rule.justification))
+    return spans
+
+
+def _screen_reasoning_decision_language(
+    llm_reasoning: dict[str, Any],
+    retrieval: dict[str, Any],
+) -> list[str]:
+    """Prohibited-language screen for stage-3 model prose.
+
+    WHY: stage-3 output previously reached the stage-4 summary (and the
+    deterministic renderer when stage 4 fails) without any decision-language
+    check. Verbatim retrieved-rule text is exempt — quoting the authority is
+    grounded behavior; only language the model asserts itself is unsafe.
+    """
+    parts = [
+        _normalize_space(llm_reasoning.get("direct_answer")),
+        _normalize_space(llm_reasoning.get("bottom_line")),
+    ]
+    for field in ("why", "gaps", "follow_ups"):
+        value = llm_reasoning.get(field, [])
+        if isinstance(value, list):
+            parts.extend(_normalize_space(item) for item in value if isinstance(item, str))
+    per_pack = llm_reasoning.get("per_pack_findings", [])
+    if isinstance(per_pack, list):
+        parts.extend(
+            _normalize_space(item.get("finding")) for item in per_pack if isinstance(item, dict)
+        )
+
+    prose = " ".join(part for part in parts if part)
+    screened = strip_verbatim_spans(prose, _retrieval_rule_spans(retrieval))
+    if _PROHIBITED_DECISION_LANGUAGE_PATTERN.search(screened):
+        return ["stage_3_prohibited_decision_language"]
+    return []
+
+
 def _validate_llm_reasoning_output(
     llm_reasoning: dict[str, Any],
     retrieval: dict[str, Any],
 ) -> list[str]:
-    failures: list[str] = []
+    failures: list[str] = _screen_reasoning_decision_language(llm_reasoning, retrieval)
     if not _normalize_space(llm_reasoning.get("direct_answer")) and not _normalize_space(
         llm_reasoning.get("bottom_line")
     ):
@@ -2303,7 +2603,11 @@ def _gatekeep_query(query: str, pack_names: list[str], compare_only: bool) -> di
         }
 
     intent = "general"
-    if compare_only or _COMPARE_PATTERN.search(query):
+    # WHY the pack-count guard: a comparison needs at least two packs. A
+    # single-pack "compare X vs Y" query (comparing topics, not standards)
+    # previously entered the two-pack comparison path and crashed on the
+    # second-pack index; it now routes through the normal single-pack answer.
+    if compare_only or (_COMPARE_PATTERN.search(query) and len(pack_names) >= 2):
         intent = "comparison"
     elif _is_clause_lookup_query(query):
         intent = "clause_lookup"
@@ -2343,6 +2647,10 @@ def _retrieve_chat_context(gatekeeper: dict[str, Any], pack_dir: Path) -> dict[s
         try:
             pack = load_chat_pack(pack_name, pack_dir)
         except Exception as exc:
+            # WHY log in full: pack-load failures previously vanished into a
+            # stage artifact string; never-suppress-error requires the full
+            # traceback server-side before the run degrades.
+            LOGGER.exception("Failed to load pack %r for Oracle chat", pack_name)
             packs_queried.append(
                 {
                     "pack_slug": pack_name,
@@ -2550,6 +2858,39 @@ def _build_single_pack_synthesis(
     )
 
 
+def _compare_follow_ups(packs: list[ChatPack]) -> list[str]:
+    first = packs[0]
+    # WHY the length guard: explicit compare mode can be requested with a
+    # single selected pack; the two-pack follow-up would IndexError on packs[1].
+    if len(packs) >= 2:
+        return [
+            f"Which clause is stricter between {packs[0].standard_id} and {packs[1].standard_id}?",
+            f"Show the exact governing text from {first.standard_id}.",
+        ]
+    return [
+        f"Show the exact governing text from {first.standard_id}.",
+        f"Select a second pack to compare against {first.standard_id}.",
+    ]
+
+
+def _compare_evidence(findings: list[dict[str, Any]]) -> list[OracleEvidenceItem]:
+    evidence: list[OracleEvidenceItem] = []
+    for finding in findings:
+        pack = finding["pack"]
+        matches = finding["matches"]
+        for rule, score in matches[:2]:
+            evidence.append(_evidence_item(rule=rule, score=score))
+        if not matches:
+            evidence.append(
+                OracleEvidenceItem(
+                    citation=pack.standard_id,
+                    summary="No grounded requirement match found for this topic.",
+                    standard_id=pack.standard_id,
+                )
+            )
+    return evidence
+
+
 def _compare_packs(
     message: str,
     packs: list[ChatPack],
@@ -2565,25 +2906,8 @@ def _compare_packs(
         for rule, _score in finding["matches"]:
             citation = _citation(rule)
             citations.append(citation)
-    first = packs[0]
-    follow_ups = [
-        f"Which clause is stricter between {packs[0].standard_id} and {packs[1].standard_id}?",
-        f"Show the exact governing text from {first.standard_id}.",
-    ]
-    evidence: list[OracleEvidenceItem] = []
-    for finding in findings:
-        pack = finding["pack"]
-        matches = finding["matches"]
-        for rule, score in matches[:2]:
-            evidence.append(_evidence_item(rule=rule, score=score))
-        if not matches:
-            evidence.append(
-                OracleEvidenceItem(
-                    citation=pack.standard_id,
-                    summary="No grounded requirement match found for this topic.",
-                    standard_id=pack.standard_id,
-                )
-            )
+    follow_ups = _compare_follow_ups(packs)
+    evidence = _compare_evidence(findings)
 
     return _emit_envelope(
         OracleChatEnvelope(
@@ -2736,6 +3060,44 @@ def _build_llm_guided_answer(
     )
 
 
+def _build_stage_artifacts(
+    gatekeeper: dict[str, Any],
+    retrieval: dict[str, Any],
+    reasoning: dict[str, Any],
+) -> dict[str, Any]:
+    # WHY capped serialization: ranked matches are unbounded; the artifacts
+    # are re-sent on every SSE done event, so only the deduped top bundle
+    # (ORACLE_CHAT_MAX_CONTEXT_RULES, default 5) is serialized.
+    context_limit = _max_context_rules()
+    return {
+        "gatekeeper": gatekeeper,
+        "retrieval": {
+            "compare_mode": retrieval["compare_mode"],
+            "packs_queried": retrieval["packs_queried"],
+            "matches": [
+                _serialize_rule(rule, score)
+                for rule, score in _dedupe_rules(retrieval.get("matches", []), context_limit)
+            ],
+            "matches_by_pack": [
+                {
+                    "pack_slug": finding["pack"].pack_slug,
+                    "standard_id": finding["pack"].standard_id,
+                    "matches": [
+                        _serialize_rule(rule, score)
+                        for rule, score in _dedupe_rules(finding["matches"], context_limit)
+                    ],
+                }
+                for finding in retrieval.get("pack_findings", [])
+            ],
+        },
+        "reasoning": {
+            "answer_type": reasoning["answer_type"],
+            "retrieval_coverage": reasoning["retrieval_coverage"],
+            "evidence_assessment": reasoning.get("evidence_assessment"),
+        },
+    }
+
+
 def answer_query(
     *,
     message: str,
@@ -2839,29 +3201,7 @@ def answer_query(
         )
 
     reasoning = _reason_about_chat_context(query, gatekeeper, retrieval)
-    stage_artifacts = {
-        "gatekeeper": gatekeeper,
-        "retrieval": {
-            "compare_mode": retrieval["compare_mode"],
-            "packs_queried": retrieval["packs_queried"],
-            "matches": [
-                _serialize_rule(rule, score) for rule, score in retrieval.get("matches", [])
-            ],
-            "matches_by_pack": [
-                {
-                    "pack_slug": finding["pack"].pack_slug,
-                    "standard_id": finding["pack"].standard_id,
-                    "matches": [_serialize_rule(rule, score) for rule, score in finding["matches"]],
-                }
-                for finding in retrieval.get("pack_findings", [])
-            ],
-        },
-        "reasoning": {
-            "answer_type": reasoning["answer_type"],
-            "retrieval_coverage": reasoning["retrieval_coverage"],
-            "evidence_assessment": reasoning.get("evidence_assessment"),
-        },
-    }
+    stage_artifacts = _build_stage_artifacts(gatekeeper, retrieval, reasoning)
     diagnostics: dict[str, Any] = {
         "fallback_used": False,
         "fallback_reason": None,

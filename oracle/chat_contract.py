@@ -3,6 +3,9 @@ Module: oracle.chat_contract
 Purpose: Canonical Oracle chat envelope shared by retrieval, formatter,
          and grader stages.
 
+__safety_critical__: bool = True — the envelope status drives REFUSE handling
+and grading; a malformed status would silently bypass both gates.
+
 BoundState AI 2026
 Classification: BoundState Proprietary
 
@@ -12,8 +15,18 @@ Co-Authored-By: Dr. Joseph Wilde, BoundState AI
 
 from __future__ import annotations
 
+__safety_critical__: bool = True
+
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
+
+OracleChatStatus = Literal["PASS", "REFUSE", "INSUFFICIENT_DATA"]
+
+# WHY a runtime tuple next to the Literal: dataclasses do not validate Literal
+# annotations at runtime, and a typo'd status (e.g. "REFUSED") would skip the
+# REFUSE branch in the formatter AND the grader's prohibited-language gate.
+# Fail closed at construction instead.
+_ALLOWED_STATUSES: tuple[str, ...] = ("PASS", "REFUSE", "INSUFFICIENT_DATA")
 
 
 @dataclass(frozen=True)
@@ -28,7 +41,7 @@ class OracleEvidenceItem:
 
 @dataclass
 class OracleChatEnvelope:
-    status: str
+    status: OracleChatStatus
     query: str
     intent: str
     selected_packs: list[str] = field(default_factory=list)
@@ -48,6 +61,13 @@ class OracleChatEnvelope:
     stage_artifacts: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     wants_exact_text: bool = False
+
+    def __post_init__(self) -> None:
+        if self.status not in _ALLOWED_STATUSES:
+            raise ValueError(
+                f"Invalid Oracle chat envelope status {self.status!r}; "
+                f"expected one of {_ALLOWED_STATUSES}."
+            )
 
     def citations_or_authority(self) -> list[str]:
         return self.citations or self.authority_basis
