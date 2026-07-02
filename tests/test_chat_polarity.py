@@ -20,7 +20,10 @@ from tests.test_server_chat import (
 def _client_with_pack(workspace_tmp_path, monkeypatch, payload: dict, filename: str):
     pack_dir = workspace_tmp_path / "packs"
     pack_dir.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(server, "_pack_dir", lambda: pack_dir)
+    # WHY the env seam: server._pack_dir -> oracle.cli._resolve_pack_dir reads
+    # ORACLE_PACK_DIR at call time, so pointing the env var at the fixture dir
+    # exercises the real resolution path instead of stubbing the function.
+    monkeypatch.setenv("ORACLE_PACK_DIR", str(pack_dir))
     monkeypatch.setenv("ORACLE_SECONDARY_RATIONALE_JSON", "")
     server._chat_sessions.clear()
     slug = _register_pack(workspace_tmp_path, pack_dir, payload, filename)
@@ -97,6 +100,74 @@ def test_why_query_asking_if_prohibited_leads_with_yes(workspace_tmp_path, monke
     # "Why is X prohibited?" implies the binary question "is X prohibited",
     # which a prohibition rule answers affirmatively.
     assert body["response"].startswith("Yes.")
+
+
+def test_polarity_term_in_conditional_clause_gets_non_binary_lead(
+    workspace_tmp_path, monkeypatch
+):
+    """WHY: "prohibited" here sits in a conditional premise ("... if lead is
+    prohibited in my contract"), not the question. Bag-of-words polarity used
+    to flip the question to prohibited-polarity and answer "Yes." against a
+    prohibition rule — an inverted compliance answer."""
+    client, slug = _client_with_pack(
+        workspace_tmp_path, monkeypatch, _pure_tin_prohibition_payload(), "polarity_conditional.json"
+    )
+
+    response = client.post(
+        "/oracle/chat",
+        json={
+            "message": "Can I use pure tin if lead is prohibited in my contract?",
+            "selected_packs": [slug],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "PASS"
+    assert not body["response"].startswith("Yes")
+    assert not body["response"].startswith("No.")
+
+
+def test_negated_prohibition_question_gets_correct_polarity(workspace_tmp_path, monkeypatch):
+    """"Is X not prohibited?" asks about permission; against a prohibition
+    rule the correct binary answer is "No." (it IS prohibited)."""
+    client, slug = _client_with_pack(
+        workspace_tmp_path, monkeypatch, _pure_tin_prohibition_payload(), "polarity_negated.json"
+    )
+
+    response = client.post(
+        "/oracle/chat",
+        json={
+            "message": "Is pure tin not prohibited on mission hardware connectors?",
+            "selected_packs": [slug],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "PASS"
+    assert body["response"].startswith("No.")
+
+
+def test_both_polarity_vocabularies_get_non_binary_lead(workspace_tmp_path, monkeypatch):
+    client, slug = _client_with_pack(
+        workspace_tmp_path, monkeypatch, _pure_tin_prohibition_payload(), "polarity_both.json"
+    )
+
+    response = client.post(
+        "/oracle/chat",
+        json={
+            "message": "Is pure tin allowed or prohibited on mission hardware connectors?",
+            "selected_packs": [slug],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "PASS"
+    # Both vocabularies appear, so the polarity is ambiguous — never guess.
+    assert not body["response"].startswith("Yes")
+    assert not body["response"].startswith("No.")
 
 
 def test_open_question_with_compliance_vocabulary_is_not_yes_no_shaped(

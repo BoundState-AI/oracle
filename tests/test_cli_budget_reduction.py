@@ -144,8 +144,8 @@ def test_oversized_document_raises_value_error():
 # max_rounds guard
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("bad_rounds", [0, -1, 999])
-def test_run_review_rejects_bad_max_rounds(tmp_path, bad_rounds):
+@pytest.mark.parametrize("bad_rounds", [0, -1])
+def test_run_review_rejects_nonpositive_max_rounds(tmp_path, bad_rounds):
     doc = tmp_path / "doc.md"
     doc.write_text("A spec.", encoding="utf-8")
     with pytest.raises(ValueError, match="max_rounds"):
@@ -155,3 +155,75 @@ def test_run_review_rejects_bad_max_rounds(tmp_path, bad_rounds):
             pack_dir=tmp_path,
             max_rounds=bad_rounds,
         )
+
+
+def test_run_review_clamps_excessive_max_rounds(tmp_path, monkeypatch):
+    """Above the hard cap the round count is clamped (with a warning), not
+    refused — an operator lowering the cap must bound spend without
+    breaking callers whose defaults exceed it."""
+    import sys
+    import types
+
+    captured: dict = {}
+
+    def fake_run_review(**kwargs):
+        captured.update(kwargs)
+        return types.SimpleNamespace(session_id="clamp-test")
+
+    fake_oracle2 = types.ModuleType("oracle.oracle2")
+    fake_oracle2.run_review = fake_run_review
+    monkeypatch.setitem(sys.modules, "oracle.oracle2", fake_oracle2)
+
+    doc = tmp_path / "doc.md"
+    doc.write_text("A spec.", encoding="utf-8")
+    run_review(
+        document_path=doc,
+        pack_names=[],
+        pack_dir=tmp_path,
+        max_rounds=999,
+        output_dir=tmp_path / "out",
+    )
+
+    assert captured["max_rounds"] == 12  # default ORACLE_MAX_ROUNDS_HARD_CAP
+
+
+def _fake_oracle2_with_unknown_model(monkeypatch):
+    """Stub oracle2 whose roster contains a model absent from the
+    context-window table (env overrides can't do this — the real roster
+    is built at import time)."""
+    import sys
+    import types
+
+    fake_oracle2 = types.ModuleType("oracle.oracle2")
+    fake_oracle2.run_review = lambda **kwargs: types.SimpleNamespace(session_id="zp")
+    fake_oracle2.ORACLE_ROSTER = {
+        "beth": types.SimpleNamespace(model="claude-opus-4-8"),
+        "fran": types.SimpleNamespace(model="gpt-9-experimental"),
+    }
+    monkeypatch.setitem(sys.modules, "oracle.oracle2", fake_oracle2)
+    return fake_oracle2
+
+
+def test_zero_pack_review_tolerates_unknown_model(tmp_path, monkeypatch):
+    """A general (zero-pack) review must not refuse on an unknown model ID —
+    the budget number is unused there; only the size guard matters."""
+    monkeypatch.delenv("ORACLE_MAX_CONTEXT_TOKENS", raising=False)
+    _fake_oracle2_with_unknown_model(monkeypatch)
+
+    doc = tmp_path / "doc.md"
+    doc.write_text("An idea to review.", encoding="utf-8")
+    session = run_review(
+        document_path=doc,
+        pack_names=[],
+        pack_dir=tmp_path,
+        max_rounds=2,
+        output_dir=tmp_path / "out",
+    )
+    assert session.session_id == "zp"
+
+
+def test_packed_review_still_strict_on_unknown_model(monkeypatch):
+    monkeypatch.delenv("ORACLE_MAX_CONTEXT_TOKENS", raising=False)
+    _fake_oracle2_with_unknown_model(monkeypatch)
+    with pytest.raises(ValueError, match="Unknown model"):
+        _compute_token_budget("small doc", strict_models=True)

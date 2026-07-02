@@ -273,3 +273,38 @@ def test_citation_context_rejects_pack_ids_absent_from_context():
     citations = extract_pack_citations("At [12:30] we saw [far-pack:far-15-001].", context)
 
     assert [c.rule_id for c in citations] == ["far-15-001"]
+
+
+def test_citation_tolerates_space_after_colon():
+    from oracle.oracle2_adapter import extract_pack_citations
+
+    citations = extract_pack_citations("required by [mil-std: R-001] here")
+    assert [(c.pack_id, c.rule_id) for c in citations] == [("mil-std", "R-001")]
+
+
+def test_citation_space_tolerance_still_rejects_prose():
+    from oracle.oracle2_adapter import extract_pack_citations
+
+    # Prose after an aside colon has no digit in the "rule id" position
+    citations = extract_pack_citations("[Note: this] and [WARNING: unverified]")
+    assert citations == []
+
+
+def test_citation_credibility_keeps_section_less_packs():
+    """A pack rendered without § rule lines (Tier-1 FAR, section-less
+    generic) is still credible via its Authority header — explicit
+    citations to it must survive in multi-pack reviews."""
+    from oracle.oracle2_adapter import extract_pack_citations
+
+    context = (
+        "## Authority 1: FAR (pack_id: far-pack)\n"
+        "[far-pack:far-15-001] §15.304 [SHALL]: The CO shall evaluate.\n"
+        "## Authority 2: MIL (pack_id: mil-pack)\n"
+        "[mil-pack:R-001] [SHALL]: No section on this rule line.\n"
+    )
+    citations = extract_pack_citations(
+        "violates [mil-pack:R-001] and [far-pack:far-15-001]", context
+    )
+    ids = {(c.pack_id, c.rule_id) for c in citations}
+    assert ("mil-pack", "R-001") in ids
+    assert ("far-pack", "far-15-001") in ids

@@ -500,8 +500,40 @@ def test_max_vision_repairs_explicit_parameter_wins():
     assert _resolve_max_vision_repairs(0) == 0
 
 
-def test_max_vision_repairs_defaults_without_env_override():
-    import os
+# NOTE: the env path resolves through oracle.envutil.read_env_int (shared
+# helper from a parallel branch); until both branches merge the module may be
+# absent, so these tests skip rather than fail on the missing import.
 
-    if "ORACLE_MAX_VISION_REPAIRS" not in os.environ:
-        assert _resolve_max_vision_repairs(None) == 25
+
+def test_max_vision_repairs_defaults_without_env_override(monkeypatch):
+    pytest.importorskip("oracle.envutil")
+    monkeypatch.delenv("ORACLE_MAX_VISION_REPAIRS", raising=False)
+    assert _resolve_max_vision_repairs(None) == 25
+
+
+def test_max_vision_repairs_env_zero_keeps_spend_cap(monkeypatch, caplog):
+    # WHY: ORACLE_MAX_VISION_REPAIRS=0 or negative would silently DISABLE
+    # the spend cap; the guard must warn and fall back to the default.
+    pytest.importorskip("oracle.envutil")
+    for raw in ("0", "-5"):
+        monkeypatch.setenv("ORACLE_MAX_VISION_REPAIRS", raw)
+        with caplog.at_level(logging.WARNING):
+            assert _resolve_max_vision_repairs(None) == 25
+    # Assert the behavior (a warning naming the variable), not exact prose
+    assert any(
+        "ORACLE_MAX_VISION_REPAIRS" in rec.getMessage()
+        for rec in caplog.records
+        if rec.levelno >= logging.WARNING
+    )
+
+
+def test_max_vision_repairs_env_garbage_falls_back_to_default(monkeypatch):
+    pytest.importorskip("oracle.envutil")
+    monkeypatch.setenv("ORACLE_MAX_VISION_REPAIRS", "not-an-int")
+    assert _resolve_max_vision_repairs(None) == 25
+
+
+def test_max_vision_repairs_env_positive_value_wins(monkeypatch):
+    pytest.importorskip("oracle.envutil")
+    monkeypatch.setenv("ORACLE_MAX_VISION_REPAIRS", "3")
+    assert _resolve_max_vision_repairs(None) == 3

@@ -46,7 +46,8 @@ from oracle.cli import (
     remove_pack as cli_remove_pack,
     run_review as cli_run_review,
 )
-from oracle.chat_engine import answer_query as oracle_answer_query, read_env_int
+from oracle.chat_engine import answer_query as oracle_answer_query
+from oracle.envutil import read_env_int
 from oracle.oracle2 import compute_metrics
 from oracle.oracle2_adapter import build_review_result
 from oracle.redact import redact_secrets
@@ -139,6 +140,11 @@ import time as _time  # noqa: E402 — grouped with session store for locality
 
 _SESSION_TTL_SECONDS = 2 * 60 * 60  # 2 hours
 _MAX_SESSIONS = 200
+
+# WHY resolved once at module load: the deployment value cannot change
+# mid-process, and re-parsing per chat request re-logged the same
+# malformed-value warning on every single request forever.
+_CHAT_MAX_SESSIONS = read_env_int("ORACLE_CHAT_MAX_SESSIONS", 500)
 
 _sessions: dict[str, dict[str, Any]] = {}
 _chat_sessions: dict[str, dict[str, Any]] = {}
@@ -961,8 +967,7 @@ def _touch_chat_session(session_id: str) -> dict[str, Any]:
     if session is None:
         session = {}
     _chat_sessions[session_id] = session
-    max_sessions = read_env_int("ORACLE_CHAT_MAX_SESSIONS", 500)
-    while len(_chat_sessions) > max_sessions:
+    while len(_chat_sessions) > _CHAT_MAX_SESSIONS:
         evicted = next(iter(_chat_sessions))
         _chat_sessions.pop(evicted, None)
         LOGGER.info("Evicted least-recently-used Oracle chat session %s", evicted)
