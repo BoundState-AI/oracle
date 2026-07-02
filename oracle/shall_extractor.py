@@ -25,20 +25,19 @@ __safety_critical__: bool = True
 
 import argparse
 import base64
+import difflib
 import json
 import logging
 import re
 import socket
 import time
-from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 import fitz  # PyMuPDF
 
-LOGGER = logging.getLogger(__name__)
+LOGGER = logging.getLogger("oracle.shall_extractor")
 
 
 # ============================================================================
@@ -100,15 +99,98 @@ OBLIGATION_KEYWORDS = {
     "may not": "prohibition",
 }
 
+# ---------------------------------------------------------------------------
+# Sentence-boundary building blocks for OBLIGATION_PATTERN.
+#
+# WHY a period is not always a sentence end (fix: obligation truncation):
+#   Regulatory text is dense with sentence-internal periods — decimal section
+#   references ("the procedures in 19.202-1"), numeric values ("0.5 percent"),
+#   and abbreviations ("e.g.", "Fig. 3", "Vol. 2").  The previous pattern
+#   terminated the captured sentence at ANY period or semicolon, so
+#   "...shall follow the procedures in 19.202-1..." captured only "...in 19"
+#   and semicolon-joined compound duties silently lost every clause after the
+#   first.  A missed or truncated obligation weakens every downstream
+#   compliance review, so the boundary rules are deliberately conservative:
+#
+#   A period TERMINATES the sentence only when followed by whitespace and a
+#   plausible sentence opener (capital letter, digit-led section header,
+#   bracket, or quote) or by end-of-line/end-of-text — i.e. real sentence-end
+#   evidence.  Periods followed by digits/letters with no space ("19.202-1",
+#   "U.S.") or preceded by a known abbreviation stem are sentence-internal.
+#
+#   Semicolons are ALWAYS sentence-internal: regulatory compound duties are
+#   semicolon-joined lists ("shall submit reports; maintain records; and
+#   notify the CO") and must be captured as one complete obligation.
+#
+#   The (?-i:...) groups keep the capital-letter / abbreviation checks
+#   case-SENSITIVE even though the overall pattern is IGNORECASE — otherwise
+#   "[A-Z]" would match lowercase and every abbreviation would break a
+#   sentence.
+# ---------------------------------------------------------------------------
+_ABBREVIATION_STEMS = ("e.g", "i.e", "cf", "vs", "viz", "No", "Fig", "Sec", "Rev", "Vol", "U.S")
+_ABBREV_LOOKBEHINDS = "|".join(f"(?<=(?-i:{re.escape(stem)}))" for stem in _ABBREVIATION_STEMS)
+_INTERNAL_PERIOD = (
+    rf"(?:(?:{_ABBREV_LOOKBEHINDS})\."
+    r"|\.(?!(?:\s+(?-i:[A-Z0-9\[\(\"'])|\s*$)))"
+)
+_SENTENCE_BODY = rf"(?:[^.\n]|{_INTERNAL_PERIOD})"
+
+# WHY longest-first alternation: multi-word forms ("shall not") must be tried
+# before their single-word substrings ("shall") so the strongest surface form
+# is captured.  Shared by OBLIGATION_PATTERN and the strongest-class
+# classifier so both always agree on what counts as a keyword.
+_OBLIGATION_KEYWORD_ALTERNATION = (
+    "shall not|shall|must not|must|are required to|are required|is required to|is required|"
+    "be required to|be required|are prohibited|is prohibited|be prohibited|prohibited|"
+    "should not|should|may not|may|will"
+)
+
 OBLIGATION_PATTERN = re.compile(
     r"(?:^|(?<=\.\s)|(?<=\n))"
-    r"([^.;\n]*?"
-    r"\b(shall not|shall|must not|must|are required to|are required|is required to|is required|"
-    r"be required to|be required|are prohibited|is prohibited|be prohibited|prohibited|should not|should|may not|may|will)\b"
-    r"[^.;\n]*)"
-    r"[.;]?",
+    rf"({_SENTENCE_BODY}*?"
+    rf"\b({_OBLIGATION_KEYWORD_ALTERNATION})\b"
+    rf"{_SENTENCE_BODY}*)"
+    r"\.?",
     re.IGNORECASE | re.MULTILINE,
 )
+
+_OBLIGATION_KEYWORD_RE = re.compile(
+    rf"\b({_OBLIGATION_KEYWORD_ALTERNATION})\b", re.IGNORECASE
+)
+
+# WHY this ranking (fix: leftmost-keyword misclassification): a sentence like
+# "The contractor should verify inputs and shall report all defects." was
+# previously classified by its LEFTMOST keyword ("should" → recommendation)
+# and then dropped by every mandatory-only filter, silently discarding a
+# binding duty.  Classification must reflect the STRONGEST obligation class
+# present anywhere in the sentence: prohibition > mandatory > recommendation
+# > permission/intent.
+_OBLIGATION_TYPE_STRENGTH = {
+    "prohibition": 4,
+    "mandatory": 3,
+    "recommendation": 2,
+    "permission": 1,
+    "intent": 1,
+}
+
+
+def _classify_sentence_obligation(sentence: str) -> tuple[str, str]:
+    """Return (keyword, obligation_type) for the strongest keyword class present.
+
+    The returned keyword is the first occurrence of the winning class, so the
+    obligation_keyword field stays consistent with the chosen obligation_type.
+    Returns ("", "") when no obligation keyword is present.
+    """
+    best: tuple[int, str, str] | None = None
+    for match in _OBLIGATION_KEYWORD_RE.finditer(sentence):
+        keyword = match.group(1).lower()
+        obligation_type = OBLIGATION_KEYWORDS.get(keyword, "mandatory")
+        strength = _OBLIGATION_TYPE_STRENGTH.get(obligation_type, 0)
+        if best is None or strength > best[0]:
+            best = (strength, keyword, obligation_type)
+    if best is None:
+        return "", ""
+    return best[1], best[2]
 
 # Improved section pattern: tolerant of PDF line-break artifacts
 SECTION_PATTERN = re.compile(
@@ -324,6 +406,10 @@ class ShallStatement:
     applies_to: list[str] = field(default_factory=list)
     category: str = ""
     confidence: float = 1.0
+    # WHY: implicit-obligation page attribution is best-effort (the LLM sees a
+    # multi-page chunk).  When no page can be located, we set page=0 and flag
+    # it here rather than fabricating precision (spec §5.5).
+    page_uncertain: bool = False
 
 
 @dataclass
@@ -336,6 +422,13 @@ class ExtractionResult:
     mpr_count: int = 0
     dedup_removed: int = 0
     statements: list[ShallStatement] = field(default_factory=list)
+    # WHY these three fields (spec §5.4/§5.5): a half-failed enrichment or
+    # implicit-detection run must be distinguishable from a complete one.
+    # Failures are logged AND recorded here so downstream pack builders and
+    # the promotion gate can see exactly which page ranges are missing.
+    extraction_status: str = "complete"
+    failed_page_ranges: list[str] = field(default_factory=list)
+    chunk_failures: list[dict] = field(default_factory=list)
 
 
 # ============================================================================
@@ -841,7 +934,11 @@ def _extract_generic_requirements(
 
         for match in OBLIGATION_PATTERN.finditer(text):
             sentence = match.group(1).strip()
-            keyword = match.group(2).lower()
+            # Classify by the STRONGEST keyword class in the sentence, not the
+            # leftmost match — see _classify_sentence_obligation WHY comment.
+            keyword, strongest_type = _classify_sentence_obligation(sentence)
+            if not keyword:
+                keyword = match.group(2).lower()
             if len(sentence) < 15:
                 continue
             if any(noise in sentence.lower() for noise in NOISE_TERMS):
@@ -856,7 +953,7 @@ def _extract_generic_requirements(
             ):
                 continue
 
-            obligation_type = OBLIGATION_KEYWORDS.get(keyword, "mandatory")
+            obligation_type = strongest_type or OBLIGATION_KEYWORDS.get(keyword, "mandatory")
             section = _detect_current_section(text, match.start(), generic_carry_section)
             subject, requirement = _extract_subject_requirement(sentence, keyword)
             ctx_start = max(0, match.start() - 120)
@@ -880,20 +977,57 @@ def _extract_generic_requirements(
         if page_tail_section:
             generic_carry_section = page_tail_section
 
-    # Header/footer dedup — remove any text appearing 5+ times
-    text_counts = Counter(s.statement_text for s in generic_statements)
-    boilerplate = {txt for txt, cnt in text_counts.items() if cnt >= 5}
-    before_dedup = len(generic_statements)
-    generic_statements = [s for s in generic_statements if s.statement_text not in boilerplate]
-    dedup_removed = before_dedup - len(generic_statements)
-
-    if boilerplate:
-        LOGGER.info(
-            "Fix 1: removed %d boilerplate duplicates (%d unique patterns)",
-            dedup_removed, len(boilerplate),
-        )
-
+    generic_statements, dedup_removed = _dedupe_boilerplate(generic_statements)
     return generic_statements, dedup_removed
+
+
+# WHY 5: page headers/footers repeat on every page, so a genuine header shows
+# up at least as often as the page count of the shortest real chapter.
+_BOILERPLATE_REPEAT_THRESHOLD = 5
+
+
+def _dedupe_boilerplate(
+    generic_statements: list[ShallStatement],
+) -> tuple[list[ShallStatement], int]:
+    """Header/footer dedup keyed on (section, normalized statement text).
+
+    WHY section-aware (spec rule): a real obligation can be restated verbatim
+    in several sections (e.g. a records-retention duty in both the delivery
+    and the archive section); deleting ALL copies of any 5+-repeated text
+    silently removed those obligations.  Text repeated 5+ times is treated as
+    page-furniture boilerplate only when every repeat carries an empty or
+    identical section; otherwise one copy per distinct section is preserved.
+    """
+    by_text: dict[str, list[ShallStatement]] = {}
+    for stmt in generic_statements:
+        by_text.setdefault(_normalize_for_dedup(stmt.statement_text), []).append(stmt)
+
+    dropped: set[int] = set()
+    boilerplate_patterns = 0
+    for group in by_text.values():
+        if len(group) < _BOILERPLATE_REPEAT_THRESHOLD:
+            continue
+        sections = {stmt.section for stmt in group}
+        if len(sections) == 1:
+            # Same (possibly empty) section on every repeat => boilerplate.
+            dropped.update(id(stmt) for stmt in group)
+            boilerplate_patterns += 1
+            continue
+        seen_sections: set[str] = set()
+        for stmt in group:
+            if stmt.section in seen_sections:
+                dropped.add(id(stmt))
+            else:
+                seen_sections.add(stmt.section)
+
+    kept = [stmt for stmt in generic_statements if id(stmt) not in dropped]
+    removed = len(generic_statements) - len(kept)
+    if removed:
+        LOGGER.info(
+            "Boilerplate dedup: removed %d duplicates (%d pure-boilerplate patterns)",
+            removed, boilerplate_patterns,
+        )
+    return kept, removed
 
 
 def extract_pass1(pdf_path: Path) -> ExtractionResult:
@@ -1007,6 +1141,287 @@ def _render_page_to_base64(doc, page_idx: int, dpi: int = 150) -> str:
     return base64.standard_b64encode(png_bytes).decode()
 
 
+# ============================================================================
+# Shared Anthropic call plumbing (Pass 1.5 vision enrichment + Pass 1c
+# implicit detection)
+# ============================================================================
+
+
+class ExtractionAbortedError(RuntimeError):
+    """A paid extraction loop must stop immediately (e.g. revoked API key)."""
+
+
+class ChunkExtractionError(RuntimeError):
+    """One chunk/page failed after all retries; the run may continue."""
+
+    def __init__(self, message: str, retries_used: int = 0):
+        super().__init__(message)
+        self.retries_used = retries_used
+
+
+# WHY 3 attempts: matches extract_pass2's consecutive-failure budget — enough
+# to ride out a transient blip without burning money on a systemic outage.
+_MAX_API_ATTEMPTS = 3
+# WHY 2 re-prompts: spec §5.4 — strip fences, retry parse, re-prompt with the
+# malformed output, at most twice, then record the chunk failure.
+_JSON_REPROMPT_LIMIT = 2
+_JSON_REPROMPT_INSTRUCTION = (
+    "Your previous reply was not valid JSON. Reply again with the same "
+    "content, emitting valid JSON only — no markdown fences, no commentary."
+)
+
+# WHY a rough constant instead of exact token math: the upfront log line only
+# needs order-of-magnitude honesty so an operator notices "500 pages ≈ $10"
+# BEFORE the loop spends it.  ~3.5K input + ~0.5K output tokens per page at
+# Sonnet pricing ($3/$15 per MTok) ≈ $0.018/page, rounded up.
+_EST_COST_PER_PAGE_USD = 0.02
+
+
+def _log_run_estimate(label: str, page_count: int) -> None:
+    LOGGER.info(
+        "%s: %d page(s) queued for Anthropic calls (rough cost ~$%.2f at ~$%.3f/page)",
+        label, page_count, page_count * _EST_COST_PER_PAGE_USD, _EST_COST_PER_PAGE_USD,
+    )
+
+
+def _classify_api_error(exc: Exception) -> str:
+    """Triage an API error: 'auth' | 'rate_limit' | 'transient'.
+
+    Uses status codes / class names rather than anthropic exception imports so
+    the triage also works with injected fake clients in tests.
+    """
+    name = type(exc).__name__.lower()
+    status = getattr(exc, "status_code", None)
+    if status in (401, 403) or "authentication" in name or "permissiondenied" in name:
+        return "auth"
+    if status == 429 or "ratelimit" in name:
+        return "rate_limit"
+    return "transient"
+
+
+def _retry_after_seconds(exc: Exception) -> float | None:
+    """Honor a Retry-After header when the API provides one."""
+    headers = getattr(getattr(exc, "response", None), "headers", None)
+    if headers is None:
+        return None
+    try:
+        value = headers.get("retry-after")
+        return float(value) if value is not None else None
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def _call_anthropic_with_retries(
+    client,
+    request: dict,
+    *,
+    base_delay: float = 1.0,
+    max_attempts: int = _MAX_API_ATTEMPTS,
+):
+    """Call client.messages.create with triaged retries.
+
+    WHY the triage: a revoked key on a 500-page run would otherwise burn ~100
+    doomed API attempts.  Auth errors abort the whole run immediately
+    (ExtractionAbortedError); rate limits back off exponentially honoring
+    Retry-After; transient errors retry with exponential backoff.  Returns
+    (response, retries_used) or raises ChunkExtractionError when exhausted.
+    """
+    last_error = "unknown error"
+    for attempt in range(max_attempts):
+        try:
+            return client.messages.create(**request), attempt
+        except Exception as exc:
+            kind = _classify_api_error(exc)
+            last_error = f"{type(exc).__name__}: {exc}"
+            if kind == "auth":
+                raise ExtractionAbortedError(
+                    f"auth/permission error from Anthropic API: {last_error}"
+                ) from exc
+            if attempt + 1 >= max_attempts:
+                break
+            delay = _retry_after_seconds(exc) if kind == "rate_limit" else None
+            if delay is None:
+                delay = base_delay * (2 ** attempt)
+            LOGGER.warning(
+                "Anthropic %s error (attempt %d/%d), retrying in %.1fs: %s",
+                kind, attempt + 1, max_attempts, delay, exc,
+            )
+            if delay > 0:
+                time.sleep(delay)
+    raise ChunkExtractionError(last_error, retries_used=max_attempts - 1)
+
+
+def _strip_markdown_fences(text: str) -> str:
+    if "```" not in text:
+        return text.strip()
+    start_idx = text.find("```")
+    first_nl = text.find("\n", start_idx)
+    end_idx = text.rfind("```")
+    if first_nl != -1 and end_idx > first_nl:
+        return text[first_nl + 1 : end_idx].strip()
+    return text.strip()
+
+
+def _request_json_with_reprompt(
+    client,
+    request: dict,
+    *,
+    base_delay: float = 1.0,
+) -> tuple[dict, int]:
+    """Spec §5.4 malformed-JSON ladder: strip fences → parse → re-prompt with
+    the malformed output and "valid JSON only" → max 2 re-prompts → raise
+    ChunkExtractionError so the caller records the chunk failure.
+
+    Returns (parsed_json, retries_used).
+    """
+    retries_used = 0
+    messages = list(request["messages"])
+    last_error: Exception | None = None
+    for reprompt in range(_JSON_REPROMPT_LIMIT + 1):
+        response, api_retries = _call_anthropic_with_retries(
+            client, {**request, "messages": messages}, base_delay=base_delay,
+        )
+        retries_used += api_retries
+        raw = response.content[0].text if response.content else ""
+        try:
+            return json.loads(_strip_markdown_fences(raw)), retries_used
+        except json.JSONDecodeError as exc:
+            last_error = exc
+            if reprompt >= _JSON_REPROMPT_LIMIT:
+                break
+            retries_used += 1
+            LOGGER.warning(
+                "Model returned malformed JSON (%s); re-prompting (%d/%d)",
+                exc, reprompt + 1, _JSON_REPROMPT_LIMIT,
+            )
+            messages = messages + [
+                {"role": "assistant", "content": raw or "(empty response)"},
+                {"role": "user", "content": _JSON_REPROMPT_INSTRUCTION},
+            ]
+    raise ChunkExtractionError(
+        f"invalid JSON after {_JSON_REPROMPT_LIMIT} re-prompt(s): {last_error}",
+        retries_used=retries_used,
+    )
+
+
+def _record_chunk_failure(
+    result: ExtractionResult,
+    page_start: int,
+    page_end: int,
+    retries_used: int,
+    final_error: str,
+    extraction_mode: str,
+) -> None:
+    """Record a failed chunk in the result metadata (never-suppress-error)."""
+    result.extraction_status = "partial"
+    result.failed_page_ranges.append(f"{page_start}-{page_end}")
+    result.chunk_failures.append(
+        {
+            "page_start": page_start,
+            "page_end": page_end,
+            "retries_used": retries_used,
+            "final_error": str(final_error)[:500],
+            "extraction_mode": extraction_mode,
+        }
+    )
+
+
+def _record_run_abort(
+    result: ExtractionResult,
+    remaining_pages: list[int],
+    reason: str,
+    extraction_mode: str,
+) -> None:
+    """Record an aborted tail of pages as one failed range (never silent)."""
+    LOGGER.error(
+        "Aborting %s run: %s (%d page(s) not processed)",
+        extraction_mode, reason, len(remaining_pages),
+    )
+    result.extraction_status = "partial"
+    if remaining_pages:
+        _record_chunk_failure(
+            result, min(remaining_pages), max(remaining_pages), 0,
+            f"not attempted: {reason}", extraction_mode,
+        )
+
+
+# ============================================================================
+# Pass 1.5 continued: Sonnet Vision enrichment
+# ============================================================================
+
+
+def _merge_enrichment(stmt: ShallStatement, enrich: dict | None) -> bool:
+    """Merge one Sonnet page-enrichment record into a statement.
+
+    Only overwrites a field when Sonnet provides better (longer/nonempty) data.
+    """
+    if not enrich:
+        return False
+    if enrich.get("section") and len(enrich["section"]) >= len(stmt.section):
+        stmt.section = enrich["section"]
+    if enrich.get("shall_text") and len(enrich["shall_text"]) > len(stmt.statement_text):
+        stmt.statement_text = enrich["shall_text"]
+        # Re-derive subject/requirement from enriched text
+        subject, requirement = _extract_subject_requirement(
+            stmt.statement_text, stmt.obligation_keyword
+        )
+        stmt.subject = subject
+        stmt.requirement = requirement
+    if enrich.get("justification"):
+        stmt.justification = enrich["justification"][:500]
+    if enrich.get("keywords"):
+        stmt.keywords = enrich["keywords"][:7]
+    if enrich.get("applies_to"):
+        stmt.applies_to = enrich["applies_to"]
+    return True
+
+
+def _enrich_page_via_vision(
+    client,
+    doc,
+    page_num: int,
+    page_stmts: list[ShallStatement],
+    dpi: int,
+    base_delay: float,
+) -> int:
+    """Enrich one page's MPR/FCR statements via Sonnet Vision.
+
+    Returns the number of statements enriched.  Raises
+    ExtractionAbortedError / ChunkExtractionError on API failure.
+    """
+    mpr_list_str = ", ".join(f"[{s.mpr_id}]" for s in page_stmts)
+    img_b64 = _render_page_to_base64(doc, page_num - 1, dpi)
+    request = {
+        "model": SONNET_MODEL,
+        "max_tokens": 4096,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": img_b64,
+                        },
+                    },
+                    {"type": "text", "text": ENRICHMENT_PROMPT.format(mpr_list=mpr_list_str)},
+                ],
+            }
+        ],
+    }
+    parsed, _ = _request_json_with_reprompt(client, request, base_delay=base_delay)
+    reqs = parsed.get("requirements", []) if isinstance(parsed, dict) else []
+    enrichments_by_id = {
+        r["mpr_id"]: r for r in reqs if isinstance(r, dict) and "mpr_id" in r
+    }
+    return sum(
+        1 for stmt in page_stmts
+        if _merge_enrichment(stmt, enrichments_by_id.get(stmt.mpr_id))
+    )
+
+
 def enrich_with_sonnet(
     result: ExtractionResult,
     pdf_path: Path,
@@ -1014,144 +1429,99 @@ def enrich_with_sonnet(
     api_key: str | None = None,
     dpi: int = 150,
     max_pages: int = 0,
+    client=None,
+    max_consecutive_failures: int = 3,
+    retry_base_delay: float = 1.0,
 ) -> ExtractionResult:
     """Enrich MPR/FCR statements with Sonnet Vision for better section,
-    justification, keywords, and applies_to extraction."""
+    justification, keywords, and applies_to extraction.
+
+    Failures are logged AND recorded in result.chunk_failures /
+    result.extraction_status (spec §5.4/§5.5); auth errors and repeated
+    consecutive failures abort the paid loop instead of burning API calls.
+    """
     mpr_stmts = [s for s in result.statements if s.mpr_id]
     if not mpr_stmts:
         LOGGER.info("Sonnet enrichment skipped: no MPR/FCR statements")
         return result
 
-    # Group by page
     by_page: dict[int, list[ShallStatement]] = {}
     for s in mpr_stmts:
         by_page.setdefault(s.page, []).append(s)
+    pages = sorted(by_page.keys())[: max_pages if max_pages > 0 else None]
 
-    pages = sorted(by_page.keys())
-    if max_pages and max_pages > 0:
-        pages = pages[:max_pages]
+    LOGGER.info("Sonnet enrichment: %d MPR/FCR across %d pages",
+                sum(len(by_page[p]) for p in pages), len(pages))
+    _log_run_estimate("Sonnet enrichment", len(pages))
 
-    total_pages = len(pages)
-    LOGGER.info(
-        "Sonnet enrichment: %d MPR/FCR across %d pages",
-        sum(len(by_page[p]) for p in pages),
-        total_pages,
-    )
-
-    client = _get_anthropic_client(api_key)
+    if client is None:
+        client = _get_anthropic_client(api_key)
     doc = fitz.open(pdf_path)
-    enriched_count = 0
-    failed_count = 0
     started = time.time()
-
-    for i, page_num in enumerate(pages, 1):
-        page_stmts = by_page[page_num]
-        mpr_ids = [s.mpr_id for s in page_stmts]
-        mpr_list_str = ", ".join(f"[{m}]" for m in mpr_ids)
-
-        page_idx = page_num - 1  # 0-indexed
-        if page_idx >= len(doc):
-            continue
-
-        try:
-            # Render page to PNG
-            img_b64 = _render_page_to_base64(doc, page_idx, dpi)
-
-            prompt = ENRICHMENT_PROMPT.format(mpr_list=mpr_list_str)
-
-            response = client.messages.create(
-                model=SONNET_MODEL,
-                max_tokens=4096,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image",
-                                "source": {
-                                    "type": "base64",
-                                    "media_type": "image/png",
-                                    "data": img_b64,
-                                },
-                            },
-                            {"type": "text", "text": prompt},
-                        ],
-                    }
-                ],
-            )
-
-            response_text = response.content[0].text.strip()
-
-            # Parse JSON (handle markdown code blocks)
-            if "```" in response_text:
-                start_idx = response_text.find("```")
-                first_nl = response_text.find("\n", start_idx)
-                end_idx = response_text.rfind("```")
-                if first_nl != -1 and end_idx > first_nl:
-                    response_text = response_text[first_nl + 1 : end_idx].strip()
-
-            parsed = json.loads(response_text)
-            reqs = parsed.get("requirements", [])
-
-            # Merge enrichments back into statements
-            enrichments_by_id = {r["mpr_id"]: r for r in reqs if "mpr_id" in r}
-
-            for stmt in page_stmts:
-                enrich = enrichments_by_id.get(stmt.mpr_id)
-                if not enrich:
-                    continue
-
-                # Only overwrite if Sonnet provides better data
-                if enrich.get("section") and len(enrich["section"]) >= len(stmt.section):
-                    stmt.section = enrich["section"]
-                if enrich.get("shall_text") and len(enrich["shall_text"]) > len(stmt.statement_text):
-                    stmt.statement_text = enrich["shall_text"]
-                    # Re-derive subject/requirement from enriched text
-                    subject, requirement = _extract_subject_requirement(
-                        stmt.statement_text, stmt.obligation_keyword
-                    )
-                    stmt.subject = subject
-                    stmt.requirement = requirement
-                if enrich.get("justification"):
-                    stmt.justification = enrich["justification"][:500]
-                if enrich.get("keywords"):
-                    stmt.keywords = enrich["keywords"][:7]
-                if enrich.get("applies_to"):
-                    stmt.applies_to = enrich["applies_to"]
-
-                enriched_count += 1
-
-            elapsed = time.time() - started
-            avg = elapsed / i
-            eta = max(0, (total_pages - i) * avg)
-            LOGGER.info(
-                "  Page %d/%d (p.%d): %d/%d enriched (%.1fs, ETA ~%.0fs)",
-                i,
-                total_pages,
-                page_num,
-                len(enrichments_by_id),
-                len(page_stmts),
-                time.time() - (started + (i - 1) * avg),
-                eta,
-            )
-
-        except json.JSONDecodeError as e:
-            failed_count += len(page_stmts)
-            LOGGER.warning("  Page %d: JSON parse failed: %s", page_num, e)
-        except Exception as e:
-            failed_count += len(page_stmts)
-            LOGGER.error("  Page %d: %s", page_num, e)
-
+    enriched_count, failed_count = _run_enrichment_loop(
+        result, client, doc, by_page, pages,
+        dpi=dpi,
+        max_consecutive_failures=max_consecutive_failures,
+        retry_base_delay=retry_base_delay,
+    )
     doc.close()
-
     LOGGER.info(
-        "Sonnet enrichment complete: %d/%d enriched, %d failed (%.1fs total)",
-        enriched_count,
-        len(mpr_stmts),
-        failed_count,
-        time.time() - started,
+        "Sonnet enrichment complete: %d/%d enriched, %d failed, status=%s (%.1fs total)",
+        enriched_count, len(mpr_stmts), failed_count,
+        result.extraction_status, time.time() - started,
     )
     return result
+
+
+def _run_enrichment_loop(
+    result: ExtractionResult,
+    client,
+    doc,
+    by_page: dict[int, list[ShallStatement]],
+    pages: list[int],
+    *,
+    dpi: int,
+    max_consecutive_failures: int,
+    retry_base_delay: float,
+) -> tuple[int, int]:
+    """Enrich page by page, recording failures on result; returns
+    (enriched_count, failed_statement_count)."""
+    enriched_count = failed_count = consecutive_failures = 0
+    for i, page_num in enumerate(pages):
+        page_stmts = by_page[page_num]
+        if page_num - 1 >= len(doc):
+            continue
+        try:
+            enriched = _enrich_page_via_vision(
+                client, doc, page_num, page_stmts, dpi, retry_base_delay,
+            )
+        except ExtractionAbortedError as exc:
+            failed_count += sum(len(by_page[p]) for p in pages[i:])
+            _record_run_abort(result, pages[i:], str(exc), "vision_enrichment")
+            break
+        except Exception as exc:  # never suppress: log + record, then decide
+            failed_count += len(page_stmts)
+            retries = exc.retries_used if isinstance(exc, ChunkExtractionError) else 0
+            LOGGER.error("  Page %d enrichment failed: %s", page_num, exc)
+            _record_chunk_failure(result, page_num, page_num, retries, str(exc), "vision_enrichment")
+            consecutive_failures += 1
+            if consecutive_failures >= max_consecutive_failures:
+                remaining = pages[i + 1 :]
+                failed_count += sum(len(by_page[p]) for p in remaining)
+                _record_run_abort(
+                    result, remaining,
+                    f"aborted after {consecutive_failures} consecutive failures",
+                    "vision_enrichment",
+                )
+                break
+        else:
+            consecutive_failures = 0
+            enriched_count += enriched
+            LOGGER.info(
+                "  Page %d/%d (p.%d): %d/%d enriched",
+                i + 1, len(pages), page_num, enriched, len(page_stmts),
+            )
+    return enriched_count, failed_count
 
 
 # ============================================================================
@@ -1233,23 +1603,17 @@ def _overlaps_existing(
     return False
 
 
-def detect_implicit_obligations(
-    result: ExtractionResult,
-    pdf_path: Path,
-    *,
-    api_key: str | None = None,
-    max_pages: int = 0,
-    min_confidence: float = 0.0,
-) -> ExtractionResult:
-    """Pass 1c: Detect implicit obligations that lack standard obligation keywords.
+IMPLICIT_CHUNK_SIZE = 5
 
-    Sends each page to Claude with the already-extracted explicit statements
-    for that page, asking it to find binding requirements expressed without
-    shall/must/required/prohibited language.
+# WHY 0.6: an implicit obligation is often a light paraphrase of the page
+# text; 60% of an 80-char prefix matching contiguously is strong evidence the
+# statement came from that page, while anything lower is guesswork we refuse
+# to present as a citation.
+_PAGE_ATTRIBUTION_MIN_RATIO = 0.6
 
-    New statements are added with obligation_type='implicit' and the
-    confidence score from the LLM.
-    """
+
+def _build_implicit_client(api_key: str | None):
+    """Construct the Anthropic client used for implicit detection."""
     import os
 
     try:
@@ -1267,7 +1631,7 @@ def detect_implicit_obligations(
         raise ValueError(
             "No API key found. Set ANTHROPIC_API_KEY or pass --api-key"
         )
-    client = Anthropic(
+    return Anthropic(
         api_key=key,
         timeout=httpx.Timeout(
             float(os.environ.get("ORACLE_TIMEOUT_SECONDS", "300")),
@@ -1275,20 +1639,272 @@ def detect_implicit_obligations(
         ),
     )
 
-    doc = fitz.open(pdf_path)
-    total_pages = len(doc)
 
-    # Build per-page index of already-extracted statements
-    existing_by_page: dict[int, list[ShallStatement]] = {}
-    for s in result.statements:
-        existing_by_page.setdefault(s.page, []).append(s)
+def _implicit_chunk_inputs(
+    doc,
+    chunk_page_indices: list[int],
+    existing_by_page: dict[int, list[ShallStatement]],
+) -> tuple[list[tuple[int, str]], list[str]]:
+    """Collect (page_number, preprocessed_text) pairs and the already-extracted
+    statement summary lines for one chunk."""
+    chunk_pages: list[tuple[int, str]] = []
+    already_lines: list[str] = []
+    for page_idx in chunk_page_indices:
+        raw_text = doc[page_idx].get_text()
+        if not raw_text or len(raw_text.strip()) < 20:
+            continue
+        page_num = page_idx + 1
+        chunk_pages.append((page_num, _preprocess_page_text(raw_text)))
+        for s in existing_by_page.get(page_num, []):
+            already_lines.append(
+                f"  - [{s.obligation_keyword.upper()}] {s.statement_text[:200]}"
+            )
+    return chunk_pages, already_lines
 
-    # Build normalized text set for dedup
-    existing_norm_texts: set[str] = {
-        _normalize_for_dedup(s.statement_text) for s in result.statements
+
+def _implicit_prompt_content(
+    chunk_pages: list[tuple[int, str]],
+    already_lines: list[str],
+) -> str:
+    page_texts = [f"--- PAGE {num} ---\n{text}" for num, text in chunk_pages]
+    already_section = ""
+    if already_lines:
+        already_section = (
+            "\n\nALREADY EXTRACTED (do not re-extract these):\n"
+            + "\n".join(already_lines)
+        )
+    return "\n\n".join(page_texts) + already_section + "\n\n" + IMPLICIT_DETECTION_PROMPT
+
+
+def _attribute_statement_page(
+    stmt_text: str,
+    chunk_pages: list[tuple[int, str]],
+) -> tuple[int, bool]:
+    """Attribute an implicit obligation to a page within its chunk.
+
+    WHY not default to the chunk's first page (old behavior): that fabricated
+    citation precision — a reviewer checking "p.6" would find nothing there.
+    Exact substring wins; otherwise a difflib longest-block fuzzy match must
+    clear _PAGE_ATTRIBUTION_MIN_RATIO, else we return (0, uncertain=True).
+    """
+    needle = re.sub(r"\s+", " ", stmt_text.lower()).strip()[:80]
+    if not needle:
+        return 0, True
+    best_page, best_score = 0, 0.0
+    for page_num, page_text in chunk_pages:
+        hay = re.sub(r"\s+", " ", page_text.lower())
+        if needle[:50] in hay:
+            return page_num, False
+        match = difflib.SequenceMatcher(
+            None, needle, hay, autojunk=False
+        ).find_longest_match(0, len(needle), 0, len(hay))
+        score = match.size / max(len(needle), 1)
+        if score > best_score:
+            best_page, best_score = page_num, score
+    if best_score >= _PAGE_ATTRIBUTION_MIN_RATIO:
+        return best_page, False
+    return 0, True
+
+
+def _implicit_statement_from_payload(
+    ob: dict,
+    chunk_pages: list[tuple[int, str]],
+    min_confidence: float,
+    existing_norm_texts: set[str],
+    next_id: int,
+) -> ShallStatement | None:
+    """Convert one model-emitted obligation dict into a ShallStatement."""
+    stmt_text = str(ob.get("statement_text", "")).strip()
+    if not stmt_text or len(stmt_text) < 15:
+        return None
+    confidence = float(ob.get("confidence", 0.5))
+    if confidence < min_confidence:
+        return None
+    # Dedup against existing explicit statements
+    if _overlaps_existing(stmt_text, existing_norm_texts):
+        return None
+    keywords_list = ob.get("keywords", [])
+    if isinstance(keywords_list, str):
+        keywords_list = [keywords_list]
+    page_num, page_uncertain = _attribute_statement_page(stmt_text, chunk_pages)
+    return ShallStatement(
+        id=next_id,
+        page=page_num,
+        section=ob.get("section", ""),
+        obligation_keyword="(implicit)",
+        obligation_type="implicit",
+        statement_text=stmt_text,
+        subject=ob.get("subject", "(implicit)"),
+        requirement=ob.get("requirement", stmt_text),
+        context=ob.get("context", ""),
+        keywords=keywords_list[:7],
+        applies_to=_classify_applicability(stmt_text, ob.get("context", "")),
+        confidence=confidence,
+        page_uncertain=page_uncertain,
+    )
+
+
+def _append_chunk_statements(
+    parsed: dict,
+    chunk_pages: list[tuple[int, str]],
+    min_confidence: float,
+    existing_norm_texts: set[str],
+    new_statements: list[ShallStatement],
+    next_id: int,
+) -> int:
+    """Append statements parsed from one chunk payload; returns count added."""
+    added = 0
+    obligations = parsed.get("obligations", []) if isinstance(parsed, dict) else []
+    for ob in obligations:
+        if not isinstance(ob, dict):
+            continue
+        stmt = _implicit_statement_from_payload(
+            ob, chunk_pages, min_confidence, existing_norm_texts, next_id + added,
+        )
+        if stmt is None:
+            continue
+        new_statements.append(stmt)
+        existing_norm_texts.add(_normalize_for_dedup(stmt.statement_text))
+        added += 1
+    return added
+
+
+def _implicit_chunk_spans(page_count: int) -> list[tuple[int, int]]:
+    """Yield (start, end) index spans of IMPLICIT_CHUNK_SIZE pages.
+
+    WHY advance by CHUNK_SIZE-1: consecutive chunks share one page (parity
+    with generic extraction's 1-page overlap) so an obligation split across a
+    chunk boundary is seen whole by one of the chunks; _overlaps_existing
+    dedups the resulting duplicates.
+    """
+    spans: list[tuple[int, int]] = []
+    start = 0
+    while start < page_count:
+        end = min(start + IMPLICIT_CHUNK_SIZE, page_count)
+        spans.append((start, end))
+        start = end - 1 if end < page_count else end
+    return spans
+
+
+def _implicit_chunk_request(
+    model: str,
+    chunk_pages: list[tuple[int, str]],
+    already_lines: list[str],
+) -> dict:
+    return {
+        "model": model,
+        "max_tokens": 4096,
+        "temperature": 0,
+        "messages": [
+            {"role": "user", "content": _implicit_prompt_content(chunk_pages, already_lines)}
+        ],
     }
 
-    pages_to_process = list(range(total_pages))
+
+def _note_implicit_chunk_failure(
+    result: ExtractionResult, exc: Exception, page_lo: int, page_hi: int,
+) -> None:
+    """Log a chunk failure AND record it in result metadata (never suppress)."""
+    retries = exc.retries_used if isinstance(exc, ChunkExtractionError) else 0
+    LOGGER.error("  Pages %d–%d: %s", page_lo, page_hi, exc)
+    _record_chunk_failure(result, page_lo, page_hi, retries, str(exc), "text_implicit")
+
+
+def _abort_remaining_implicit(
+    result: ExtractionResult, pages_to_process: list[int], from_index: int, reason: str,
+) -> None:
+    remaining = [idx + 1 for idx in pages_to_process[from_index:]]
+    _record_run_abort(result, remaining, reason, "text_implicit")
+
+
+def _existing_statement_index(
+    result: ExtractionResult,
+) -> tuple[dict[int, list[ShallStatement]], set[str]]:
+    """Index already-extracted statements by page + normalized-text dedup set."""
+    by_page: dict[int, list[ShallStatement]] = {}
+    for s in result.statements:
+        by_page.setdefault(s.page, []).append(s)
+    norm_texts = {_normalize_for_dedup(s.statement_text) for s in result.statements}
+    return by_page, norm_texts
+
+
+def _scan_implicit_chunks(
+    result: ExtractionResult,
+    doc,
+    client,
+    *,
+    model: str,
+    pages_to_process: list[int],
+    min_confidence: float,
+    max_consecutive_failures: int,
+    retry_base_delay: float,
+) -> list[ShallStatement]:
+    """Run the chunked implicit-detection loop, recording failures on result."""
+    existing_by_page, existing_norm_texts = _existing_statement_index(result)
+    new_statements: list[ShallStatement] = []
+    next_id = max((s.id for s in result.statements), default=0) + 1
+    consecutive_failures = 0
+    for start, end in _implicit_chunk_spans(len(pages_to_process)):
+        chunk_indices = pages_to_process[start:end]
+        chunk_pages, already_lines = _implicit_chunk_inputs(doc, chunk_indices, existing_by_page)
+        if not chunk_pages:
+            continue
+        page_lo, page_hi = chunk_indices[0] + 1, chunk_indices[-1] + 1
+        try:
+            parsed, _ = _request_json_with_reprompt(
+                client,
+                _implicit_chunk_request(model, chunk_pages, already_lines),
+                base_delay=retry_base_delay,
+            )
+        except ExtractionAbortedError as exc:
+            _abort_remaining_implicit(result, pages_to_process, start, str(exc))
+            break
+        except Exception as exc:  # never suppress — log + record in metadata
+            _note_implicit_chunk_failure(result, exc, page_lo, page_hi)
+            consecutive_failures += 1
+            if consecutive_failures >= max_consecutive_failures:
+                next_start = end - 1 if end < len(pages_to_process) else end
+                _abort_remaining_implicit(result, pages_to_process, next_start,
+                                          f"aborted after {consecutive_failures} consecutive chunk failures")
+                break
+        else:
+            consecutive_failures = 0
+            added = _append_chunk_statements(
+                parsed, chunk_pages, min_confidence,
+                existing_norm_texts, new_statements, next_id,
+            )
+            next_id += added
+            LOGGER.info("  Pages %d–%d: found %d implicit obligations", page_lo, page_hi, added)
+    return new_statements
+
+
+def detect_implicit_obligations(
+    result: ExtractionResult,
+    pdf_path: Path,
+    *,
+    api_key: str | None = None,
+    max_pages: int = 0,
+    min_confidence: float = 0.0,
+    client=None,
+    max_consecutive_failures: int = 3,
+    retry_base_delay: float = 1.0,
+) -> ExtractionResult:
+    """Pass 1c: Detect implicit obligations that lack standard obligation keywords.
+
+    Sends each page chunk to Claude with the already-extracted explicit
+    statements, asking it to find binding requirements expressed without
+    shall/must/required/prohibited language.  New statements are added with
+    obligation_type='implicit' and the confidence score from the LLM.
+
+    Chunk failures are logged AND recorded in result.chunk_failures /
+    result.extraction_status (spec §5.4/§5.5).  ``client`` may be injected
+    for testing; it must expose ``messages.create``.
+    """
+    if client is None:
+        client = _build_implicit_client(api_key)
+
+    doc = fitz.open(pdf_path)
+    pages_to_process = list(range(len(doc)))
     if max_pages and max_pages > 0:
         pages_to_process = pages_to_process[:max_pages]
 
@@ -1296,168 +1912,33 @@ def detect_implicit_obligations(
         "Pass 1c: detecting implicit obligations across %d pages",
         len(pages_to_process),
     )
-
-    new_statements: list[ShallStatement] = []
-    next_id = max((s.id for s in result.statements), default=0) + 1
-    failed_pages = 0
+    _log_run_estimate("Pass 1c (implicit obligations)", len(pages_to_process))
     started = time.time()
 
-    # Process in chunks of 5 pages (same chunking as generic extraction)
-    CHUNK_SIZE = 5
-    chunk_start = 0
+    import os
 
-    while chunk_start < len(pages_to_process):
-        chunk_end = min(chunk_start + CHUNK_SIZE, len(pages_to_process))
-        chunk_page_indices = pages_to_process[chunk_start:chunk_end]
-        chunk_page_numbers = [idx + 1 for idx in chunk_page_indices]
-
-        # Build page text and existing obligations summary for the chunk
-        page_texts = []
-        already_extracted_lines = []
-
-        for page_idx in chunk_page_indices:
-            raw_text = doc[page_idx].get_text()
-            if not raw_text or len(raw_text.strip()) < 20:
-                continue
-            text = _preprocess_page_text(raw_text)
-            page_num = page_idx + 1
-            page_texts.append(f"--- PAGE {page_num} ---\n{text}")
-
-            page_stmts = existing_by_page.get(page_num, [])
-            for s in page_stmts:
-                already_extracted_lines.append(
-                    f"  - [{s.obligation_keyword.upper()}] {s.statement_text[:200]}"
-                )
-
-        if not page_texts:
-            chunk_start = chunk_end
-            continue
-
-        already_section = ""
-        if already_extracted_lines:
-            already_section = (
-                "\n\nALREADY EXTRACTED (do not re-extract these):\n"
-                + "\n".join(already_extracted_lines)
-            )
-
-        content = (
-            "\n\n".join(page_texts)
-            + already_section
-            + "\n\n"
-            + IMPLICIT_DETECTION_PROMPT
-        )
-
-        try:
-            response = client.messages.create(
-                model=os.environ.get("ORACLE_VISION_MODEL", "claude-sonnet-4-6"),
-                max_tokens=4096,
-                temperature=0,
-                messages=[{"role": "user", "content": content}],
-            )
-
-            if not response.content:
-                chunk_start = chunk_end
-                continue
-
-            raw_response = response.content[0].text
-
-            # Strip markdown fences if present
-            if "```" in raw_response:
-                start_idx = raw_response.find("```")
-                first_nl = raw_response.find("\n", start_idx)
-                end_idx = raw_response.rfind("```")
-                if first_nl != -1 and end_idx > first_nl:
-                    raw_response = raw_response[first_nl + 1 : end_idx].strip()
-
-            parsed = json.loads(raw_response)
-            obligations = parsed.get("obligations", [])
-
-            chunk_new = 0
-            for ob in obligations:
-                stmt_text = ob.get("statement_text", "").strip()
-                if not stmt_text or len(stmt_text) < 15:
-                    continue
-
-                confidence = float(ob.get("confidence", 0.5))
-                if confidence < min_confidence:
-                    continue
-
-                # Dedup against existing explicit statements
-                if _overlaps_existing(stmt_text, existing_norm_texts):
-                    continue
-
-                section = ob.get("section", "")
-                requirement = ob.get("requirement", stmt_text)
-                subject = ob.get("subject", "(implicit)")
-                keywords_list = ob.get("keywords", [])
-                if isinstance(keywords_list, str):
-                    keywords_list = [keywords_list]
-
-                page_num = chunk_page_numbers[0]  # default to first page in chunk
-                # Try to figure out which page this came from
-                for pn in chunk_page_numbers:
-                    page_stmts_text = "\n".join(
-                        p for p in page_texts
-                        if p.startswith(f"--- PAGE {pn} ---")
-                    )
-                    if stmt_text[:50].lower() in page_stmts_text.lower():
-                        page_num = pn
-                        break
-
-                applies_to = _classify_applicability(stmt_text, ob.get("context", ""))
-
-                stmt = ShallStatement(
-                    id=next_id,
-                    page=page_num,
-                    section=section,
-                    obligation_keyword="(implicit)",
-                    obligation_type="implicit",
-                    statement_text=stmt_text,
-                    subject=subject,
-                    requirement=requirement,
-                    context=ob.get("context", ""),
-                    keywords=keywords_list[:7],
-                    applies_to=applies_to,
-                    confidence=confidence,
-                )
-                new_statements.append(stmt)
-                existing_norm_texts.add(_normalize_for_dedup(stmt_text))
-                next_id += 1
-                chunk_new += 1
-
-            LOGGER.info(
-                "  Pages %d–%d: found %d implicit obligations",
-                chunk_page_numbers[0],
-                chunk_page_numbers[-1],
-                chunk_new,
-            )
-
-        except json.JSONDecodeError as e:
-            failed_pages += len(chunk_page_indices)
-            LOGGER.warning(
-                "  Pages %d–%d: JSON parse failed: %s",
-                chunk_page_numbers[0],
-                chunk_page_numbers[-1],
-                e,
-            )
-        except Exception as e:
-            failed_pages += len(chunk_page_indices)
-            LOGGER.error(
-                "  Pages %d–%d: %s",
-                chunk_page_numbers[0],
-                chunk_page_numbers[-1],
-                e,
-            )
-
-        chunk_start = chunk_end
-
+    new_statements = _scan_implicit_chunks(
+        result, doc, client,
+        model=os.environ.get("ORACLE_VISION_MODEL", "claude-sonnet-4-6"),
+        pages_to_process=pages_to_process,
+        min_confidence=min_confidence,
+        max_consecutive_failures=max_consecutive_failures,
+        retry_base_delay=retry_base_delay,
+    )
     doc.close()
+    _finalize_implicit_result(result, new_statements, started)
+    return result
 
-    # Append to result
+
+def _finalize_implicit_result(
+    result: ExtractionResult,
+    new_statements: list[ShallStatement],
+    started: float,
+) -> None:
+    """Merge new implicit statements into the result and renumber IDs."""
     result.statements.extend(new_statements)
     result.total_statements = len(result.statements)
 
-    # Update by_type counts
     implicit_count = sum(1 for s in result.statements if s.obligation_type == "implicit")
     if implicit_count > 0:
         result.by_type["implicit"] = implicit_count
@@ -1466,14 +1947,11 @@ def detect_implicit_obligations(
     for i, s in enumerate(result.statements, 1):
         s.id = i
 
-    elapsed = time.time() - started
     LOGGER.info(
-        "Pass 1c complete: %d implicit obligations found, %d pages failed (%.1fs)",
-        len(new_statements),
-        failed_pages,
-        elapsed,
+        "Pass 1c complete: %d implicit obligations found, %d chunk failure(s), status=%s (%.1fs)",
+        len(new_statements), len(result.chunk_failures),
+        result.extraction_status, time.time() - started,
     )
-    return result
 
 
 # ============================================================================
