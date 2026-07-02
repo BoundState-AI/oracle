@@ -102,6 +102,13 @@ def detect_drift(session: Any) -> list[DriftEvent]:
     for (idx_a, round_a), (idx_b, round_b) in zip(valid, valid[1:]):
         draft_a, draft_b = drafts[idx_a], drafts[idx_b]
         for oracle, output_a in round_a.reviewer_outputs.items():
+            # An oracle absent from the later round entirely (roster
+            # reconfiguration, degraded quorum) didn't abandon anything —
+            # like the error case below, silence is an outage, not a
+            # position change. Without this guard every finding it raised
+            # becomes a false "abandoned" accusation.
+            if oracle not in round_b.reviewer_outputs:
+                continue
             output_b = round_b.reviewer_outputs.get(oracle, {})
             # A reviewer that FAILED in the later round (error placeholder,
             # degraded-quorum round) didn't abandon anything — its silence

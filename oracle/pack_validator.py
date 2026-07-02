@@ -30,7 +30,7 @@ import logging
 import re
 from typing import Any
 
-LOGGER = logging.getLogger("pack_validator")
+LOGGER = logging.getLogger("oracle.pack_validator")
 
 # ---------------------------------------------------------------------------
 # We inline the schemas here rather than loading from external .json files.
@@ -275,15 +275,18 @@ def detect_schema_version(pack_data: dict[str, Any]) -> str | None:
     if sv in _SCHEMA_MAP:
         return sv
 
-    # Heuristic fallback: sniff fields to guess schema
+    # Heuristic fallback: sniff fields to guess schema. isinstance guards:
+    # imported packs are arbitrary JSON — a list of strings here must yield
+    # a validation error downstream, not an AttributeError traceback.
     if pack_data.get("requirements") and any(
-        r.get("source_tag") or r.get("shall_text") for r in pack_data.get("requirements", [])
+        isinstance(r, dict) and (r.get("source_tag") or r.get("shall_text"))
+        for r in pack_data.get("requirements", [])
     ):
         return "gpcm_rulepack/v1"
     if pack_data.get("part_index") and pack_data.get("parts"):
         return "far_rulepack/v1"
     if pack_data.get("rules") and any(
-        r.get("rule_id") for r in pack_data.get("rules", [])
+        isinstance(r, dict) and r.get("rule_id") for r in pack_data.get("rules", [])
     ):
         return "oracle_generic/v1"
 
@@ -316,9 +319,18 @@ def validate_pack(pack_data: dict[str, Any]) -> list[str]:
 
     schema = _SCHEMA_MAP[schema_version]
 
-    # Try jsonschema library first (full validation)
+    # Try jsonschema library first (full validation).
+    # WHY the except covers ONLY the import: this gate is safety-critical.
+    # An exception raised *during* validation (schema/library version
+    # mismatch, malformed inline schema) must surface, not silently
+    # downgrade full validation to the weaker structural fallback — that
+    # would let an invalid pack into the library with a DEBUG-level log
+    # as the only trace.
     try:
         import jsonschema
+    except ImportError:
+        LOGGER.debug("jsonschema not installed — using structural validation fallback")
+    else:
         validator_cls = getattr(jsonschema, "Draft202012Validator", None)
         if validator_cls is None:
             validator_cls = jsonschema.validators.validator_for(schema)
@@ -327,14 +339,30 @@ def validate_pack(pack_data: dict[str, Any]) -> list[str]:
             path = " → ".join(str(p) for p in error.absolute_path) or "(root)"
             errors.append(f"[{path}] {error.message}")
         return errors
-    except (ImportError, AttributeError):
-        LOGGER.debug("jsonschema not installed — using structural validation fallback")
 
     # Fallback: manual structural checks for required fields
     required = schema.get("required", [])
     for field_name in required:
         if field_name not in pack_data:
             errors.append(f"Missing required field: '{field_name}'")
+
+    # Item-level required fields: without these checks a pack whose rules
+    # lack the text fields the renderers depend on would pass the fallback
+    # and produce empty compliance context lines at review time.
+    _ITEM_REQUIRED = {
+        "gpcm_rulepack/v1": ("requirements", ("shall_text",)),
+        "oracle_generic/v1": ("rules", ("rule_id", "statement_text")),
+    }
+    item_spec = _ITEM_REQUIRED.get(schema_version)
+    if item_spec:
+        container_key, item_fields = item_spec
+        for i, item in enumerate(pack_data.get(container_key, [])):
+            if not isinstance(item, dict):
+                errors.append(f"{container_key}[{i}] must be an object")
+                continue
+            for f in item_fields:
+                if not item.get(f):
+                    errors.append(f"{container_key}[{i}] missing required field: '{f}'")
 
     # Check oracle_metadata sub-fields
     if "oracle_metadata" in pack_data:

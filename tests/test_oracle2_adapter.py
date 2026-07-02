@@ -138,3 +138,138 @@ def test_verify_session_dir_accepts_manual_workflow_files(tmp_path):
     errors = verify_session_dir(tmp_path)
 
     assert errors == []
+
+
+def test_converged_session_with_corrupt_normalized_file_raises(tmp_path):
+    """AUDIT F1 extension: existence is not enough — the file must parse.
+
+    A truncated round file in a converged session previously passed the
+    existence guard and silently reported a clean review.
+    """
+    _write_summary(tmp_path, total_rounds=1, converged=True)
+    _write(tmp_path, "final_draft.md", "# Draft\n")
+    (tmp_path / "round1_sonnet_normalized.json").write_text(
+        '{"normalized_issues": [{"issue_id": "R1-IS', encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="out of sync"):
+        build_review_result(tmp_path)
+
+
+def test_converged_session_with_renamed_key_raises(tmp_path):
+    """A future oracle2 renaming 'normalized_issues' must fail loudly."""
+    _write_summary(tmp_path, total_rounds=1, converged=True)
+    _write(tmp_path, "final_draft.md", "# Draft\n")
+    _write(tmp_path, "round1_sonnet_normalized.json", {"issues_v2": []})
+
+    with pytest.raises(ValueError, match="out of sync"):
+        build_review_result(tmp_path)
+
+
+def test_converged_session_with_zero_issues_is_legitimate(tmp_path):
+    """An empty normalized_issues list with the key present is a real,
+    clean result — not an out-of-sync signature."""
+    _write_summary(tmp_path, total_rounds=1, converged=True)
+    _write(tmp_path, "final_draft.md", "# Draft\n")
+    _write(tmp_path, "round1_sonnet_normalized.json", {"normalized_issues": []})
+    _write(tmp_path, "round1_revised_draft.md", "# Draft\n")
+
+    result = build_review_result(tmp_path)
+    assert result.converged is True
+    assert result.metrics.total_issues_raised == 0
+
+
+def test_duplicate_count_read_from_dropped_findings(tmp_path):
+    _write_summary(tmp_path, total_rounds=1, converged=True)
+    _write(tmp_path, "final_draft.md", "# Draft\n")
+    _write(tmp_path, "round1_sonnet_normalized.json", {
+        "normalized_issues": [{
+            "issue_id": "R1-ISSUE-001",
+            "title": "Thing",
+            "severity": "high",
+            "core_problem": "p",
+            "recommended_fix": "f",
+        }],
+        "dropped_findings": [
+            {"reason": "duplicate", "title": "dupe 1"},
+            {"reason": "duplicate", "title": "dupe 2"},
+            {"reason": "unsupported", "title": "weak"},
+        ],
+    })
+
+    result = build_review_result(tmp_path)
+    assert result.metrics.duplicate_count == 2
+
+
+def test_rounds_to_stability_zero_when_never_unstable(tmp_path):
+    """A review with no accepted critical/high issue is stable from the
+    start — it must not report the maximum (len(rounds)) as before."""
+    _write_summary(tmp_path, total_rounds=1, converged=True)
+    _write(tmp_path, "final_draft.md", "# Draft\n")
+    _write(tmp_path, "round1_sonnet_normalized.json", {
+        "normalized_issues": [{
+            "issue_id": "R1-ISSUE-001",
+            "title": "Minor nit",
+            "severity": "medium",
+            "core_problem": "p",
+            "recommended_fix": "f",
+        }],
+    })
+    _write(tmp_path, "round1_beth_decisions.json", {
+        "revision_decisions": [{
+            "issue_id": "R1-ISSUE-001",
+            "decision": "accepted_defect",
+            "reason": "fair",
+        }],
+    })
+
+    result = build_review_result(tmp_path)
+    assert result.metrics.rounds_to_stability == 0
+
+
+def test_citation_regex_rejects_bracketed_prose():
+    from oracle.oracle2_adapter import extract_pack_citations
+
+    evidence = (
+        "[Note: this contradicts §4] and [WARNING: unverified] but also "
+        "[far-pack:far-15-001] is real."
+    )
+    citations = extract_pack_citations(evidence)
+
+    assert len(citations) == 1
+    assert citations[0].pack_id == "far-pack"
+    assert citations[0].rule_id == "far-15-001"
+
+
+def test_citation_context_fills_section_and_authority_and_fuzzy_matches():
+    from oracle.oracle2_adapter import extract_pack_citations
+
+    context = (
+        "## Authority 1: FAR (pack_id: far-pack)\n"
+        "[far-pack:far-15-001] §15.304 [SHALL]: The CO shall evaluate.\n"
+        "[far-pack:far-19-001] §19.202 [SHALL]: The CO shall document.\n"
+    )
+    evidence = (
+        "The draft violates [far-pack:far-15-001]; separately, "
+        "section 19.202 is not addressed."
+    )
+    citations = extract_pack_citations(evidence, context)
+
+    by_rule = {c.rule_id: c for c in citations}
+    assert by_rule["far-15-001"].section == "15.304"
+    assert by_rule["far-15-001"].authority_label == "Authority 1"
+    # Fuzzy pass: the bare "section 19.202" reference resolved unambiguously
+    assert "far-19-001" in by_rule
+
+
+def test_citation_context_rejects_pack_ids_absent_from_context():
+    from oracle.oracle2_adapter import extract_pack_citations
+
+    context = (
+        "## Authority 1: FAR (pack_id: far-pack)\n"
+        "[far-pack:far-15-001] §15.304 [SHALL]: The CO shall evaluate.\n"
+    )
+    # [12:30] is timestamp-shaped noise, not a pack in this session
+    citations = extract_pack_citations("At [12:30] we saw [far-pack:far-15-001].", context)
+
+    assert [c.rule_id for c in citations] == ["far-15-001"]

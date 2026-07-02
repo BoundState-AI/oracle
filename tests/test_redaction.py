@@ -74,3 +74,55 @@ def test_gemini_http_error_body_is_redacted(monkeypatch):
 
     assert "AIza" not in result["raw"]
     assert REDACTED in result["raw"]
+
+
+def test_redact_secrets_strips_aws_and_oauth_shapes():
+    text = (
+        "aws AKIAIOSFODNN7EXAMPLE and temp ASIAJEXAMPLEKEY12345 and "
+        "google oauth ya29.a0AfH6SMBexampletoken123"
+    )
+
+    redacted = redact_secrets(text)
+
+    assert "AKIA" not in redacted
+    assert "ASIA" not in redacted
+    assert "ya29." not in redacted
+    assert redacted.count(REDACTED) == 3
+
+
+def test_redact_secrets_strips_bare_jwt_without_bearer_prefix():
+    # Auth error bodies echo JWTs in JSON fields with no "Bearer " prefix
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.SflKxwRJSMeKKF2QT4fwpM"
+    text = f'{{"error": "invalid token: {jwt}"}}'
+
+    redacted = redact_secrets(text)
+
+    assert jwt not in redacted
+    assert REDACTED in redacted
+
+
+def test_redact_secrets_strips_literal_env_secret_values(tmp_path):
+    # Value-based redaction: the exact value of any *_API_KEY env var is
+    # stripped regardless of shape (closes the shape-drift gap).
+    import os
+
+    key_name = "TOTALLY_NEW_VENDOR_API_KEY"
+    key_value = "shapeless-secret-value-42"
+    os.environ[key_name] = key_value
+    try:
+        redacted = redact_secrets(f"request failed, sent key {key_value} upstream")
+        assert key_value not in redacted
+        assert REDACTED in redacted
+    finally:
+        del os.environ[key_name]
+
+
+def test_redact_secrets_ignores_short_env_values():
+    # A key set to a trivial value ("1", "test") must not shred prose.
+    import os
+
+    os.environ["TINY_API_KEY"] = "1"
+    try:
+        assert redact_secrets("round 1 completed") == "round 1 completed"
+    finally:
+        del os.environ["TINY_API_KEY"]

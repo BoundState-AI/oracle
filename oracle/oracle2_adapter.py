@@ -207,7 +207,48 @@ def verify_session_dir(session_dir: Path) -> list[str]:
 # was chosen because it doesn't conflict with Markdown link syntax and is
 # visually distinct in prose.  The colon separates pack from rule because
 # both IDs may contain hyphens.
-_CITATION_PATTERN = re.compile(r"\[([^:\]]+):([^\]]+)\]")
+# WHY no whitespace allowed in either part: reviewer prose contains
+# bracketed asides ("[Note: this contradicts §4]", "[WARNING: unverified]")
+# that the earlier permissive pattern turned into fabricated citations —
+# corrupting exactly the audit trail this exists for. Real identifiers are
+# slug/id shaped and never contain spaces.
+_CITATION_PATTERN = re.compile(r"\[([A-Za-z0-9][\w.\-]*):([A-Za-z0-9][\w.\-]*)\]")
+
+# Rendered compliance-context shapes (Section 7.2 renderers):
+#   [pack:rule] [MPR 1] §4.1.1 [SHALL]: text        (gpcm)
+#   [pack:rule] §15.304 [SHALL]: text               (far)
+#   [pack:rule] §211.22 [SHALL] (CRITICAL): text    (generic)
+_CONTEXT_RULE_LINE = re.compile(
+    r"\[([\w.\-]+):([\w.\-]+)\](?:\s+\[[^\]]+\])?\s+§\s*([\w.\-]+)"
+)
+_CONTEXT_AUTHORITY = re.compile(
+    r"Authority\s+(\d+):.*?\(pack_id:\s*([\w.\-]+)\)"
+)
+# Section references reviewers actually write when they don't use the
+# [pack:rule] identifier: "§15.304", "section 211.22", "FAR 15.304".
+_SECTION_REF = re.compile(
+    r"(?:§\s*|\bsection\s+|\bFAR\s+|\bDFARS\s+)(\d[\w.\-]*)", re.IGNORECASE
+)
+
+
+def _build_context_index(
+    compliance_context: str,
+) -> tuple[dict[tuple[str, str], str], dict[str, str], dict[str, list[tuple[str, str]]]]:
+    """Index the rendered compliance text for citation reconstruction.
+
+    Returns (rule→section, pack_id→authority_label, section→[(pack, rule)]).
+    """
+    rule_sections: dict[tuple[str, str], str] = {}
+    authority_labels: dict[str, str] = {}
+    section_rules: dict[str, list[tuple[str, str]]] = {}
+
+    for m in _CONTEXT_AUTHORITY.finditer(compliance_context):
+        authority_labels[m.group(2)] = f"Authority {m.group(1)}"
+    for m in _CONTEXT_RULE_LINE.finditer(compliance_context):
+        pack_id, rule_id, section = m.group(1), m.group(2), m.group(3).rstrip(".")
+        rule_sections[(pack_id, rule_id)] = section
+        section_rules.setdefault(section, []).append((pack_id, rule_id))
+    return rule_sections, authority_labels, section_rules
 
 
 def extract_pack_citations(
@@ -216,9 +257,12 @@ def extract_pack_citations(
 ) -> list[PackCitation]:
     """Extract pack rule citations from reviewer evidence text.
 
-    Scans for [pack_id:rule_id] patterns embedded by the pack renderers.
-    Falls back to fuzzy section matching against compliance_context if
-    explicit citations are not found.
+    Pass 1 scans for explicit [pack_id:rule_id] identifiers embedded by
+    the pack renderers. Pass 2 (spec 7.3 fuzzy matching, only when
+    compliance_context is available) resolves bare section references
+    ("§15.304", "FAR 15.304") against the rendered context — but only
+    when the section maps to exactly one rule, because a guessed citation
+    is worse than an empty one in an audit trail.
 
     Args:
         evidence_text: The reviewer's prose (from best_evidence / core_problem).
@@ -230,26 +274,49 @@ def extract_pack_citations(
     citations: list[PackCitation] = []
     seen: set[tuple[str, str]] = set()
 
+    rule_sections: dict[tuple[str, str], str] = {}
+    authority_labels: dict[str, str] = {}
+    section_rules: dict[str, list[tuple[str, str]]] = {}
+    if compliance_context:
+        rule_sections, authority_labels, section_rules = _build_context_index(
+            compliance_context
+        )
+
+    def _add(pack_id: str, rule_id: str) -> None:
+        key = (pack_id, rule_id)
+        if key in seen:
+            return
+        seen.add(key)
+        citations.append(PackCitation(
+            pack_id=pack_id,
+            authority_label=authority_labels.get(pack_id, ""),
+            rule_id=rule_id,
+            section=rule_sections.get(key, ""),
+        ))
+
     # Pass 1: Explicit [pack_id:rule_id] patterns
     for match in _CITATION_PATTERN.finditer(evidence_text):
-        pack_id = match.group(1).strip()
-        rule_id = match.group(2).strip()
+        pack_id = match.group(1)
+        rule_id = match.group(2)
 
         # Skip patterns that look like markdown links or issue IDs
         if pack_id.startswith("R") and "-ISSUE-" in rule_id:
             continue
         if pack_id.startswith("http"):
             continue
+        # With a context available, only pack ids that actually appeared in
+        # it are credible — this drops timestamp-shaped noise like [12:30].
+        if rule_sections and not any(p == pack_id for p, _ in rule_sections):
+            continue
 
-        key = (pack_id, rule_id)
-        if key not in seen:
-            seen.add(key)
-            citations.append(PackCitation(
-                pack_id=pack_id,
-                authority_label="",   # Populated later by caller if needed
-                rule_id=rule_id,
-                section="",           # Could be extracted from compliance_context
-            ))
+        _add(pack_id, rule_id)
+
+    # Pass 2: bare section references, resolved against the context index.
+    for match in _SECTION_REF.finditer(evidence_text):
+        section = match.group(1).rstrip(".")
+        matches = section_rules.get(section, [])
+        if len(matches) == 1:
+            _add(*matches[0])
 
     return citations
 
@@ -261,7 +328,7 @@ def extract_pack_citations(
 def _parse_normalized_issues(
     file_path: Path,
     compliance_context: str | None = None,
-) -> list[NormalizedIssue]:
+) -> tuple[list[NormalizedIssue], bool, int]:
     """Parse a normalized-issues round file into NormalizedIssue objects.
 
     Accepts both per-workflow shapes:
@@ -271,21 +338,42 @@ def _parse_normalized_issues(
         source_reviewers=["Fran", ...]
     Handles both the nested {"normalized_issues": [...]} format and
     bare list format.
+
+    Returns (issues, recognized, duplicate_dropped) where `recognized`
+    distinguishes "parsed a shape we understand (possibly zero issues)"
+    from "unreadable or unrecognized shape". WHY: the AUDIT F1 guard in
+    build_review_result must treat a converged session whose round files
+    all failed to parse (truncated JSON, renamed key in a future oracle2)
+    exactly like one with no files at all — otherwise a corrupt session
+    silently reports a clean review. `duplicate_dropped` counts the
+    referee's dropped_findings with reason "duplicate" (ledger workflow
+    only; the manual workflow emits no drop signal).
     """
     try:
         raw = json.loads(file_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as e:
         LOGGER.warning(f"Failed to parse {file_path.name}: {e}")
-        return []
+        return [], False, 0
 
+    duplicate_dropped = 0
     # Handle nested or bare format
     if isinstance(raw, dict):
-        items = raw.get("normalized_issues", [])
+        if "normalized_issues" not in raw:
+            LOGGER.warning(
+                f"{file_path.name} is a dict without 'normalized_issues' — "
+                f"unrecognized shape, treating as unreadable"
+            )
+            return [], False, 0
+        items = raw["normalized_issues"]
+        duplicate_dropped = sum(
+            1 for d in raw.get("dropped_findings", [])
+            if isinstance(d, dict) and d.get("reason") == "duplicate"
+        )
     elif isinstance(raw, list):
         items = raw
     else:
         LOGGER.warning(f"Unexpected format in {file_path.name}: {type(raw)}")
-        return []
+        return [], False, 0
 
     issues: list[NormalizedIssue] = []
     for item in items:
@@ -324,7 +412,7 @@ def _parse_normalized_issues(
         )
         issues.append(issue)
 
-    return issues
+    return issues, True, duplicate_dropped
 
 
 def _parse_coordinator_decisions(file_path: Path) -> list[CoordinatorDecision]:
@@ -400,37 +488,27 @@ def build_review_result(
     total_rounds = summary.get("total_rounds", 0)
     converged = summary.get("converged", False)
 
-    # Fail hard on the out-of-sync signature (AUDIT F1): a session that
-    # claims convergence must have produced normalized-issue files. If it
-    # converged and none are readable, the adapter no longer understands
-    # this oracle2 version's output — continuing would silently report
-    # zero issues and unknown severities for a "successful" review.
-    # Non-converged sessions (e.g., every round invalid after a vendor
-    # outage) legitimately have no normalized files and parse to rounds=[].
-    has_normalized_files = any(
-        (session_dir / f"round{n}_{source}_normalized.json").exists()
-        for n in range(1, total_rounds + 1)
-        for source in ("sonnet", "beth")
-    )
-    if converged and total_rounds > 0 and not has_normalized_files:
-        raise ValueError(
-            "Session reports convergence but contains no normalized issue "
-            "files (round*_sonnet_normalized.json / round*_beth_normalized.json) "
-            "— oracle2_adapter is out of sync with the workflow output."
-        )
-
     # --- Final draft ---
     final_draft_path = session_dir / "final_draft.md"
     final_draft = final_draft_path.read_text(encoding="utf-8")
 
     # --- Build rounds ---
     rounds: list[RoundData] = []
+    recognized_normalized = 0
+    duplicate_count = 0
     for round_num in range(1, total_rounds + 1):
         # Normalized issues — ledger filename first, then manual
         norm_path = session_dir / f"round{round_num}_sonnet_normalized.json"
         if not norm_path.exists():
             norm_path = session_dir / f"round{round_num}_beth_normalized.json"
-        normalized = _parse_normalized_issues(norm_path, compliance_context) if norm_path.exists() else []
+        normalized: list[NormalizedIssue] = []
+        if norm_path.exists():
+            normalized, recognized, dropped = _parse_normalized_issues(
+                norm_path, compliance_context
+            )
+            if recognized:
+                recognized_normalized += 1
+                duplicate_count += dropped
 
         # Coordinator decisions
         beth_path = session_dir / f"round{round_num}_beth_decisions.json"
@@ -449,8 +527,24 @@ def build_review_result(
                 revised_draft=revised_draft,
             ))
 
+    # Fail hard on the out-of-sync signature (AUDIT F1): a session that
+    # claims convergence must have produced *readable* normalized-issue
+    # files. Checking readability rather than mere existence closes the
+    # gap where a truncated file or a future oracle2 renaming the
+    # "normalized_issues" key passed an existence check and silently
+    # reported zero issues for a "successful" review.
+    # Non-converged sessions (e.g., every round invalid after a vendor
+    # outage) legitimately have no normalized files and parse to rounds=[].
+    if converged and total_rounds > 0 and recognized_normalized == 0:
+        raise ValueError(
+            "Session reports convergence but no normalized issue file "
+            "(round*_sonnet_normalized.json / round*_beth_normalized.json) "
+            "was readable — oracle2_adapter is out of sync with the "
+            "workflow output."
+        )
+
     # --- Compute metrics ---
-    metrics = _compute_metrics(rounds)
+    metrics = _compute_metrics(rounds, duplicate_count)
 
     return ReviewResult(
         session_id=session_id,
@@ -464,12 +558,17 @@ def build_review_result(
     )
 
 
-def _compute_metrics(rounds: list[RoundData]) -> MetricsSummary:
+def _compute_metrics(rounds: list[RoundData], duplicate_count: int = 0) -> MetricsSummary:
     """Compute aggregated metrics from round data.
 
     This is the adapter's own computation, independent of oracle2's
     compute_metrics(). We aggregate from the structured data we parsed,
     ensuring consistency with ORACLE's findings report.
+
+    duplicate_count is passed in by build_review_result, which sums the
+    referee's dropped_findings(reason="duplicate") while parsing round
+    files (ledger workflow only — the manual workflow emits no drop
+    signal, so it legitimately reports 0).
     """
     accepted_by_severity: dict[str, int] = {}
     rejected_count = 0
@@ -477,7 +576,6 @@ def _compute_metrics(rounds: list[RoundData]) -> MetricsSummary:
     unresolved_count = 0
     total_raised = 0
     total_accepted = 0
-    duplicate_count = 0  # From normalizer's dropped_findings
     last_critical_high_round = 0
 
     for rd in rounds:
@@ -523,7 +621,12 @@ def _compute_metrics(rounds: list[RoundData]) -> MetricsSummary:
         preference_only_count=preference_count,
         unresolved_count=unresolved_count,
         duplicate_count=duplicate_count,
-        rounds_to_stability=last_critical_high_round if last_critical_high_round else len(rounds),
+        # Spec 7.3: "last round in which a new critical or high issue was
+        # accepted." 0 means stable from the start. WHY not len(rounds):
+        # that fallback made the *cleanest* reviews report the *maximum*
+        # rounds-to-stability, and counted data-bearing rounds rather
+        # than round numbers.
+        rounds_to_stability=last_critical_high_round,
         total_issues_raised=total_raised,
         total_issues_accepted=total_accepted,
     )
