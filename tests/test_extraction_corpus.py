@@ -293,6 +293,63 @@ def test_pattern_tolerates_common_abbreviations():
     assert match.group(1).endswith("in oxygen service")
 
 
+# NOTE: the following pin the FIXED behavior for citation abbreviations and
+# lowercase sentence starts.  Previously "Pub. L. 95-507" truncated the
+# obligation at "Pub" (missing stems, and no single-capital rule for "L."),
+# and "…comply. the vendor must report." fused two duties into one statement
+# because a boundary required a capital/digit after the period.
+
+
+def test_pattern_captures_past_statutory_citation():
+    text = "The contractor shall comply with Pub. L. 95-507 and shall report annually."
+    match = OBLIGATION_PATTERN.search(text)
+    assert match is not None
+    assert match.group(1) == (
+        "The contractor shall comply with Pub. L. 95-507 and shall report annually"
+    )
+
+
+def test_pattern_tolerates_citation_abbreviation_family():
+    text = (
+        "Work must conform to Ch. 137 and Stat. 657 plus Dept. of Defense "
+        "guidance in Amdt. 4, Rev. A of Vol. II, per Fig. 3 and No. 12."
+    )
+    match = OBLIGATION_PATTERN.search(text)
+    assert match is not None
+    assert match.group(1).endswith("per Fig. 3 and No. 12")
+
+
+def test_single_capital_letter_is_never_a_sentence_end():
+    text = "Deliveries shall follow 15 U.S.C. 637 as approved by John Q. Public."
+    match = OBLIGATION_PATTERN.search(text)
+    assert match is not None
+    assert match.group(1).endswith("as approved by John Q. Public")
+
+
+def test_lowercase_sentence_start_splits_distinct_obligations():
+    text = "the contractor shall comply. the vendor must report."
+    captured = [m.group(1) for m in OBLIGATION_PATTERN.finditer(text)]
+    assert captured == ["the contractor shall comply", "the vendor must report"]
+
+
+def test_lowercase_split_does_not_break_para_reference():
+    text = "The contractor shall proceed in accordance with para. (b) of this section."
+    captured = [m.group(1) for m in OBLIGATION_PATTERN.finditer(text)]
+    assert captured == [
+        "The contractor shall proceed in accordance with para. (b) of this section"
+    ]
+
+
+def test_lowercase_split_suppressed_after_digit():
+    # A digit before the period could be an enumerated list item ("5. the
+    # next item"), so the lowercase-starter boundary must not fire there.
+    text = "The contractor shall complete item 5. the next item is unrelated."
+    captured = [m.group(1) for m in OBLIGATION_PATTERN.finditer(text)]
+    assert captured == [
+        "The contractor shall complete item 5. the next item is unrelated"
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Exact-case unit tests: fix 2 — strongest-keyword classification
 # ---------------------------------------------------------------------------
@@ -331,10 +388,10 @@ def test_no_keyword_returns_empty():
 # ---------------------------------------------------------------------------
 
 
-def _stmt(id_: int, text: str, section: str) -> ShallStatement:
+def _stmt(id_: int, text: str, section: str, page: int = 1) -> ShallStatement:
     return ShallStatement(
         id=id_,
-        page=1,
+        page=page,
         section=section,
         obligation_keyword="shall",
         obligation_type="mandatory",
@@ -372,3 +429,59 @@ def test_dedupe_leaves_below_threshold_repeats_alone():
     kept, removed = _dedupe_boilerplate(stmts)
     assert len(kept) == 2
     assert removed == 0
+
+
+# NOTE: the following pin the FIXED behavior for page furniture.  Footers
+# inherit the page's CURRENT section at extraction time, so the section-aware
+# keep previously resurrected one copy of an obligation-shaped footer per
+# section context (~30 bogus "rules" on a 100-page PDF).  Spread across >= 5
+# distinct pages now marks the text as furniture and removes ALL copies.
+
+
+def test_dedupe_removes_page_furniture_despite_section_churn():
+    stmts = [
+        _stmt(i, "This document shall be used for official purposes only.",
+              f"{i + 1}.0", page=i + 1)
+        for i in range(6)
+    ]
+    kept, removed = _dedupe_boilerplate(stmts)
+    assert kept == []
+    assert removed == 6
+
+
+def test_dedupe_low_page_spread_still_keeps_one_copy_per_section():
+    # 6 copies but only 2 distinct pages across 3 sections: a genuine
+    # cross-section restatement, not page furniture — one copy per section.
+    stmts = [
+        _stmt(i, "Records shall be retained for three years.", section, page=page)
+        for i, (section, page) in enumerate(
+            [("3.1", 1), ("3.1", 1), ("5.2", 1), ("5.2", 2), ("7.2", 2), ("7.2", 2)]
+        )
+    ]
+    kept, removed = _dedupe_boilerplate(stmts)
+    assert [s.section for s in kept] == ["3.1", "5.2", "7.2"]
+    assert removed == 3
+
+
+def test_footer_obligation_text_is_fully_removed_end_to_end(tmp_path):
+    """Obligation-shaped footer text repeated on every page of a multi-page
+    PDF must be removed entirely, while each page's unique real obligation
+    survives (fix: boilerplate resurrection via section-aware keep)."""
+    footer = "This document shall be used for official purposes only."
+    doc = fitz.open()
+    for i in range(6):
+        page = doc.new_page()
+        body = (
+            f"{i + 1}.0 Section Title\n\n"
+            f"The contractor shall deliver item {i + 1} on schedule.\n\n"
+            f"{footer}\n"
+        )
+        page.insert_text((60, 60), body, fontsize=8)
+    pdf_path = tmp_path / "footered.pdf"
+    doc.save(pdf_path)
+    doc.close()
+
+    result = extract_pass1(pdf_path)
+    texts = [_norm(s.statement_text) for s in result.statements]
+    assert not any("official purposes only" in t for t in texts), texts
+    assert sum(1 for t in texts if "deliver item" in t) == 6

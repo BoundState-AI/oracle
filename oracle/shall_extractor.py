@@ -127,11 +127,42 @@ OBLIGATION_KEYWORDS = {
 #   "[A-Z]" would match lowercase and every abbreviation would break a
 #   sentence.
 # ---------------------------------------------------------------------------
-_ABBREVIATION_STEMS = ("e.g", "i.e", "cf", "vs", "viz", "No", "Fig", "Sec", "Rev", "Vol", "U.S")
-_ABBREV_LOOKBEHINDS = "|".join(f"(?<=(?-i:{re.escape(stem)}))" for stem in _ABBREVIATION_STEMS)
+_ABBREVIATION_STEMS = (
+    "e.g", "i.e", "cf", "vs", "viz", "No", "Fig", "Sec", "Rev", "Vol", "U.S",
+    # WHY these additions (fix: truncated obligations): statutory and
+    # editorial citations are dense in FAR-style text — "Pub. L. 95-507",
+    # "Stat. 657", "Ch. 137", "para. (b)", "Dept. of Defense", "Amdt. 4" —
+    # and each missed stem cut the captured obligation off mid-citation.
+    # "para"/"Para" both appear because cross-references are cited in either
+    # case ("see para. (b)" vs "Para. 3.2 applies").
+    "Pub", "Stat", "Ch", "para", "Para", "Dept", "Amdt",
+)
+# WHY \b before each stem: without it "Branch."/"Thermostat." style word
+# tails could collide with short stems; the boundary pins the stem to a
+# whole token.  Each stem gets its OWN fixed-width lookbehind (Python re
+# forbids variable-width lookbehind, so they are joined as alternatives).
+_ABBREV_LOOKBEHINDS = "|".join(
+    [f"(?<=(?-i:\\b{re.escape(stem)}))" for stem in _ABBREVIATION_STEMS]
+    # WHY the generic single-capital rule (fix: truncated obligations): a
+    # lone capital letter before a period is an initial or enumeration
+    # letter ("Pub. L. 95-507", "John Q. Public", "Rev. A"), never a
+    # sentence end.  \b excludes word-final capitals ("NASA-STD-6001B.")
+    # so real sentence ends still terminate.
+    + [r"(?<=\b(?-i:[A-Z]))"]
+)
+# WHY lowercase sentence starters (fix: merged obligations): OCR'd or
+# plain-text regulatory sources often lose capitalization ("the contractor
+# shall comply. the vendor must report."), and a boundary that requires a
+# capital/digit after the period silently fused the two duties into one
+# statement.  The list is deliberately a small closed set of common sentence
+# openers so mid-sentence periods ("para. (b)", "e.g. teflon") are not split:
+# the abbreviation branch is tried first, and a digit before the period
+# ("item 5. the next") is treated as a potential enumeration, not a boundary.
+_LOWERCASE_SENTENCE_STARTERS = "the|this|unless|where|when|each|all|any|an|if|it|no|a"
 _INTERNAL_PERIOD = (
     rf"(?:(?:{_ABBREV_LOOKBEHINDS})\."
-    r"|\.(?!(?:\s+(?-i:[A-Z0-9\[\(\"'])|\s*$)))"
+    rf"|\.(?!(?:\s+(?-i:[A-Z0-9\[\(\"'])|\s*$"
+    rf"|(?<!\d\.)\s+(?-i:(?:{_LOWERCASE_SENTENCE_STARTERS}))\s)))"
 )
 _SENTENCE_BODY = rf"(?:[^.\n]|{_INTERNAL_PERIOD})"
 
@@ -985,18 +1016,33 @@ def _extract_generic_requirements(
 # up at least as often as the page count of the shortest real chapter.
 _BOILERPLATE_REPEAT_THRESHOLD = 5
 
+# WHY a distinct-page spread threshold (fix: boilerplate resurrection):
+# footers/headers inherit the page's CURRENT section at extraction time, so
+# on a long PDF the same footer text shows up under dozens of section values
+# and the one-copy-per-section keep resurrected it as one bogus "rule" per
+# section context.  Genuine cross-section restatements — the case the
+# section-aware keep exists for — are typically 2-4 copies; no real
+# obligation is restated verbatim on 5+ DISTINCT pages, but page furniture
+# by definition is.  Page numbers are available at dedup time
+# (ShallStatement.page), so spread across >= 5 distinct pages marks the text
+# as furniture and removes ALL copies (the pre-section-aware behavior).
+_PAGE_FURNITURE_PAGE_SPREAD = 5
+
 
 def _dedupe_boilerplate(
     generic_statements: list[ShallStatement],
 ) -> tuple[list[ShallStatement], int]:
-    """Header/footer dedup keyed on (section, normalized statement text).
+    """Header/footer dedup keyed on page spread, section, and normalized text.
 
-    WHY section-aware (spec rule): a real obligation can be restated verbatim
-    in several sections (e.g. a records-retention duty in both the delivery
-    and the archive section); deleting ALL copies of any 5+-repeated text
-    silently removed those obligations.  Text repeated 5+ times is treated as
-    page-furniture boilerplate only when every repeat carries an empty or
-    identical section; otherwise one copy per distinct section is preserved.
+    Decision ladder for text repeated >= _BOILERPLATE_REPEAT_THRESHOLD times:
+      1. Spread across >= _PAGE_FURNITURE_PAGE_SPREAD distinct pages
+         => page furniture: remove ALL copies (see WHY above).
+      2. Identical (possibly empty) section on every repeat
+         => boilerplate within one context: remove ALL copies.
+      3. Otherwise (low page spread, several sections) => a real obligation
+         restated verbatim across sections (e.g. a records-retention duty in
+         both the delivery and the archive section): keep one copy per
+         distinct section — deleting all copies silently removed real duties.
     """
     by_text: dict[str, list[ShallStatement]] = {}
     for stmt in generic_statements:
@@ -1006,6 +1052,11 @@ def _dedupe_boilerplate(
     boilerplate_patterns = 0
     for group in by_text.values():
         if len(group) < _BOILERPLATE_REPEAT_THRESHOLD:
+            continue
+        pages = {stmt.page for stmt in group}
+        if len(pages) >= _PAGE_FURNITURE_PAGE_SPREAD:
+            dropped.update(id(stmt) for stmt in group)
+            boilerplate_patterns += 1
             continue
         sections = {stmt.section for stmt in group}
         if len(sections) == 1:
