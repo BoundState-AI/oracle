@@ -519,7 +519,12 @@ def test_max_vision_repairs_env_zero_keeps_spend_cap(monkeypatch, caplog):
         monkeypatch.setenv("ORACLE_MAX_VISION_REPAIRS", raw)
         with caplog.at_level(logging.WARNING):
             assert _resolve_max_vision_repairs(None) == 25
-    assert any("spend cap" in rec.getMessage() for rec in caplog.records)
+    # Assert the behavior (a warning naming the variable), not exact prose
+    assert any(
+        "ORACLE_MAX_VISION_REPAIRS" in rec.getMessage()
+        for rec in caplog.records
+        if rec.levelno >= logging.WARNING
+    )
 
 
 def test_max_vision_repairs_env_garbage_falls_back_to_default(monkeypatch):
