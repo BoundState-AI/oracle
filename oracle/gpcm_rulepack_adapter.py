@@ -33,7 +33,7 @@ from typing import Any
 
 import fitz  # PyMuPDF
 
-LOGGER = logging.getLogger("oracle.gpcm_adapter")
+LOGGER = logging.getLogger("oracle.gpcm_rulepack_adapter")
 
 # WHY: Matches bracketed requirement tags like [MPR 12], [FCR 3a],
 # [NER 7], and NASA-STD-6030's hyphenated [AMR-22] form.
@@ -612,6 +612,94 @@ def _normalized_requirement_id(value: Any) -> str:
     return str(value)
 
 
+def _fallback_requirement_from_block(
+    tag: str,
+    blocks: list[dict[str, Any]],
+    inline_rationales: dict[str, str],
+) -> dict[str, Any]:
+    """Build a requirement directly from the tag block's own text.
+
+    WHY (fix: silently dropped tags): when no extractor statement matches a
+    tag block — or every candidate trips the boilerplate/meta filters — the
+    tag used to vanish from the rule pack with no trace.  The block text
+    itself already passed OBLIGATION_RE in build_tag_blocks, so it IS a
+    binding requirement; emitting it (marked match_source="block_text_fallback"
+    so reviewers know it skipped statement reconciliation) is strictly better
+    than silently weakening every downstream review.
+    """
+    # Prefer the block that carries a section header, then the longest text.
+    block = max(blocks, key=lambda b: (bool(b.get("section")), len(b.get("text", ""))))
+    shall_text = strip_leading_subitem_marker(strip_leading_tag(block["text"]))
+    justification = clean_justification(inline_rationales.get(tag, ""))
+    subject, requirement_text = split_subject_requirement(shall_text)
+    return {
+        "id": canonical_requirement_id({}, tag),
+        "source_tag": tag,
+        "section": normalize_space(block.get("section", "")),
+        "shall_text": shall_text,
+        "subject": subject,
+        "requirement": requirement_text,
+        "context": "",
+        "page": block["page"],
+        "justification": justification,
+        "keywords": extract_keywords(shall_text, "", justification),
+        "applies_to": classify_applies_to(shall_text, "", justification),
+        "mua_relevant": bool(re.search(r"\bMUA\b", shall_text, re.IGNORECASE)),
+        "match_source": "block_text_fallback",
+    }
+
+
+def _best_requirement_for_tag(
+    tag: str,
+    blocks: list[dict[str, Any]],
+    processed_statements: list[dict[str, Any]],
+    frequent_lines: set[str],
+    inline_rationales: dict[str, str],
+) -> dict[str, Any] | None:
+    """Pick the best statement-matched requirement for one tag's blocks."""
+    best_requirement: dict[str, Any] | None = None
+    best_score = 0.0
+    for block in blocks:
+        statement, score = best_statement_for_block(block, processed_statements)
+        statement_text = statement.get("statement_text", "") if statement else ""
+        if (
+            not statement
+            or is_boilerplate_statement(statement_text, frequent_lines)
+            or looks_like_meta_requirement(statement_text)
+        ):
+            continue
+
+        shall_text = strip_leading_tag(statement_text)
+        justification = extract_justification_from_block_text(block["text"], shall_text)
+        if not justification and tag in inline_rationales:
+            justification = clean_justification(inline_rationales[tag])
+        shall_text = derive_shall_text(block["text"], shall_text, justification)
+        subject, requirement_text = split_subject_requirement(shall_text)
+        # WHY score bonuses: prefer the block variant carrying rationale and a
+        # section header when the same tag matched multiple blocks.
+        score += (0.1 if justification else 0.0) + (0.05 if block.get("section") else 0.0)
+        context = normalize_space(statement.get("context", ""))
+        requirement = {
+            "id": canonical_requirement_id(statement, tag),
+            "source_tag": tag,
+            "section": normalize_space(statement.get("section", "")) or normalize_space(block.get("section", "")),
+            "shall_text": shall_text,
+            "subject": subject,
+            "requirement": requirement_text,
+            "context": context,
+            "page": block["page"],
+            "justification": justification,
+            "keywords": extract_keywords(shall_text, context, justification),
+            "applies_to": classify_applies_to(shall_text, context, justification),
+            "mua_relevant": bool(re.search(r"\bMUA\b", shall_text, re.IGNORECASE)),
+        }
+
+        if best_requirement is None or score > best_score:
+            best_requirement, best_score = requirement, score
+
+    return best_requirement
+
+
 def build_tagged_requirements(
     statements: list[dict[str, Any]],
     tag_blocks: list[dict[str, Any]],
@@ -625,54 +713,44 @@ def build_tagged_requirements(
 
     requirements: list[dict[str, Any]] = []
     for tag, blocks in sorted(blocks_by_tag.items(), key=lambda item: extract_tag_number(item[0])):
-        best_requirement: dict[str, Any] | None = None
-        best_score = 0.0
-
-        for block in blocks:
-            statement, score = best_statement_for_block(block, processed_statements)
-            if not statement:
-                continue
-            if is_boilerplate_statement(statement.get("statement_text", ""), frequent_lines):
-                continue
-            if looks_like_meta_requirement(statement.get("statement_text", "")):
-                continue
-
-            shall_text = strip_leading_tag(statement.get("statement_text", ""))
-            justification = extract_justification_from_block_text(block["text"], shall_text)
-            if not justification and tag in inline_rationales:
-                justification = clean_justification(inline_rationales[tag])
-            shall_text = derive_shall_text(block["text"], shall_text, justification)
-            subject, requirement_text = split_subject_requirement(shall_text)
-
-            if justification:
-                score += 0.1
-            if block.get("section"):
-                score += 0.05
-
-            context = normalize_space(statement.get("context", ""))
-            requirement = {
-                "id": canonical_requirement_id(statement, tag),
-                "source_tag": tag,
-                "section": normalize_space(statement.get("section", "")) or normalize_space(block.get("section", "")),
-                "shall_text": shall_text,
-                "subject": subject,
-                "requirement": requirement_text,
-                "context": context,
-                "page": block["page"],
-                "justification": justification,
-                "keywords": extract_keywords(shall_text, context, justification),
-                "applies_to": classify_applies_to(shall_text, context, justification),
-                "mua_relevant": bool(re.search(r"\bMUA\b", shall_text, re.IGNORECASE)),
-            }
-
-            if best_requirement is None or score > best_score:
-                best_requirement = requirement
-                best_score = score
-
-        if best_requirement is not None:
-            requirements.append(best_requirement)
+        best_requirement = _best_requirement_for_tag(
+            tag, blocks, processed_statements, frequent_lines, inline_rationales,
+        )
+        if best_requirement is None:
+            # Never silently skip a tag — see _fallback_requirement_from_block.
+            best_requirement = _fallback_requirement_from_block(tag, blocks, inline_rationales)
+            LOGGER.warning(
+                "Tag %s: no extractor statement matched; emitting block-text fallback",
+                tag,
+            )
+        requirements.append(best_requirement)
 
     return requirements
+
+
+def warn_unmatched_tags(
+    tag_blocks: list[dict[str, Any]],
+    requirements: list[dict[str, Any]],
+) -> list[str]:
+    """Reconcile source tag blocks against emitted requirements.
+
+    Returns the sorted list of tags that appear in the source PDF's tag
+    blocks but are absent from the emitted requirements, LOGGER.warning-ing
+    each one — a dropped tag is a silently weakened compliance review.
+    """
+    block_tags = {block["tag"] for block in tag_blocks}
+    emitted_tags = {
+        requirement.get("source_tag")
+        for requirement in requirements
+        if requirement.get("source_tag")
+    }
+    missing = sorted(block_tags - emitted_tags, key=extract_tag_number)
+    for tag in missing:
+        LOGGER.warning(
+            "Tag %s present in source tag blocks but absent from emitted requirements",
+            tag,
+        )
+    return missing
 
 
 def extract_keywords(statement_text: str, context_text: str, justification: str) -> list[str]:
@@ -1213,6 +1291,14 @@ def apply_vision_repairs(
                 continue
 
             parsed = parse_model_json(response.content[0].text)
+            if "error" in parsed:
+                # Never treat a parse failure as an empty result — the tags on
+                # this page simply stay unrepaired, and the operator must know.
+                LOGGER.warning(
+                    "Vision repair page %d: model JSON unusable (%s); leaving tags unrepaired",
+                    page_number, parsed["error"],
+                )
+                continue
             for candidate in parsed.get("requirements", []):
                 tag = normalize_source_tag(candidate.get("source_tag", ""))
                 if not tag or tag not in by_tag:
@@ -1266,12 +1352,169 @@ def apply_vision_repairs(
     return requirements, len(repaired_tags)
 
 
+# WHY 25: each targeted repair is 3-4 rendered pages of vision input (~$0.05
+# per requirement); an unbounded loop over a noisy extraction could spend
+# hundreds of calls without anyone opting in.  Override deliberately via the
+# max_vision_repairs parameter or ORACLE_MAX_VISION_REPAIRS.
+DEFAULT_MAX_VISION_REPAIRS = 25
+
+
+def _resolve_max_vision_repairs(max_vision_repairs: int | None) -> int:
+    if max_vision_repairs is not None:
+        return max_vision_repairs
+    raw = os.environ.get("ORACLE_MAX_VISION_REPAIRS", "")
+    if not raw:
+        return DEFAULT_MAX_VISION_REPAIRS
+    try:
+        return int(raw)
+    except ValueError:
+        LOGGER.warning(
+            "ORACLE_MAX_VISION_REPAIRS=%r is not an integer; using default %d",
+            raw, DEFAULT_MAX_VISION_REPAIRS,
+        )
+        return DEFAULT_MAX_VISION_REPAIRS
+
+
+def select_targeted_vision_targets(
+    requirements: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Pick the requirements worth a targeted vision repair call.
+
+    Skips requirements whose ONLY weakness is missing_justification — a
+    missing rationale does not corrupt the binding text itself and is not
+    worth a multi-page vision call per requirement.
+    """
+    targets: list[dict[str, Any]] = []
+    for requirement in requirements:
+        if not requirement.get("source_tag"):
+            continue
+        reasons = vision_repair_reasons(requirement)
+        if not reasons or reasons == ["missing_justification"]:
+            continue
+        targets.append(requirement)
+    return targets
+
+
+def _apply_targeted_candidate(
+    requirement: dict[str, Any],
+    candidate: dict[str, Any],
+    primary_page: int | None,
+) -> bool:
+    """Apply one targeted-vision candidate record; returns True if changed."""
+    repaired_fields: list[str] = []
+    shall_text = normalize_space(candidate.get("shall_text", ""))
+    justification = clean_justification(candidate.get("justification", ""))
+    section = normalize_space(candidate.get("section", ""))
+
+    if shall_text and shall_text != requirement.get("shall_text", ""):
+        requirement["shall_text"] = shall_text
+        subject, requirement_text = split_subject_requirement(shall_text)
+        requirement["subject"] = subject
+        requirement["requirement"] = requirement_text
+        repaired_fields.append("shall_text")
+
+    if justification and justification != requirement.get("justification", ""):
+        requirement["justification"] = justification
+        repaired_fields.append("justification")
+
+    if section and section != requirement.get("section", ""):
+        requirement["section"] = section
+        repaired_fields.append("section")
+
+    if primary_page and primary_page != requirement.get("page"):
+        requirement["page"] = primary_page
+        repaired_fields.append("page")
+
+    if not repaired_fields:
+        return False
+
+    mark_vision_provenance(requirement, repaired_fields)
+    requirement["keywords"] = extract_keywords(
+        requirement.get("shall_text", ""),
+        requirement.get("context", ""),
+        requirement.get("justification", ""),
+    )
+    requirement["applies_to"] = classify_applies_to(
+        requirement.get("shall_text", ""),
+        requirement.get("context", ""),
+        requirement.get("justification", ""),
+    )
+    requirement["mua_relevant"] = bool(
+        re.search(r"\bMUA\b", requirement.get("shall_text", ""), re.IGNORECASE)
+    )
+    return True
+
+
+def _vision_page_content(
+    doc: fitz.Document, pages: list[int], dpi: int,
+) -> list[dict[str, Any]]:
+    """Build alternating image/label content blocks for the given pages."""
+    content: list[dict[str, Any]] = []
+    for page_number in pages:
+        content.append(
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": render_page_png(doc, page_number, dpi),
+                },
+            }
+        )
+        content.append({"type": "text", "text": f"[Page {page_number}]"})
+    return content
+
+
+def _targeted_vision_repair_one(
+    client,
+    doc: fitz.Document,
+    requirement: dict[str, Any],
+    standard_id: str,
+    model: str,
+    dpi: int,
+) -> bool:
+    """Run one targeted vision repair; returns True if the requirement changed."""
+    tag = requirement["source_tag"]
+    pages, primary_page = select_tag_pages_for_vision(doc, tag)
+    if not pages:
+        return False
+    pages = maybe_add_continuation_pages(doc, tag, pages)
+
+    content = _vision_page_content(doc, pages, dpi)
+    content.append({"type": "text", "text": build_targeted_tag_prompt(standard_id, requirement, pages)})
+
+    response = client.messages.create(
+        model=model,
+        max_tokens=2048,
+        temperature=0,
+        messages=[{"role": "user", "content": content}],
+    )
+    if not response.content:
+        return False
+
+    parsed = parse_model_json(response.content[0].text)
+    if "error" in parsed:
+        # Never treat a parse failure as an empty result (never-suppress).
+        LOGGER.warning(
+            "Targeted vision repair %s: model JSON unusable (%s); leaving requirement as-is",
+            tag, parsed["error"],
+        )
+        return False
+    candidate = parsed if "source_tag" in parsed else {}
+    parsed_tag = normalize_source_tag(candidate.get("source_tag", ""))
+    if parsed_tag != tag:
+        return False
+
+    return _apply_targeted_candidate(requirement, candidate, primary_page)
+
+
 def apply_targeted_tag_vision_repairs(
     requirements: list[dict[str, Any]],
     source_pdf: Path,
     standard_id: str,
     model: str,
     dpi: int,
+    max_vision_repairs: int | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
@@ -1282,102 +1525,32 @@ def apply_targeted_tag_vision_repairs(
     except ImportError as exc:
         raise RuntimeError("anthropic package is required when --use-sonnet-vision is enabled") from exc
 
+    limit = _resolve_max_vision_repairs(max_vision_repairs)
+    targets = select_targeted_vision_targets(requirements)
+    LOGGER.info(
+        "Targeted vision repair: %d candidate requirement(s), cap %d",
+        len(targets), limit,
+    )
+    if len(targets) > limit:
+        LOGGER.warning(
+            "Vision repair cap truncates targets %d -> %d; remaining requirements "
+            "stay unrepaired (raise ORACLE_MAX_VISION_REPAIRS or pass "
+            "max_vision_repairs to widen)",
+            len(targets), limit,
+        )
+        targets = targets[:limit]
+    if not targets:
+        return requirements, 0
+
     doc = fitz.open(source_pdf)
     client = Anthropic(api_key=api_key)
     repaired = 0
 
     try:
-        for requirement in requirements:
-            reasons = vision_repair_reasons(requirement)
-            if not reasons:
-                continue
-
-            tag = requirement.get("source_tag")
-            if not tag:
-                continue
-
-            pages, primary_page = select_tag_pages_for_vision(doc, tag)
-            if not pages:
-                continue
-            pages = maybe_add_continuation_pages(doc, tag, pages)
-
-            prompt = build_targeted_tag_prompt(standard_id, requirement, pages)
-            content: list[dict[str, Any]] = []
-            for page_number in pages:
-                content.append(
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "image/png",
-                            "data": render_page_png(doc, page_number, dpi),
-                        },
-                    }
-                )
-                content.append({"type": "text", "text": f"[Page {page_number}]"})
-            content.append({"type": "text", "text": prompt})
-
-            response = client.messages.create(
-                model=model,
-                max_tokens=2048,
-                temperature=0,
-                messages=[{"role": "user", "content": content}],
-            )
-            if not response.content:
-                continue
-
-            parsed = parse_model_json(response.content[0].text)
-            candidate = parsed if "source_tag" in parsed else {}
-            parsed_tag = normalize_source_tag(candidate.get("source_tag", ""))
-            if parsed_tag != tag:
-                continue
-
-            changed = False
-            repaired_fields: list[str] = []
-            shall_text = normalize_space(candidate.get("shall_text", ""))
-            justification = clean_justification(candidate.get("justification", ""))
-            section = normalize_space(candidate.get("section", ""))
-
-            if shall_text and shall_text != requirement.get("shall_text", ""):
-                requirement["shall_text"] = shall_text
-                subject, requirement_text = split_subject_requirement(shall_text)
-                requirement["subject"] = subject
-                requirement["requirement"] = requirement_text
-                changed = True
-                repaired_fields.append("shall_text")
-
-            if justification and justification != requirement.get("justification", ""):
-                requirement["justification"] = justification
-                changed = True
-                repaired_fields.append("justification")
-
-            if section and section != requirement.get("section", ""):
-                requirement["section"] = section
-                changed = True
-                repaired_fields.append("section")
-
-            if primary_page and primary_page != requirement.get("page"):
-                requirement["page"] = primary_page
-                changed = True
-                repaired_fields.append("page")
-
-            if repaired_fields:
-                mark_vision_provenance(requirement, repaired_fields)
-
-            if changed:
-                requirement["keywords"] = extract_keywords(
-                    requirement.get("shall_text", ""),
-                    requirement.get("context", ""),
-                    requirement.get("justification", ""),
-                )
-                requirement["applies_to"] = classify_applies_to(
-                    requirement.get("shall_text", ""),
-                    requirement.get("context", ""),
-                    requirement.get("justification", ""),
-                )
-                requirement["mua_relevant"] = bool(
-                    re.search(r"\bMUA\b", requirement.get("shall_text", ""), re.IGNORECASE)
-                )
+        for requirement in targets:
+            if _targeted_vision_repair_one(
+                client, doc, requirement, standard_id, model, dpi,
+            ):
                 repaired += 1
     finally:
         doc.close()
@@ -1390,6 +1563,7 @@ def build_rule_pack(
     source_pdf: Path,
     standard_id: str,
     requirements: list[dict[str, Any]],
+    extraction_status: str = "complete",
 ) -> dict[str, Any]:
     rule_pack_id = f"gpcm-rulepack-{standard_id.lower().replace('.', '').replace('/', '-').replace(' ', '-')}"
     return {
@@ -1400,6 +1574,9 @@ def build_rule_pack(
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "source_document": str(source_pdf),
         "source_extract": str(source_extract),
+        # WHY propagated: a pack built from a partial extraction must not
+        # masquerade as complete — the promotion gate keys off this field.
+        "extraction_status": extraction_status,
         "total_requirements": len(requirements),
         "requirements": requirements,
     }
@@ -1521,7 +1698,19 @@ def run_adapter(
         if local_fallback_repaired:
             LOGGER.info("Local 6016 fallback repaired: %d", local_fallback_repaired)
 
-    rule_pack = build_rule_pack(input_json, source_pdf, standard_id, requirements)
+    # Reconcile source tags against emitted requirements — a tag present in
+    # the PDF but absent from the pack is a silently weakened review.
+    missing_tags = warn_unmatched_tags(tag_blocks, requirements)
+    if missing_tags:
+        LOGGER.warning(
+            "Tag reconciliation: %d/%d tags missing from emitted requirements",
+            len(missing_tags), len({block["tag"] for block in tag_blocks}),
+        )
+
+    rule_pack = build_rule_pack(
+        input_json, source_pdf, standard_id, requirements,
+        extraction_status=extracted.get("extraction_status", "complete"),
+    )
     output_json.parent.mkdir(parents=True, exist_ok=True)
     output_json.write_text(json.dumps(rule_pack, indent=2, ensure_ascii=False), encoding="utf-8")
     return rule_pack

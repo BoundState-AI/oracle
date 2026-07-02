@@ -36,7 +36,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-LOGGER = logging.getLogger(__name__)
+LOGGER = logging.getLogger("oracle.build_far_rulepack")
 
 # FAR Part titles — official names from acquisition.gov
 FAR_PART_TITLES: dict[int, str] = {
@@ -120,6 +120,46 @@ def _compress_statement(stmt: dict) -> dict:
     }
 
 
+def _group_by_part(stmts: list[dict]) -> tuple[dict[int, list[dict]], list[dict]]:
+    """Group compressed statements by FAR Part; returns (parts, unassigned)."""
+    parts: dict[int, list[dict]] = defaultdict(list)
+    unassigned: list[dict] = []
+    for stmt in stmts:
+        part_num = _extract_part_number(stmt.get("section", ""))
+        compressed = _compress_statement(stmt)
+        if part_num is not None:
+            parts[part_num].append(compressed)
+        else:
+            unassigned.append(compressed)
+    LOGGER.info("Grouped into %d Parts + %d unassigned", len(parts), len(unassigned))
+    return parts, unassigned
+
+
+def _build_part_index(parts: dict[int, list[dict]]) -> list[dict]:
+    """Build the Tier 1 per-Part summary index."""
+    part_index: list[dict] = []
+    for part_num in sorted(parts.keys()):
+        reqs = parts[part_num]
+        mandatory_count = sum(1 for r in reqs if r["obligation_type"] == "mandatory")
+        prohibition_count = sum(1 for r in reqs if r["obligation_type"] == "prohibition")
+        # WHY implicit_count: mandatory_only keeps implicit obligations, so
+        # total_binding must count them too — otherwise
+        # total_binding_requirements silently undercounts the pack.
+        implicit_count = sum(1 for r in reqs if r["obligation_type"] == "implicit")
+        sections = sorted({r["section"] for r in reqs if r["section"]})
+        part_index.append({
+            "part": part_num,
+            "title": FAR_PART_TITLES.get(part_num, f"Part {part_num}"),
+            "mandatory_count": mandatory_count,
+            "prohibition_count": prohibition_count,
+            "implicit_count": implicit_count,
+            "total_binding": mandatory_count + prohibition_count + implicit_count,
+            "section_count": len(sections),
+            "sections_covered": sections[:10],  # sample for index
+        })
+    return part_index
+
+
 def build_rulepack(
     input_path: Path,
     *,
@@ -149,38 +189,10 @@ def build_rulepack(
         ]
         LOGGER.info("Filtered to mandatory/prohibition/implicit: %d -> %d", before, len(stmts))
 
-    # Group by Part
-    parts: dict[int, list[dict]] = defaultdict(list)
-    unassigned: list[dict] = []
-
-    for stmt in stmts:
-        part_num = _extract_part_number(stmt.get("section", ""))
-        compressed = _compress_statement(stmt)
-        if part_num is not None:
-            parts[part_num].append(compressed)
-        else:
-            unassigned.append(compressed)
-
-    LOGGER.info(
-        "Grouped into %d Parts + %d unassigned", len(parts), len(unassigned)
-    )
+    parts, unassigned = _group_by_part(stmts)
 
     # Build Tier 1: summary index
-    part_index: list[dict] = []
-    for part_num in sorted(parts.keys()):
-        reqs = parts[part_num]
-        mandatory_count = sum(1 for r in reqs if r["obligation_type"] == "mandatory")
-        prohibition_count = sum(1 for r in reqs if r["obligation_type"] == "prohibition")
-        sections = sorted({r["section"] for r in reqs if r["section"]})
-        part_index.append({
-            "part": part_num,
-            "title": FAR_PART_TITLES.get(part_num, f"Part {part_num}"),
-            "mandatory_count": mandatory_count,
-            "prohibition_count": prohibition_count,
-            "total_binding": mandatory_count + prohibition_count,
-            "section_count": len(sections),
-            "sections_covered": sections[:10],  # sample for index
-        })
+    part_index = _build_part_index(parts)
 
     # Build Tier 2: full requirements per Part
     parts_full: dict[str, list[dict]] = {}
@@ -197,6 +209,12 @@ def build_rulepack(
         "version": "1.0.0",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "source_document": str(input_path),
+        # WHY propagated: a pack built from a partial extraction (failed
+        # enrichment/implicit chunks) must not masquerade as complete — the
+        # registration/promotion gate keys off these fields.
+        "extraction_status": data.get("extraction_status", "complete"),
+        "failed_page_ranges": data.get("failed_page_ranges", []),
+        "chunk_failures": data.get("chunk_failures", []),
         "total_binding_requirements": total_binding,
         "total_unassigned": len(unassigned),
         "parts_count": len(part_index),
@@ -216,14 +234,30 @@ def render_tier1_summary(rulepack: dict) -> str:
         f"Parts with requirements: {rulepack['parts_count']}",
         f"Unassigned (no section detected): {rulepack.get('total_unassigned', 0)}",
         "",
-        "Part | Title | Mandatory | Prohibitions | Total",
-        "-----|-------|-----------|--------------|------",
+        "Part | Title | Mandatory | Prohibitions | Implicit | Total",
+        "-----|-------|-----------|--------------|----------|------",
     ]
     for p in rulepack["part_index"]:
         lines.append(
-            f"{p['part']:>4} | {p['title'][:50]:<50} | {p.get('mandatory_count', ''):>9} | {p.get('prohibition_count', ''):>12} | {p.get('total_binding', 0):>5}"
+            f"{p['part']:>4} | {p['title'][:50]:<50} | {p.get('mandatory_count', ''):>9} | {p.get('prohibition_count', ''):>12} | {p.get('implicit_count', 0):>8} | {p.get('total_binding', 0):>5}"
         )
     return "\n".join(lines)
+
+
+def _render_statement_line(r: dict) -> tuple[str, bool]:
+    """Render one requirement line, truncating explicitly at 500 chars.
+
+    WHY 500: long statements blow the token budget; the cut must be explicit
+    so reviewers can tell a truncated requirement from a complete short one —
+    a bare "..." is indistinguishable from prose ellipsis (AUDIT B5).
+    """
+    kw = r.get("obligation_keyword", "").upper()
+    sec = r.get("section") or "??"
+    text = r.get("statement_text", "")
+    truncated = len(text) > 500
+    if truncated:
+        text = text[:500] + " [TRUNCATED — see full text in the rule pack]"
+    return f"[{kw}] §{sec} p.{r.get('page', 0)}: {text}", truncated
 
 
 def render_tier2_part(rulepack: dict, part_num: int) -> str:
@@ -242,17 +276,9 @@ def render_tier2_part(rulepack: dict, part_num: int) -> str:
 
     truncated = 0
     for r in reqs:
-        kw = r["obligation_keyword"].upper()
-        sec = r["section"] or "??"
-        text = r["statement_text"]
-        # WHY 500: long statements blow the token budget; the cut must be
-        # explicit so reviewers (and readers of the rendered context) can
-        # tell a truncated requirement from a complete short one — a bare
-        # "..." is indistinguishable from prose ellipsis (AUDIT B5).
-        if len(text) > 500:
-            text = text[:500] + " [TRUNCATED — see full text in the rule pack]"
-            truncated += 1
-        lines.append(f"[{kw}] §{sec} p.{r['page']}: {text}")
+        line, was_truncated = _render_statement_line(r)
+        truncated += int(was_truncated)
+        lines.append(line)
 
     if truncated:
         LOGGER.info(
@@ -260,6 +286,28 @@ def render_tier2_part(rulepack: dict, part_num: int) -> str:
             part_num, truncated, len(reqs),
         )
 
+    return "\n".join(lines)
+
+
+def render_unassigned(rulepack: dict) -> str:
+    """Render requirements that could not be mapped to a FAR Part.
+
+    WHY: these are binding requirements; leaving them out of the rendered
+    compliance context silently excluded them from every review.
+    """
+    reqs = rulepack.get("unassigned", [])
+    if not reqs:
+        return ""
+    lines = [
+        f"# UNASSIGNED BINDING REQUIREMENTS — no Part number detected ({len(reqs)})",
+        "WARNING: the following binding requirements could not be mapped to a "
+        "FAR Part and are NOT covered by any Part section above. Review them "
+        "explicitly.",
+        "",
+    ]
+    for r in reqs:
+        line, _ = _render_statement_line(r)
+        lines.append(line)
     return "\n".join(lines)
 
 
@@ -288,6 +336,11 @@ def render_for_oracle(
             "summary index above. Flag any areas where the document fails to "
             "address requirements from relevant Parts."
         )
+
+    unassigned_block = render_unassigned(rulepack)
+    if unassigned_block:
+        sections.append("")
+        sections.append(unassigned_block)
 
     return "\n".join(sections)
 

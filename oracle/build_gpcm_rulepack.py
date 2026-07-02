@@ -27,7 +27,7 @@ from oracle.gpcm_rulepack_adapter import default_output_json, infer_standard_id,
 from oracle.shall_extractor import detect_implicit_obligations, enrich_with_sonnet, extract_pass1, save_results
 
 
-LOGGER = logging.getLogger(__name__)
+LOGGER = logging.getLogger("oracle.build_gpcm_rulepack")
 
 
 def filter_mandatory_only(result) -> None:
