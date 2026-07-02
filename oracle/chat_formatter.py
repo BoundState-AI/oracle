@@ -3,6 +3,9 @@ Module: oracle.chat_formatter
 Purpose: Oracle-native response formatter that turns a canonical chat envelope
          into operator-facing prose with grounded citations.
 
+__safety_critical__: bool = True — produces the operator-facing compliance
+prose; its allow_draft_answer=False mode is the grader's fallback surface.
+
 BoundState AI 2026
 Classification: BoundState Proprietary
 
@@ -11,6 +14,8 @@ Co-Authored-By: Dr. Joseph Wilde, BoundState AI
 """
 
 from __future__ import annotations
+
+__safety_critical__: bool = True
 
 from oracle.chat_contract import OracleChatEnvelope
 
