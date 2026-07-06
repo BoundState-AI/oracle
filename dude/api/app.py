@@ -42,7 +42,15 @@ __psychologically_critical__: bool = True
 
 import logging
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    Depends,
+    FastAPI,
+    HTTPException,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from pydantic import BaseModel, ConfigDict
 
 from dude.data import Case, SafetyScanResult, SourceType
@@ -52,6 +60,9 @@ from dude.voice.stt import SpeechToText, VoiceUnavailable
 from dude.voice.tts import TextToSpeech
 
 LOGGER = logging.getLogger("dude.api.app")
+
+# Websocket close code for failed auth (4000-range = application-defined).
+WS_UNAUTHORIZED = 4401
 
 
 class CreateCaseRequest(BaseModel):
@@ -64,34 +75,62 @@ class CaptureRequest(BaseModel):
     text: str
 
 
-def create_app(
+def create_router(
     store: CaseStore | None = None,
     stt: SpeechToText | None = None,
     tts: TextToSpeech | None = None,
     passes: "PassSet | None" = None,
-) -> FastAPI:
-    """Build the app with injected dependencies. When stt/tts are None the
-    voice endpoint refuses visibly; REST capture always works. `passes`
-    defaults to environment resolution (live models with keys, visible
-    stubs without); tests inject an explicit PassSet to stay hermetic."""
+    prefix: str = "",
+    api_key: str = "",
+) -> APIRouter:
+    """Build the DUDE router with injected dependencies. When stt/tts are
+    None the voice endpoint refuses visibly; REST capture always works.
+    `passes` defaults to environment resolution (live models with keys,
+    visible stubs without); tests inject an explicit PassSet to stay
+    hermetic. `api_key` enables X-API-Key auth on every route including
+    the websocket (empty = auth off, matching the server.py pattern)."""
     from dude.pipeline.live_passes import resolve_passes
     from dude.pipeline.passes import PassSet
 
-    app = FastAPI(title="DUDE", version="0.2.0")
     case_store = store or CaseStore()
     pass_set = passes if passes is not None else resolve_passes()
 
-    @app.get("/health")
+    async def verify_key(request: Request) -> None:
+        if api_key and request.headers.get("X-API-Key", "") != api_key:
+            raise HTTPException(status_code=401, detail="Invalid API key")
+
+    # WHY per-route dependencies instead of router-level: a router-level
+    # Request-typed dependency also binds to the websocket route, where no
+    # Request exists, and fails at call time. REST routes carry the guard;
+    # the websocket authenticates manually before accept.
+    guarded = {"dependencies": [Depends(verify_key)]}
+    router = APIRouter(prefix=prefix)
+
+    @router.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
 
-    @app.post("/cases")
+    @router.post("/cases", **guarded)
     def create_case(request: CreateCaseRequest) -> dict[str, str]:
         case = Case(title=request.title)
         case_store.create_case(case)
         return {"case_id": case.id}
 
-    @app.post("/cases/{case_id}/capture")
+    @router.get("/cases", **guarded)
+    def list_cases() -> list[dict[str, str]]:
+        listing = []
+        for case_id in case_store.list_case_ids():
+            bundle = case_store.load_case(case_id)
+            listing.append(
+                {
+                    "case_id": case_id,
+                    "title": bundle.case.title,
+                    "status": bundle.case.status.value,
+                }
+            )
+        return listing
+
+    @router.post("/cases/{case_id}/capture", **guarded)
     def rest_capture(case_id: str, request: CaptureRequest) -> dict[str, object]:
         try:
             record, scan = capture(case_store, case_id, request.text)
@@ -99,7 +138,7 @@ def create_app(
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"capture_id": record.id, **_safety_payload(scan)}
 
-    @app.post("/cases/{case_id}/analyze")
+    @router.post("/cases/{case_id}/analyze", **guarded)
     def rest_analyze(case_id: str) -> dict[str, object]:
         try:
             result = analyze(case_store, case_id, passes=pass_set)
@@ -113,8 +152,14 @@ def create_app(
             "crisis_active": result.run.crisis_active,
         }
 
-    @app.websocket("/cases/{case_id}/voice")
+    @router.websocket("/cases/{case_id}/voice")
     async def voice(websocket: WebSocket, case_id: str) -> None:
+        # WHY manual auth here: Request-typed dependencies don't run on
+        # websocket routes, so the router-level guard cannot cover this
+        # endpoint — the check is done explicitly before accept.
+        if api_key and websocket.headers.get("X-API-Key", "") != api_key:
+            await websocket.close(code=WS_UNAUTHORIZED)
+            return
         await websocket.accept()
         if stt is None:
             # Fail closed, visibly: no backend means no voice, said out loud.
@@ -153,6 +198,24 @@ def create_app(
         except WebSocketDisconnect:
             LOGGER.info("Voice session for case %s disconnected", case_id)
 
+    return router
+
+
+def create_app(
+    store: CaseStore | None = None,
+    stt: SpeechToText | None = None,
+    tts: TextToSpeech | None = None,
+    passes: "PassSet | None" = None,
+) -> FastAPI:
+    """Standalone DUDE app (tests, single-service deployment). The shared
+    server (server.py) mounts create_router() under /dude with the
+    repo-wide API key instead."""
+    from dude.pipeline.passes import PassSet  # noqa: F401  (type reference)
+
+    app = FastAPI(title="DUDE", version="0.2.0")
+    app.include_router(
+        create_router(store=store, stt=stt, tts=tts, passes=passes)
+    )
     return app
 
 

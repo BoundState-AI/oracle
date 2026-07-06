@@ -19,6 +19,6 @@ from __future__ import annotations
 __safety_critical__: bool = False
 __psychologically_critical__: bool = False
 
-from dude.api.app import create_app
+from dude.api.app import create_app, create_router
 
-__all__ = ["create_app"]
+__all__ = ["create_app", "create_router"]

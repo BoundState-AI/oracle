@@ -138,3 +138,47 @@ class TestRestSurface:
         client, _store, _case_id = _client(tmp_path)
         response = client.post("/cases/nope/capture", json={"text": "hi"})
         assert response.status_code == 409
+
+
+class TestMountedRouterAuth:
+    """The server.py mount path: X-API-Key guards REST routes and the
+    websocket authenticates before accept."""
+
+    def _authed_client(self, tmp_path) -> tuple[TestClient, str]:
+        from fastapi import FastAPI
+
+        from dude.api.app import create_router
+
+        store = CaseStore(root=tmp_path / "dude_home")
+        case = Case(title="authed")
+        store.create_case(case)
+        app = FastAPI()
+        app.include_router(
+            create_router(
+                store=store,
+                stt=FakeSTT(BENIGN_UTTERANCE),
+                passes=PassSet(),
+                prefix="/dude",
+                api_key="secret",
+            )
+        )
+        return TestClient(app), case.id
+
+    def test_rest_requires_key(self, tmp_path) -> None:
+        client, case_id = self._authed_client(tmp_path)
+        denied = client.post(f"/dude/cases/{case_id}/capture", json={"text": "hi"})
+        assert denied.status_code == 401
+        allowed = client.post(
+            f"/dude/cases/{case_id}/capture",
+            json={"text": "hi"},
+            headers={"X-API-Key": "secret"},
+        )
+        assert allowed.status_code == 200
+
+    def test_websocket_requires_key(self, tmp_path) -> None:
+        client, case_id = self._authed_client(tmp_path)
+        with client.websocket_connect(
+            f"/dude/cases/{case_id}/voice", headers={"X-API-Key": "secret"}
+        ) as ws:
+            _speak(ws)
+            assert ws.receive_json()["type"] == "transcript"

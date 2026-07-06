@@ -1851,6 +1851,22 @@ async def hearth_pack_status(pack: str = "CO-Larimer") -> dict[str, Any]:
 app.include_router(oracle_router)
 app.include_router(hearth_router)
 
+# DUDE — decision support under uncertainty, mounted under /dude with the
+# same X-API-Key auth. STT/TTS resolve to local backends when installed;
+# LLM passes resolve from provider keys (visible stub refusals otherwise).
+from dude.api.app import create_router as _create_dude_router  # noqa: E402
+from dude.voice.stt import resolve_stt as _resolve_stt  # noqa: E402
+from dude.voice.tts import resolve_tts as _resolve_tts  # noqa: E402
+
+app.include_router(
+    _create_dude_router(
+        stt=_resolve_stt(),
+        tts=_resolve_tts(),
+        prefix="/dude",
+        api_key=API_KEY,
+    )
+)
+
 
 @app.get("/health")
 async def health():
