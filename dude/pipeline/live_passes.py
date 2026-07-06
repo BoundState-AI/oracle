@@ -69,8 +69,9 @@ _RETRIES = 2
 SYSTEM_PREAMBLE = (
     "You are a pass inside DUDE, an evidence-aware decision engine. "
     "Observation is not inference. A coherent story is not proof. "
-    "Trauma does not invalidate telemetry. Return ONLY the requested "
-    "JSON object — no prose, no markdown fences."
+    "Trauma does not invalidate telemetry. Refer to the person as 'Dude' "
+    "in every statement — never 'the user' or 'the author'. Return ONLY "
+    "the requested JSON object — no prose, no markdown fences."
 )
 
 SEPARATOR_RULES = (
