@@ -130,6 +130,108 @@ def create_router(
             )
         return listing
 
+    @router.get("/cases/{case_id}", **guarded)
+    def case_detail(case_id: str) -> dict[str, object]:
+        """Full case view for the UI: reality (observed/inferred/unknown),
+        models (hypotheses + adversary annotations + falsifiers), and the
+        latest run. Bands are the external vocabulary — no numbers."""
+        try:
+            bundle = case_store.load_case(case_id)
+        except StoreError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        last = bundle.analysis_runs[-1] if bundle.analysis_runs else None
+        return {
+            "case_id": bundle.case.id,
+            "title": bundle.case.title,
+            "status": bundle.case.status.value,
+            "observed": [
+                {"statement": o.statement, "user_confirmed": o.user_confirmed}
+                for o in bundle.observations
+            ],
+            "inferred": [i.statement for i in bundle.interpretations],
+            "unknown": [
+                {"statement": u.statement, "importance": u.importance.value}
+                for u in bundle.unknowns
+            ],
+            "hypotheses": [
+                {
+                    "title": h.title,
+                    "description": h.description,
+                    "archetype": h.archetype.value,
+                    "band": h.band.value,
+                    "harm_class": h.harm_class.value,
+                    "falsifiers": h.falsifiers,
+                    "not_credible_here": h.not_credible_here,
+                    "attacks": [
+                        {
+                            "attack": a.attack,
+                            "unsupported_links": a.unsupported_links,
+                        }
+                        for a in h.annotations
+                    ],
+                }
+                for h in bundle.hypotheses
+                if h.is_live() or h.not_credible_here
+            ],
+            "last_run": (
+                {
+                    "mode": last.mode.value,
+                    "summary": last.user_facing_summary,
+                    "crisis_active": last.crisis_active,
+                    "refusals": [r.pass_name for r in last.refusals],
+                }
+                if last
+                else None
+            ),
+        }
+
+    @router.post("/pom/import-bundled", **guarded)
+    def pom_import_bundled() -> dict[str, object]:
+        """Idempotently import the repo-bundled, Oracle-reviewed POM
+        (manual + dataset) into this deployment's store. Skips anything
+        already present (by artifact hash / item id) — append-only."""
+        import json as _json
+        from pathlib import Path
+
+        from dude.pom.contracts import PomItem, SourceArtifact
+        from dude.pom.store import PomStore
+
+        sources = Path(__file__).resolve().parent.parent / "pom" / "sources"
+        manual = sources / "joseph_operating_manual_v1.md"
+        dataset = sources / "joseph_pom_dataset_v1.json"
+        if not manual.exists() or not dataset.exists():
+            raise HTTPException(status_code=404, detail="Bundled POM not present.")
+        pom = PomStore(case_store)
+        bundle = pom.load()
+        content = manual.read_text(encoding="utf-8")
+        probe = SourceArtifact(user_id="joseph", title="probe", content=content)
+        artifact = next(
+            (a for a in bundle.source_artifacts
+             if a.content_sha256 == probe.content_sha256),
+            None,
+        )
+        if artifact is None:
+            artifact = SourceArtifact(
+                user_id="joseph",
+                title="Joseph Operating Manual v1",
+                content=content,
+            )
+            pom.append(artifact)
+        existing_ids = {i.id for i in bundle.items}
+        imported = 0
+        for raw in _json.loads(dataset.read_text(encoding="utf-8")):
+            item = PomItem.model_validate(
+                {**raw, "source_artifact_id": artifact.id}
+            )
+            if item.id not in existing_ids:
+                pom.append(item)
+                imported += 1
+        return {
+            "artifact_sha256": artifact.content_sha256,
+            "items_imported": imported,
+            "items_total": len(existing_ids) + imported,
+        }
+
     @router.post("/cases/{case_id}/capture", **guarded)
     def rest_capture(case_id: str, request: CaptureRequest) -> dict[str, object]:
         try:
