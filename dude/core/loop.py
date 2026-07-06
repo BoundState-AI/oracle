@@ -84,6 +84,11 @@ _MODE_TEMPLATES: dict[GateMode, str] = {
         "no new evidence. Continued silence is itself low-resolution data; "
         "the analysis was re-run against the current scope."
     ),
+    GateMode.INCOMPLETE_PRIOR_RERUN: (
+        "The evidence set is unchanged, but the previous analysis did not "
+        "fully run (some passes refused). The incomplete passes were "
+        "re-run against the existing evidence."
+    ),
     GateMode.NO_NEW_DATA: (
         "The evidence set, hypothesis set, and decision scope are unchanged "
         "since the last analysis. Re-running now would recompute the same "

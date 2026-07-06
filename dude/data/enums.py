@@ -42,6 +42,10 @@ class GateMode(str, Enum):
     NEW_HYPOTHESIS_REANALYSIS = "new_hypothesis_reanalysis"
     SCOPE_CHANGE = "scope_change"
     NO_NEW_DATA = "no_new_data"
+    # WHY: "no new data, no new analysis" presumes the prior analysis
+    # actually ran. A prior run with refused passes is incomplete; re-running
+    # it is completion, not recomputation, and must never be gated.
+    INCOMPLETE_PRIOR_RERUN = "incomplete_prior_rerun"
 
 
 class CaseStatus(str, Enum):

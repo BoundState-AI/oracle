@@ -119,10 +119,20 @@ def analyze(store: CaseStore, case_id: str, passes: PassSet | None = None) -> An
     mode = fingerprint.gate(current, prior.fingerprint if prior else None)
 
     if mode is GateMode.NO_NEW_DATA and prior is not None:
-        # Crisis output is NEVER gated; the prior run is served with the
-        # evidence-state message and a fresh cumulative view.
-        LOGGER.info("Gate: NO_NEW_DATA for case %s; serving prior run", case_id)
-        return AnalysisResult(run=prior, safety=scan, served_prior=True)
+        # Stub refusals are permanent until a model is configured —
+        # re-running completes nothing, so they don't reopen the gate.
+        from dude.pipeline.passes import STUB_REASON
+
+        transient_refusals = [r for r in prior.refusals if r.reason != STUB_REASON]
+        if transient_refusals:
+            # An incomplete prior run never gates its own completion
+            # (GateMode.INCOMPLETE_PRIOR_RERUN — see enums for WHY).
+            mode = GateMode.INCOMPLETE_PRIOR_RERUN
+        else:
+            # Crisis output is NEVER gated; the prior run is served with
+            # the evidence-state message and a fresh cumulative view.
+            LOGGER.info("Gate: NO_NEW_DATA for case %s; serving prior run", case_id)
+            return AnalysisResult(run=prior, safety=scan, served_prior=True)
 
     refusals: list[Refusal] = []
     for model_pass in (passes.separator, passes.unknowns, passes.hypotheses, passes.adversary):
