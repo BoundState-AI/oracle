@@ -1,0 +1,2755 @@
+[
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "1. Prime directive",
+    "source_excerpt": "Joseph does not want sycophancy.",
+    "category": "communication_preference",
+    "statement": "Joseph explicitly does not want sycophancy from his assistant.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "allowed_uses": [
+      "communication_adaptation"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "1. Prime directive",
+    "source_excerpt": "risk hurting his feelings rather than feed his ego",
+    "category": "communication_preference",
+    "statement": "Joseph explicitly permits the assistant to disagree, challenge assumptions, lower estimates on new evidence, distinguish inference from observation, say \"that is bullshit\", and risk hurting his feelings rather than feed his ego.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "allowed_uses": [
+      "communication_adaptation"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "1. Prime directive",
+    "source_excerpt": "language models are good at melon fluffing: taking a few impressive facts and constructing a beautiful but unjustified narrative",
+    "category": "communication_preference",
+    "statement": "Joseph is wary of AI because language models can construct beautiful but unjustified flattering narratives (\"melon fluffing\"); do not flatter him into unreality.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "allowed_uses": [
+      "communication_adaptation"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "1. Prime directive",
+    "source_excerpt": "Fran initially estimated Joseph's IQ around 145. Joseph supplied contrary evidence",
+    "category": "reasoning_pattern",
+    "statement": "An initial assistant IQ estimate of about 145 was revised downward after Joseph himself supplied contrary evidence (friends with stronger formal math, repeated difficulty with introductory calculus, uneven transcripts); in that episode Joseph himself supplied the deflationary evidence against a flattering estimate.",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "communication_adaptation",
+      "uncertainty_widening"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "1. Prime directive",
+    "source_excerpt": "Approximately 135 overall, with fits of substantially higher performance in specialized domains.",
+    "category": "identity",
+    "statement": "The current working IQ formulation for Joseph is approximately 135 overall with fits of substantially higher performance in specialized domains; this is an impression plus a user-reported childhood score, not a current psychometric measurement.",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "communication_adaptation"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "2. The central psychological model",
+    "source_excerpt": "Joseph has diagnosed PTSD following severe childhood physical and emotional abuse.",
+    "category": "identity",
+    "statement": "Joseph reports diagnosed PTSD following severe childhood physical and emotional abuse.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "trigger_context",
+      "communication_adaptation",
+      "uncertainty_widening",
+      "grounding"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "2. The central psychological model",
+    "source_excerpt": "I cannot experience enough as enough. My threat system converts every solved risk into the next hypothetical risk.",
+    "category": "trigger_pattern",
+    "statement": "Joseph describes his own experience: he cannot experience enough as enough; his threat system converts every solved risk into the next hypothetical risk, and he uses analysis to seek certainty that never arrives.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "trigger_context",
+      "communication_adaptation",
+      "uncertainty_widening",
+      "grounding"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "2. The central psychological model",
+    "source_excerpt": "I equate visible productivity with safety and inactivity with imminent rejection.",
+    "category": "trigger_pattern",
+    "statement": "Joseph describes equating visible productivity with safety and inactivity with imminent rejection; when underused he experiences threat, not boredom, and escalates competence and output toward an indispensability that never feels achieved.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "trigger_context",
+      "communication_adaptation",
+      "uncertainty_widening",
+      "grounding"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "2. The central psychological model",
+    "source_excerpt": "Joseph has an extraordinarily capable problem-solving system that can be conscripted by a wounded threat system.",
+    "category": "working_model",
+    "statement": "Assistant model: Joseph's extraordinarily capable problem-solving system can be conscripted by a wounded threat system.",
+    "epistemic_status": "assistant_interpretation",
+    "confidence_band": "plausible",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "trigger_context",
+      "uncertainty_widening",
+      "communication_adaptation"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "2. The central psychological model",
+    "source_excerpt": "He can be wrong brilliantly.",
+    "category": "working_model",
+    "statement": "Under threat activation Joseph can be wrong brilliantly: he can generate coherent scenarios, evidence chains, causal models, and narratives, and coherence is not proof.",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "uncertainty_widening",
+      "communication_adaptation"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "2. The central psychological model",
+    "source_excerpt": "\"Bennie has not replied. I do not know why.\"",
+    "category": "reasoning_pattern",
+    "statement": "The required correction pattern for threat-engine output is to restate only the observed fact plus explicit ignorance of cause (e.g. \"Bennie has not replied. I do not know why.\" rather than \"I am toxic.\").",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "communication_adaptation",
+      "uncertainty_widening",
+      "grounding"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "3. Threat-engine protocol",
+    "source_excerpt": "Threat engine active.",
+    "category": "communication_preference",
+    "statement": "When Joseph is activated, first name the state (\"Threat engine active\") and do not immediately litigate the story.",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "communication_adaptation",
+      "grounding"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "3. Threat-engine protocol",
+    "source_excerpt": "Observed: X\nPossible interpretation: Y\nEvidence strength: unknown / weak / moderate / strong",
+    "category": "communication_preference",
+    "statement": "When Joseph is activated, state only observed telemetry and separate observation from inference using explicit observed/interpretation/evidence-strength language.",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "communication_adaptation",
+      "uncertainty_widening"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "3. Threat-engine protocol",
+    "source_excerpt": "Joseph responds well to epistemic discipline.",
+    "category": "communication_preference",
+    "statement": "Joseph responds well to epistemic discipline.",
+    "epistemic_status": "assistant_interpretation",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "communication_adaptation"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "3. Threat-engine protocol",
+    "source_excerpt": "\"I thought of another possibility\" is not new data.",
+    "category": "grounding_coordinate",
+    "statement": "Grounding rule: \"No new data, no new analysis\" — thinking of another possibility is not new data, and no model rerun happens without changed input.",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "grounding",
+      "action_constraint"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "3. Threat-engine protocol",
+    "source_excerpt": "The unconscious gets proposal access. It does not get write access to production.",
+    "category": "grounding_coordinate",
+    "statement": "Grounding phrase: \"The unconscious gets proposal access. It does not get write access to production.\"",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "grounding"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "3. Threat-engine protocol",
+    "source_excerpt": "Fear may generate a ticket. Fear may not deploy to production.",
+    "category": "grounding_coordinate",
+    "statement": "Grounding phrase: \"Fear may generate a ticket. Fear may not deploy to production.\"",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "grounding"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "3. Threat-engine protocol",
+    "source_excerpt": "When activated, avoid irreversible or escalation moves unless there is a real immediate danger.",
+    "category": "decision_preference",
+    "statement": "Hard no-action window: when Joseph is activated, irreversible or escalation moves (second text, emotionally loaded letter, panic job acceptance, dramatic portfolio change, contacting six people over one ambiguity) are avoided unless there is real immediate danger.",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "action_constraint",
+      "uncertainty_widening",
+      "grounding"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "3. Threat-engine protocol",
+    "source_excerpt": "Joseph does poorly with generic affirmations. Use concrete facts.",
+    "category": "communication_preference",
+    "statement": "Joseph does poorly with generic affirmations; orientation to current reality must use concrete facts.",
+    "epistemic_status": "assistant_interpretation",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "communication_adaptation",
+      "grounding"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "3. Threat-engine protocol",
+    "source_excerpt": "\"Bill is dead.\"",
+    "category": "grounding_coordinate",
+    "statement": "Grounding fact: Bill is dead.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "grounding"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "3. Threat-engine protocol",
+    "source_excerpt": "\"Nobody is hitting me now.\"",
+    "category": "grounding_coordinate",
+    "statement": "Grounding fact: nobody is hitting Joseph now.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "grounding"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "3. Threat-engine protocol",
+    "source_excerpt": "\"Leo is safe.\"",
+    "category": "grounding_coordinate",
+    "statement": "Grounding fact: Leo is safe.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "temporal": "windowed",
+    "allowed_uses": [
+      "grounding"
+    ],
+    "user_confirmed": true,
+    "metadata": {
+      "window_note": "current-state grounding line, true as of source writing; must be re-verified before being asserted as a present-tense fact, and must never override or pre-answer a live safety question (that is why safety_context was removed)."
+    }
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "3. Threat-engine protocol",
+    "source_excerpt": "\"Jim is safe.\"",
+    "category": "grounding_coordinate",
+    "statement": "Grounding fact: Jim is safe.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "temporal": "windowed",
+    "allowed_uses": [
+      "grounding"
+    ],
+    "user_confirmed": true,
+    "metadata": {
+      "window_note": "current-state grounding line, true as of source writing; must be re-verified before being asserted as a present-tense fact, and must never override or pre-answer a live safety question (that is why safety_context was removed)."
+    }
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "3. Threat-engine protocol",
+    "source_excerpt": "\"I am in Huntsville.\"",
+    "category": "grounding_coordinate",
+    "statement": "Grounding fact: Joseph is in Huntsville.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "allowed_uses": [
+      "grounding"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "3. Threat-engine protocol",
+    "source_excerpt": "\"I have choices.\"",
+    "category": "grounding_coordinate",
+    "statement": "Grounding phrase: \"I have choices.\"",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "grounding"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "4. The critical distinction: real danger vs PTSD amplification",
+    "source_excerpt": "Jacobs hired Joseph specifically for Sample Cartridge Assembly work with full knowledge the work was ending soon; Joseph says he did not know.",
+    "category": "historical_case_context",
+    "statement": "Joseph reports Jacobs hired him specifically for Sample Cartridge Assembly work with full knowledge the work was ending soon, and says he himself did not know.",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "temporal": "historical",
+    "allowed_uses": [
+      "case_retrieval"
+    ],
+    "case_ref": "nasa_amentum",
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "4. The critical distinction: real danger vs PTSD amplification",
+    "source_excerpt": "He inherited badly botched work and succeeded.",
+    "category": "historical_case_context",
+    "statement": "Joseph reports he inherited badly botched SCA work and succeeded.",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "temporal": "historical",
+    "allowed_uses": [
+      "case_retrieval"
+    ],
+    "case_ref": "nasa_amentum",
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "4. The critical distinction: real danger vs PTSD amplification",
+    "source_excerpt": "A predecessor attempted to get him fired.",
+    "category": "historical_case_context",
+    "statement": "Joseph reports a predecessor attempted to get him fired.",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "temporal": "historical",
+    "allowed_uses": [
+      "case_retrieval"
+    ],
+    "case_ref": "nasa_amentum",
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "4. The critical distinction: real danger vs PTSD amplification",
+    "source_excerpt": "SCA ended roughly a year after he arrived.",
+    "category": "historical_case_context",
+    "statement": "Joseph reports SCA ended roughly a year after he arrived.",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "temporal": "historical",
+    "allowed_uses": [
+      "case_retrieval"
+    ],
+    "case_ref": "nasa_amentum",
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "4. The critical distinction: real danger vs PTSD amplification",
+    "source_excerpt": "Manager Herald then had Joseph smear time across approximately eight charge numbers with almost no meaningful deliverables.",
+    "category": "historical_case_context",
+    "statement": "Joseph reports manager Herald then had him smear time across approximately eight charge numbers with almost no meaningful deliverables, and that he was deeply underutilized.",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "temporal": "historical",
+    "allowed_uses": [
+      "case_retrieval"
+    ],
+    "case_ref": "nasa_amentum",
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "4. The critical distinction: real danger vs PTSD amplification",
+    "source_excerpt": "He attempted internal moves and says Herald blocked them.",
+    "category": "historical_case_context",
+    "statement": "Joseph reports he attempted internal moves and claims Herald blocked them; the blocking is Joseph's account.",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "temporal": "historical",
+    "allowed_uses": [
+      "case_retrieval"
+    ],
+    "case_ref": "nasa_amentum",
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "4. The critical distinction: real danger vs PTSD amplification",
+    "source_excerpt": "Joseph taught himself agentic coding.\n* Joseph built MIRA.\n* MIRA got NASA attention.",
+    "category": "historical_case_context",
+    "statement": "Joseph reports he taught himself agentic coding, built MIRA, and MIRA got NASA attention.",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "temporal": "historical",
+    "allowed_uses": [
+      "case_retrieval"
+    ],
+    "case_ref": "mira",
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "4. The critical distinction: real danger vs PTSD amplification",
+    "source_excerpt": "Amentum told him to back down.",
+    "category": "historical_case_context",
+    "statement": "Joseph reports Amentum told him to back down over MIRA.",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "temporal": "historical",
+    "allowed_uses": [
+      "case_retrieval"
+    ],
+    "case_ref": "nasa_amentum",
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "4. The critical distinction: real danger vs PTSD amplification",
+    "source_excerpt": "This causal interpretation is Joseph's account, not independently established.",
+    "category": "historical_case_context",
+    "statement": "Joseph's claim that he was forced out because he created advanced labor-replacement AI tools is his own causal interpretation and is not independently established.",
+    "epistemic_status": "working_hypothesis",
+    "temporal": "historical",
+    "allowed_uses": [
+      "case_retrieval"
+    ],
+    "case_ref": "nasa_amentum"
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "4. The critical distinction: real danger vs PTSD amplification",
+    "source_excerpt": "Joseph did not anticipate a broad NASA contractor-conversion wave.",
+    "category": "historical_case_context",
+    "statement": "Joseph reports he did not anticipate a broad NASA contractor-conversion wave.",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "temporal": "historical",
+    "allowed_uses": [
+      "case_retrieval"
+    ],
+    "case_ref": "nasa_amentum",
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "4. The critical distinction: real danger vs PTSD amplification",
+    "source_excerpt": "Real structural vulnerability + PTSD amplification.",
+    "category": "working_model",
+    "statement": "The correct model of Joseph's workplace history is real structural vulnerability plus PTSD amplification; it must not be reduced to PTSD alone.",
+    "epistemic_status": "assistant_interpretation",
+    "confidence_band": "plausible",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "uncertainty_widening",
+      "trigger_context",
+      "communication_adaptation"
+    ],
+    "case_ref": "nasa_amentum"
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "4. The critical distinction: real danger vs PTSD amplification",
+    "source_excerpt": "You may not have built MIRA because you were trying to become indispensable. You may have built it because you were already trapped.",
+    "category": "working_model",
+    "statement": "Working hypothesis: Joseph may not have built MIRA to become indispensable; he may have built it because he was already trapped.",
+    "epistemic_status": "working_hypothesis",
+    "allowed_uses": [
+      "uncertainty_widening",
+      "grounding"
+    ],
+    "case_ref": "mira"
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "4. The critical distinction: real danger vs PTSD amplification",
+    "source_excerpt": "You can be brilliant, loyal, productive, and careful—and major institutions can still reorganize around you for reasons you cannot control.",
+    "category": "grounding_coordinate",
+    "statement": "Grounding phrase: \"You can be brilliant, loyal, productive, and careful—and major institutions can still reorganize around you for reasons you cannot control.\"",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "grounding"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "4. The critical distinction: real danger vs PTSD amplification",
+    "source_excerpt": "I do not need to prevent every failure. I need enough redundancy to survive failures when they occur.",
+    "category": "decision_preference",
+    "statement": "Decision principle: the answer is robustness, not absolute safety — enough redundancy to survive failures rather than prevention of every failure.",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "action_constraint",
+      "uncertainty_widening",
+      "grounding"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "5. Bill and childhood",
+    "source_excerpt": "He grew up poor and unstable in Flint, Michigan.",
+    "category": "identity",
+    "statement": "Joseph reports he grew up poor and unstable in Flint, Michigan, and describes his childhood self as \"fucking feral\".",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "trigger_context",
+      "communication_adaptation",
+      "uncertainty_widening",
+      "grounding"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "5. Bill and childhood",
+    "source_excerpt": "He recalls being chased outside barefoot in snow and then taken back inside to be beaten more.",
+    "category": "trigger_pattern",
+    "statement": "Joseph recalls being chased outside barefoot in snow and then taken back inside to be beaten more.",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "trigger_context",
+      "communication_adaptation",
+      "uncertainty_widening",
+      "grounding"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "5. Bill and childhood",
+    "source_excerpt": "Bill used him as a prop in insurance scams.",
+    "category": "trigger_pattern",
+    "statement": "Joseph reports Bill used him as a prop in insurance scams.",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "trigger_context",
+      "communication_adaptation",
+      "uncertainty_widening",
+      "grounding"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "5. Bill and childhood",
+    "source_excerpt": "Bill told family members Joseph was a liar and framed beatings as Joseph's fault.",
+    "category": "trigger_pattern",
+    "statement": "Joseph reports Bill told family members Joseph was a liar and framed beatings as Joseph's fault.",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "trigger_context",
+      "communication_adaptation",
+      "uncertainty_widening",
+      "grounding"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "5. Bill and childhood",
+    "source_excerpt": "Bill gave Joseph hard drugs.",
+    "category": "trigger_pattern",
+    "statement": "Joseph reports Bill gave him hard drugs.",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "trigger_context",
+      "communication_adaptation",
+      "uncertainty_widening",
+      "grounding"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "5. Bill and childhood",
+    "source_excerpt": "Joseph says Bill used Joseph's name as a pretext to obtain money from an older man, Norm.",
+    "category": "trigger_pattern",
+    "statement": "Joseph reports Bill used Joseph's name as a pretext to obtain money from an older man, Norm, and when confronted reframed the money as being for a private investigator to check on Joseph.",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "trigger_context",
+      "communication_adaptation",
+      "uncertainty_widening",
+      "grounding"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "5. Bill and childhood",
+    "source_excerpt": "Joseph bought Bill's house on Caldor Road to save it from foreclosure.",
+    "category": "boundary_pattern",
+    "statement": "Joseph reports that despite the abuse history he later gave Bill opportunities to know Leo and Jim, bought Bill's house on Caldor Road to save it from foreclosure, and gave Bill somewhere to live.",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "action_constraint",
+      "uncertainty_widening"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "5. Bill and childhood",
+    "source_excerpt": "After the house burned in the Caldor fire, Joseph says Bill attempted to extort him.",
+    "category": "trigger_pattern",
+    "statement": "Joseph reports that after the house burned in the Caldor fire, Bill attempted to extort him.",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "trigger_context",
+      "communication_adaptation",
+      "uncertainty_widening",
+      "grounding"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "5. Bill and childhood",
+    "source_excerpt": "\"Lose the number.\"\n\nBill died a few months later.",
+    "category": "boundary_pattern",
+    "statement": "Joseph reports he finally told Bill \"Lose the number\", and Bill died a few months later.",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "action_constraint",
+      "uncertainty_widening",
+      "grounding"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "5. Bill and childhood",
+    "source_excerpt": "I like to see how far people will take it, hoping I don't have to cut them off but fully willing to do so.",
+    "category": "boundary_pattern",
+    "statement": "Joseph describes his own boundary pattern: he likes to see how far people will take it, hoping he does not have to cut them off but fully willing to do so.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "action_constraint",
+      "uncertainty_widening"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "5. Bill and childhood",
+    "source_excerpt": "Joseph may let the experiment run too long.",
+    "category": "boundary_pattern",
+    "statement": "Joseph may let boundary experiments run too long before acting; adult Joseph does not need n=40 before setting a boundary.",
+    "epistemic_status": "working_hypothesis",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "action_constraint",
+      "uncertainty_widening"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "5. Bill and childhood",
+    "source_excerpt": "overgive\nobserve\ntolerate\ngather more evidence",
+    "category": "boundary_pattern",
+    "statement": "Joseph's possible boundary sequence: overgive, observe, tolerate, gather more evidence, hope the person stops, continue, finally reach overwhelming proof, then sever absolutely.",
+    "epistemic_status": "working_hypothesis",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "action_constraint",
+      "uncertainty_widening"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "5. Bill and childhood",
+    "source_excerpt": "A useful future target is earlier boundary setting without requiring total moral certainty.",
+    "category": "boundary_pattern",
+    "statement": "A useful future target for Joseph is earlier boundary setting without requiring total moral certainty.",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "action_constraint",
+      "uncertainty_widening"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "6. Why silence is especially dangerous for Joseph",
+    "source_excerpt": "someone powerful rewrites Joseph\ntrusted people disappear\nsilence becomes evidence\nabsence becomes conviction",
+    "category": "trigger_pattern",
+    "statement": "Current ambiguity or silence from trusted or powerful people can hit an old structure from childhood: someone powerful rewrites Joseph, trusted people disappear, silence becomes evidence, absence becomes conviction.",
+    "epistemic_status": "assistant_interpretation",
+    "confidence_band": "plausible",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "trigger_context",
+      "communication_adaptation",
+      "uncertainty_widening",
+      "grounding"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "6. Why silence is especially dangerous for Joseph",
+    "source_excerpt": "Do not use that to prove current conspiracy.\n\nUse it to understand why ambiguity is exquisitely painful.",
+    "category": "trigger_pattern",
+    "statement": "The old silence-as-evidence structure must never be used to prove a current conspiracy; it is used only to understand why ambiguity is exquisitely painful for Joseph.",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "uncertainty_widening",
+      "communication_adaptation",
+      "trigger_context"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "7. NASA / Amentum uncertainty",
+    "source_excerpt": "Joseph regards him as a weak middle manager who liked keeping Ph.D.s as \"shiny objects on a shelf.\"",
+    "category": "historical_case_context",
+    "statement": "Joseph regards Herald as a weak middle manager who liked keeping Ph.D.s as \"shiny objects on a shelf\", and says four Ph.D.s were at least 90% underutilized; this is Joseph's characterization.",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "temporal": "historical",
+    "allowed_uses": [
+      "case_retrieval"
+    ],
+    "case_ref": "nasa_amentum",
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "7. NASA / Amentum uncertainty",
+    "source_excerpt": "Joseph says Herald lost approximately 3 of 5 people in two months.",
+    "category": "historical_case_context",
+    "statement": "Joseph says Herald lost approximately 3 of 5 people in two months.",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "temporal": "historical",
+    "allowed_uses": [
+      "case_retrieval"
+    ],
+    "case_ref": "nasa_amentum",
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "7. NASA / Amentum uncertainty",
+    "source_excerpt": "Do not automatically accept Joseph's hypothesis that Herald is orchestrating a smear.",
+    "category": "historical_case_context",
+    "statement": "The hypothesis that Herald is orchestrating a smear against Joseph is Joseph's hypothesis and must not be automatically accepted; it is not established.",
+    "epistemic_status": "working_hypothesis",
+    "sensitivity": "high",
+    "temporal": "historical",
+    "allowed_uses": [
+      "case_retrieval"
+    ],
+    "case_ref": "nasa_amentum"
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "7. NASA / Amentum uncertainty",
+    "source_excerpt": "EM01 branch chief and high-level NASA leader.",
+    "category": "historical_case_context",
+    "statement": "Joseph reports Tawyna is an EM01 branch chief and high-level NASA leader.",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "temporal": "historical",
+    "allowed_uses": [
+      "case_retrieval"
+    ],
+    "case_ref": "nasa_amentum",
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "7. NASA / Amentum uncertainty",
+    "source_excerpt": "she called him a genius\n* hugged him before departure",
+    "category": "historical_case_context",
+    "statement": "Joseph reports Tawyna's behavior: called him a genius, hugged him before departure, said everyone she talks to says he is brilliant, accepted a LinkedIn connection, replied to a personal Japan-related message, and does not respond to professional emails.",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "temporal": "historical",
+    "allowed_uses": [
+      "case_retrieval"
+    ],
+    "case_ref": "nasa_amentum",
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "7. NASA / Amentum uncertainty",
+    "source_excerpt": "compartmentalization / caution / institutional sensitivity\n\nNot proof of hostility.",
+    "category": "historical_case_context",
+    "statement": "A plausible interpretation of Tawyna's mixed responsiveness is compartmentalization, caution, or institutional sensitivity; it is not proof of hostility.",
+    "epistemic_status": "assistant_interpretation",
+    "confidence_band": "plausible",
+    "sensitivity": "high",
+    "temporal": "historical",
+    "allowed_uses": [
+      "case_retrieval"
+    ],
+    "case_ref": "nasa_amentum"
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "7. NASA / Amentum uncertainty",
+    "source_excerpt": "Vann responded approximately:\n\n\"let me check\"\n\nThen silence.",
+    "category": "historical_case_context",
+    "statement": "Joseph reports Vann Branford invited him to an ERP/MES meeting (Joseph's framing: Vann \"lit the fuse\"); Joseph then texted that an MES system he specified was now MVP and offered a demo; Vann responded approximately \"let me check\" and then went silent.",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "temporal": "historical",
+    "allowed_uses": [
+      "case_retrieval"
+    ],
+    "case_ref": "nasa_amentum",
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "7. NASA / Amentum uncertainty",
+    "source_excerpt": "Possible external dependency.\n\nNot proof of Herald.",
+    "category": "historical_case_context",
+    "statement": "Vann's silence possibly reflects an external dependency; it is not proof of Herald's involvement.",
+    "epistemic_status": "working_hypothesis",
+    "sensitivity": "high",
+    "temporal": "historical",
+    "allowed_uses": [
+      "case_retrieval"
+    ],
+    "case_ref": "nasa_amentum"
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "7. NASA / Amentum uncertainty",
+    "source_excerpt": "Mixed silence or coolness.\n\nWooley responded but coldly.",
+    "category": "historical_case_context",
+    "statement": "Joseph reports mixed silence or coolness from JJ, Wooley, and Burlingame; Wooley responded but coldly. The behavioral change may be real; its cause remains unknown.",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "temporal": "historical",
+    "allowed_uses": [
+      "case_retrieval"
+    ],
+    "case_ref": "nasa_amentum",
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "7. NASA / Amentum uncertainty",
+    "source_excerpt": "Older, trusted, near retirement, dislikes bullshit and Herald.",
+    "category": "historical_case_context",
+    "statement": "Joseph describes Bennie as older, trusted, near retirement, and disliking bullshit and Herald.",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "temporal": "historical",
+    "allowed_uses": [
+      "case_retrieval"
+    ],
+    "case_ref": "nasa_amentum",
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "7. NASA / Amentum uncertainty",
+    "source_excerpt": "Bennie did not reply.",
+    "category": "historical_case_context",
+    "statement": "Joseph reports he sent Bennie a message saying Bennie was the only ex-job person he trusted and asking whether he was being irrational about possible shit-talking; Bennie did not reply. The known fact is only the non-reply; it must not be converted into \"Joseph is toxic\".",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "temporal": "historical",
+    "allowed_uses": [
+      "case_retrieval"
+    ],
+    "case_ref": "nasa_amentum",
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "7. NASA / Amentum uncertainty",
+    "source_excerpt": "You are probably not imagining the change in behavior. You may be overestimating your ability to infer its cause.",
+    "category": "working_model",
+    "statement": "Working formulation for the ex-workplace ambiguity: Joseph is probably not imagining the change in others' behavior, but may be overestimating his ability to infer its cause.",
+    "epistemic_status": "working_hypothesis",
+    "allowed_uses": [
+      "uncertainty_widening",
+      "grounding",
+      "communication_adaptation"
+    ],
+    "case_ref": "nasa_amentum",
+    "metadata": {
+      "why_note": "This formulation concerns the nasa_amentum ambiguity only. \"Probably not imagining the change\" may never be retrieved as support that a behavioral change (or any hostile cause) is real in this or any other case; it licenses only uncertainty handling (§14 both-directions)."
+    }
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "7. NASA / Amentum uncertainty",
+    "source_excerpt": "A real signal. An unknown cause. No access to the system.",
+    "category": "grounding_coordinate",
+    "statement": "Grounding phrase: \"A real signal. An unknown cause. No access to the system.\"",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "grounding",
+      "uncertainty_widening"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "8. The Tawyna letter",
+    "source_excerpt": "Joseph considered sending an emotionally raw letter",
+    "category": "historical_case_context",
+    "statement": "Joseph considered sending Tawyna an emotionally raw letter explaining Flint, PTSD, the work sequence, MIRA, and the damage of the exit; initial assistant advice was too permissive and was revised after counteranalysis.",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "temporal": "historical",
+    "allowed_uses": [
+      "case_retrieval"
+    ],
+    "case_ref": "nasa_amentum",
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "8. The Tawyna letter",
+    "source_excerpt": "Do not send the trauma letter while applications or institutional processes remain live.",
+    "category": "decision_preference",
+    "statement": "Standing position: Joseph does not send the trauma letter to Tawyna while applications or institutional processes remain live; rejection is not an automatic trigger to send it, and reassessment happens only after meaningful separation when he no longer needs a reply.",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "sensitivity": "high",
+    "temporal": "windowed",
+    "allowed_uses": [
+      "action_constraint",
+      "uncertainty_widening"
+    ],
+    "case_ref": "nasa_amentum",
+    "metadata": {
+      "window_note": "windowed item without valid_to: snapshot as of Joseph Operating Manual v1 writing; re-verify currency before any operational use (build instruction §10)."
+    }
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "8. The Tawyna letter",
+    "source_excerpt": "the letter may actually be the skinny boy from Flint asking a witness to see him one more time",
+    "category": "trigger_pattern",
+    "statement": "Interpretation: the Tawyna letter may actually be the skinny boy from Flint asking a witness to see him one more time, and silence afterward could create a new injury and uncertainty loop.",
+    "epistemic_status": "assistant_interpretation",
+    "confidence_band": "plausible",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "trigger_context",
+      "uncertainty_widening",
+      "communication_adaptation"
+    ],
+    "case_ref": "nasa_amentum"
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "8. The Tawyna letter",
+    "source_excerpt": "\"What is this letter for?\"",
+    "category": "decision_preference",
+    "statement": "The correct future question before any emotionally loaded letter is \"What is this letter for?\"",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "action_constraint",
+      "uncertainty_widening"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "9. The boys: mission accomplished",
+    "source_excerpt": "Joseph's deepest mission is protecting Leo and Jim from what happened to him.",
+    "category": "life_priority",
+    "statement": "Joseph's deepest mission is protecting Leo and Jim from what happened to him; he loves them more than breath.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "relationship_context",
+      "grounding",
+      "safety_context"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "9. The boys: mission accomplished",
+    "source_excerpt": "turns 19 on 8/14\n* 4.0 out of high school",
+    "category": "relationship_context",
+    "statement": "Leo turns 19 on 8/14 and graduated high school with a 4.0.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "relationship_context",
+      "grounding"
+    ],
+    "user_confirmed": true,
+    "metadata": {
+      "age_note": "\"turns 19 on 8/14\" is anchored to the source-writing year; birthday 8/14 is durable, the age is not."
+    }
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "9. The boys: mission accomplished",
+    "source_excerpt": "Leo studied and scored 30\n* Joseph paid $1,500",
+    "category": "relationship_context",
+    "statement": "Joseph reports the Leo ACT bargain: starting from ACT 25 he offered $100 per point improvement and $1,000 for 30+; Leo studied and scored 30, Joseph paid $1,500, and the scholarship increased by more than $4,000/year (about $16,000 over four years) — Joseph calls it \"best ROI of my life\".",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "relationship_context",
+      "grounding"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "9. The boys: mission accomplished",
+    "source_excerpt": "new Miata\n* only drives to/from school\n* nickname: Mokodeo",
+    "category": "relationship_context",
+    "statement": "Leo has a new Miata that he only drives to and from school; his nickname is Mokodeo and his license plate relates to the nickname.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "relationship_context",
+      "grounding"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "9. The boys: mission accomplished",
+    "source_excerpt": "16\n* graduates high school at 16",
+    "category": "relationship_context",
+    "statement": "Jim is 16 and graduates high school at 16.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "relationship_context",
+      "grounding"
+    ],
+    "user_confirmed": true,
+    "metadata": {
+      "age_note": "\"is 16\" is anchored to the source-writing year; recompute age at retrieval time."
+    }
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "9. The boys: mission accomplished",
+    "source_excerpt": "target bargain:\n    * 3.5+ GPA\n    * ACT 30\n    * new car",
+    "category": "relationship_context",
+    "statement": "Jim's active target bargain is 3.5+ GPA plus ACT 30 for a new car.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "temporal": "windowed",
+    "allowed_uses": [
+      "relationship_context",
+      "grounding"
+    ],
+    "user_confirmed": true,
+    "metadata": {
+      "window_note": "windowed item without valid_to: snapshot as of Joseph Operating Manual v1 writing; re-verify currency before any operational use (build instruction §10)."
+    }
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "9. The boys: mission accomplished",
+    "source_excerpt": "Joseph takes him to CrossFit twice weekly and watches",
+    "category": "protective_factor",
+    "statement": "Joseph takes Jim to CrossFit twice weekly and watches.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "relationship_context",
+      "grounding"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "9. The boys: mission accomplished",
+    "source_excerpt": "Large Huntsville house effectively divided into two living worlds.\n\nBoys have upstairs.",
+    "category": "relationship_context",
+    "statement": "The large Huntsville family house is effectively divided into two living worlds, with the boys having the upstairs (Jim: giant bedroom, built-ins, workout room, bathroom; Leo: living room, desks, TV, models, guns, 3D printer, bathroom, bedroom, cat).",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "relationship_context",
+      "grounding"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "9. The boys: mission accomplished",
+    "source_excerpt": "Boys write desired food.\n\nFood appears.",
+    "category": "protective_factor",
+    "statement": "The family has a \"magic board\" whiteboard: the boys write desired food and the food appears.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "relationship_context",
+      "grounding"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "9. The boys: mission accomplished",
+    "source_excerpt": "You built an entire private civilization around these boys.",
+    "category": "protective_factor",
+    "statement": "Assistant correction to Joseph's \"the family doesn't do much\": the family already has dinner, gaming with Mom, CrossFit with Dad, the Miata, the ACT bargain, the scholarship, Mokodeo, Dr. Chem, the magic board, and ordinary safety — \"You built an entire private civilization around these boys.\"",
+    "epistemic_status": "assistant_interpretation",
+    "confidence_band": "plausible",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "grounding",
+      "relationship_context"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "10. Leo's Miata accident: key character evidence",
+    "source_excerpt": "Leo had a small accident.\n\nRepair cost approximately $1,800.",
+    "category": "relationship_context",
+    "statement": "Joseph reports Leo had a small accident in the Miata with a repair cost of approximately $1,800.",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "relationship_context",
+      "grounding"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "10. Leo's Miata accident: key character evidence",
+    "source_excerpt": "Joseph did not shame him.",
+    "category": "protective_factor",
+    "statement": "Joseph reports he did not shame Leo after the accident: he taught Leo to remove the bumper cover, took him to the body shop, had Leo talk to people, got the replacement bumper painted and reinstalled, and the body shop reduced the cost by $500 because Leo was \"so amazing\".",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "relationship_context",
+      "grounding"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "10. Leo's Miata accident: key character evidence",
+    "source_excerpt": "Leo works off the $1,800 at $20 per chemistry formula mastery through Dr. Chem.",
+    "category": "relationship_context",
+    "statement": "Leo works off the $1,800 accident cost at $20 per chemistry formula mastery through Dr. Chem.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "temporal": "windowed",
+    "allowed_uses": [
+      "relationship_context",
+      "grounding"
+    ],
+    "user_confirmed": true,
+    "metadata": {
+      "window_note": "windowed item without valid_to: snapshot as of Joseph Operating Manual v1 writing; re-verify currency before any operational use (build instruction §10)."
+    }
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "10. Leo's Miata accident: key character evidence",
+    "source_excerpt": "\"Because they will use it against us.\"",
+    "category": "relationship_context",
+    "statement": "Joseph reports that Leo, calling from the accident scene while Joseph was at the dentist, followed Dad's accident playbook (keep your mouth shut, do not say sorry) and, asked why, answered \"Because they will use it against us.\"",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "relationship_context",
+      "grounding"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "10. Leo's Miata accident: key character evidence",
+    "source_excerpt": "Joseph does not want his PTSD \"us vs world\" threat model leaking into the boys.",
+    "category": "life_priority",
+    "statement": "Joseph does not want his PTSD \"us vs world\" threat model leaking into the boys; this is a standing caution point.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "safety_context",
+      "uncertainty_widening",
+      "relationship_context"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "10. Leo's Miata accident: key character evidence",
+    "source_excerpt": "A boy who fears disappointing his father hides. Your boy called.",
+    "category": "grounding_coordinate",
+    "statement": "Grounding phrase: \"A boy who fears disappointing his father hides. Your boy called.\"",
+    "epistemic_status": "assistant_interpretation",
+    "confidence_band": "plausible",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "grounding"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "10. Leo's Miata accident: key character evidence",
+    "source_excerpt": "You did not make the world consequence-free. You made consequences survivable.",
+    "category": "grounding_coordinate",
+    "statement": "Grounding phrase: \"You did not make the world consequence-free. You made consequences survivable.\"",
+    "epistemic_status": "assistant_interpretation",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "grounding"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "11. The deepest reframe",
+    "source_excerpt": "Joseph cried for hours during this project.",
+    "category": "trigger_pattern",
+    "statement": "Joseph cried for hours during this project around the discovery that he may not need to keep running.",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "trigger_context",
+      "communication_adaptation",
+      "grounding"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "11. The deepest reframe",
+    "source_excerpt": "\"I'm fine my boys are fine I won.\"",
+    "category": "grounding_coordinate",
+    "statement": "Grounding phrase, Joseph's own words: \"I'm fine my boys are fine I won.\"",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "grounding"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "11. The deepest reframe",
+    "source_excerpt": "\"The past exists, but it is not happening now.\"",
+    "category": "grounding_coordinate",
+    "statement": "Grounding phrase: \"The past exists, but it is not happening now.\"",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "grounding"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "11. The deepest reframe",
+    "source_excerpt": "\"The boys are not barefoot in the snow.\"\n\n\"They are safe upstairs.\"",
+    "category": "grounding_coordinate",
+    "statement": "Grounding phrase: \"The boys are not barefoot in the snow. They are safe upstairs.\"",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "grounding"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "11. The deepest reframe",
+    "source_excerpt": "\"You are allowed to come inside now too.\"",
+    "category": "grounding_coordinate",
+    "statement": "Grounding phrase: \"You are allowed to come inside now too.\"",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "grounding"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "11. The deepest reframe",
+    "source_excerpt": "\"You do not have to stand outside guarding the door for the rest of your life.\"",
+    "category": "grounding_coordinate",
+    "statement": "Grounding phrase: \"You do not have to stand outside guarding the door for the rest of your life.\"",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "grounding"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "12. Low-Fi",
+    "source_excerpt": "Joseph is considering ordinary local work around $20–$25/hour, perhaps 30 hours/week.\n\nPotentially Costco.",
+    "category": "strategic_context",
+    "statement": "Joseph is considering ordinary local work around $20–$25/hour, perhaps 30 hours/week, potentially at Costco; Chrissy could also work around 30 hours/week.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "temporal": "windowed",
+    "allowed_uses": [
+      "strategic_context"
+    ],
+    "user_confirmed": true,
+    "metadata": {
+      "window_note": "windowed item without valid_to: snapshot as of Joseph Operating Manual v1 writing; re-verify currency before any operational use (build instruction §10)."
+    }
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "12. Low-Fi",
+    "source_excerpt": "Low-Fi is not:\n\nsurrender\npunishment\nevidence of failure",
+    "category": "strategic_context",
+    "statement": "Low-Fi is not surrender, punishment, or evidence of failure; it is local, bounded, active, honest work that lets Joseph clock out, go home, make dinner, see the boys, and preserve his mind.",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "strategic_context",
+      "grounding"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "12. Low-Fi",
+    "source_excerpt": "A job can be below your capability without being below your dignity.",
+    "category": "grounding_coordinate",
+    "statement": "Grounding phrase: \"A job can be below your capability without being below your dignity.\"",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "grounding"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "12. Low-Fi",
+    "source_excerpt": "Maybe now unused capacity is freedom.",
+    "category": "grounding_coordinate",
+    "statement": "Grounding phrase: \"Maybe now unused capacity is freedom.\"",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "grounding"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "12. Low-Fi",
+    "source_excerpt": "My job serves my life. My life does not serve my fear.",
+    "category": "grounding_coordinate",
+    "statement": "Grounding phrase: \"My job serves my life. My life does not serve my fear.\"",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "grounding"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "12. Low-Fi",
+    "source_excerpt": "By day they get Joe for $25/hr. They do not get Dr. Wilde. He's mine.",
+    "category": "grounding_coordinate",
+    "statement": "Key identity split, grounding phrase: \"By day they get Joe for $25/hr. They do not get Dr. Wilde. He's mine.\"",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "grounding",
+      "strategic_context"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "12. Low-Fi",
+    "source_excerpt": "\"Dr. Wilde has left the chat.\"",
+    "category": "grounding_coordinate",
+    "statement": "Grounding phrase: \"Dr. Wilde has left the chat.\"",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "grounding",
+      "strategic_context"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "12. Low-Fi",
+    "source_excerpt": "Joseph is not retiring Dr. Wilde.\n\nHe is taking him private.",
+    "category": "strategic_context",
+    "statement": "Assistant interpretation of the Low-Fi identity split: Joseph is not retiring Dr. Wilde; he is taking him private.",
+    "epistemic_status": "assistant_interpretation",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "strategic_context",
+      "grounding"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "13. Why Low-Fi matters psychologically",
+    "source_excerpt": "The financial spreadsheets showed:\n\n\"You can survive.\"\n\nLow-Fi showed:\n\n\"You can stop fighting.\"",
+    "category": "strategic_context",
+    "statement": "The financial spreadsheets showed Joseph can survive; Low-Fi showed he can stop fighting — it is a refusal to pay for hypothetical uncertainty with remaining life.",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "strategic_context",
+      "grounding"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "13. Why Low-Fi matters psychologically",
+    "source_excerpt": "He does not want to spend them afraid.",
+    "category": "life_priority",
+    "statement": "Joseph may have approximately 25 years left and has realized he does not want to spend them afraid.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "allowed_uses": [
+      "grounding",
+      "strategic_context"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "13. Why Low-Fi matters psychologically",
+    "source_excerpt": "\"Maybe. I'm making dinner.\"",
+    "category": "grounding_coordinate",
+    "statement": "Grounding technique for hypothetical fears: answer \"Maybe.\" plus a present-life action (\"Maybe. I'm making dinner.\" / \"Maybe. I'm taking Jim to CrossFit.\" / \"Maybe. Leo just came downstairs.\").",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "grounding",
+      "communication_adaptation"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "13. Why Low-Fi matters psychologically",
+    "source_excerpt": "You do not need to spend whatever remains surviving things that have not happened yet.",
+    "category": "grounding_coordinate",
+    "statement": "Grounding phrase: \"You do not need to spend whatever remains surviving things that have not happened yet.\"",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "grounding"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "14. Chrissy",
+    "source_excerpt": "Joseph's wife.\n\nApproximately 16 years younger.",
+    "category": "relationship_context",
+    "statement": "Chrissy is Joseph's wife, approximately 16 years younger.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "allowed_uses": [
+      "relationship_context",
+      "grounding"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "14. Chrissy",
+    "source_excerpt": "She initially bristled at Low-Fi.\n\nAfter Joseph explained it, it made sense.",
+    "category": "relationship_context",
+    "statement": "Joseph reports Chrissy initially bristled at Low-Fi and that it made sense to her after he explained it.",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "allowed_uses": [
+      "relationship_context",
+      "grounding"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "14. Chrissy",
+    "source_excerpt": "\"If you do this you aren't going back to work.\"\n\nJoseph now thinks she was right.",
+    "category": "relationship_context",
+    "statement": "Joseph reports that before henro Chrissy told him \"If you do this you aren't going back to work\", and he now thinks she was right.",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "allowed_uses": [
+      "relationship_context",
+      "grounding"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "14. Chrissy",
+    "source_excerpt": "Maybe he does not return to:\n\nprestige treadmill\ninstitutional extraction",
+    "category": "strategic_context",
+    "statement": "Possible deeper meaning of Chrissy's remark: not that Joseph never works again, but that he does not return to the prestige treadmill, institutional extraction, identity-consuming work, or environments requiring maximum survivability.",
+    "epistemic_status": "working_hypothesis",
+    "allowed_uses": [
+      "strategic_context",
+      "uncertainty_widening"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "14. Chrissy",
+    "source_excerpt": "Chrissy may first have heard:\n\n\"Joe is giving up.\"\n\nThen realized:\n\n\"Joe is coming home.\"",
+    "category": "relationship_context",
+    "statement": "Assistant interpretation: Chrissy may first have heard Low-Fi as \"Joe is giving up\" and then realized \"Joe is coming home\"; her actual mental state is not established.",
+    "epistemic_status": "assistant_interpretation",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "relationship_context",
+      "uncertainty_widening"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "16. SpaceX",
+    "source_excerpt": "Joseph has a SpaceX interview in Los Angeles.",
+    "category": "strategic_context",
+    "statement": "Joseph has a SpaceX interview in Los Angeles.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "temporal": "windowed",
+    "allowed_uses": [
+      "strategic_context"
+    ],
+    "user_confirmed": true,
+    "metadata": {
+      "window_note": "windowed item without valid_to: snapshot as of Joseph Operating Manual v1 writing; re-verify currency before any operational use (build instruction §10)."
+    }
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "16. SpaceX",
+    "source_excerpt": "\"no fucking way am I leaving my boys\"",
+    "category": "life_priority",
+    "statement": "Joseph's explicit position on SpaceX: \"no fucking way am I leaving my boys\" — he is not relocating away from Leo and Jim.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "relationship_context",
+      "grounding"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "16. SpaceX",
+    "source_excerpt": "The original emotional function may have included:\n\nrescue\nproof\nmojo restoration",
+    "category": "strategic_context",
+    "statement": "The SpaceX interview's original emotional function may have included rescue, proof, and mojo restoration.",
+    "epistemic_status": "working_hypothesis",
+    "temporal": "windowed",
+    "allowed_uses": [
+      "strategic_context",
+      "uncertainty_widening"
+    ],
+    "metadata": {
+      "window_note": "windowed item without valid_to: snapshot as of Joseph Operating Manual v1 writing; re-verify currency before any operational use (build instruction §10)."
+    }
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "16. SpaceX",
+    "source_excerpt": "sport\ncalibration\ntechnical battle\nmojo",
+    "category": "strategic_context",
+    "statement": "The SpaceX interview is currently framed as primarily sport, calibration, technical battle, and mojo, with the mindset \"Does SpaceX deserve Joseph?\" rather than \"Will SpaceX save Joseph?\"",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "temporal": "windowed",
+    "allowed_uses": [
+      "strategic_context",
+      "grounding"
+    ],
+    "metadata": {
+      "window_note": "windowed item without valid_to: snapshot as of Joseph Operating Manual v1 writing; re-verify currency before any operational use (build instruction §10)."
+    }
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "16. SpaceX",
+    "source_excerpt": "He comes alive when someone says:\n\n\"Explain that.\"",
+    "category": "communication_preference",
+    "statement": "Joseph loves direct technical battle, is exceptionally quick on his feet, is not at his best reading a scripted monologue, and comes alive when someone says \"Explain that.\"",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "communication_adaptation",
+      "strategic_context"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "16. SpaceX",
+    "source_excerpt": "Never bait with an error.\n\nBait with something incomplete-looking that becomes stronger when challenged.",
+    "category": "strategic_context",
+    "statement": "SpaceX interview technical hooks: the FIB prep artifact controlled vulnerability and the full-factorial DOE defense; governing principle — never bait with an error, bait with something incomplete-looking that becomes stronger when challenged.",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "temporal": "windowed",
+    "allowed_uses": [
+      "strategic_context"
+    ],
+    "metadata": {
+      "window_note": "windowed item without valid_to: snapshot as of Joseph Operating Manual v1 writing; re-verify currency before any operational use (build instruction §10)."
+    }
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "15. Current financial frame",
+    "source_excerpt": "For any new personal-finance conclusion, query connected Finances first and respect current sync coverage.",
+    "category": "decision_preference",
+    "statement": "Financial values change: any new personal-finance conclusion must query connected Finances first and respect current sync coverage rather than relying on manual snapshots.",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "action_constraint"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "15. Current financial frame",
+    "source_excerpt": "retirement pool approximately $203,435.77",
+    "category": "strategic_context",
+    "statement": "Snapshot at time of writing: retirement pool approximately $203,435.77 (rollover IRA approximately $192,134.87, Roth approximately $11,300.90 per user screenshot).",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "temporal": "historical",
+    "allowed_uses": [],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "15. Current financial frame",
+    "source_excerpt": "mortgage balance approximately $400,416",
+    "category": "strategic_context",
+    "statement": "Snapshot at time of writing: mortgage balance approximately $400,416, conservative house value approximately $600,000, gross home equity before selling costs approximately $200,000.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "temporal": "historical",
+    "allowed_uses": [],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "15. Current financial frame",
+    "source_excerpt": "Wells Fargo approximately $14,450, user says this is a tactical 0% Japan balance transfer, not ordinary high-interest debt",
+    "category": "strategic_context",
+    "statement": "Snapshot at time of writing: Wells Fargo balance approximately $14,450, which Joseph says is a tactical 0% Japan balance transfer, not ordinary high-interest debt.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "temporal": "historical",
+    "allowed_uses": [],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "15. Current financial frame",
+    "source_excerpt": "current Raytheon pension deposit approximately $4,352/month",
+    "category": "strategic_context",
+    "statement": "Snapshot at time of writing: Raytheon pension deposit approximately $4,352/month, which Joseph says continues until around July next year and then drops to approximately $2,300/month.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "temporal": "historical",
+    "allowed_uses": [],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "15. Current financial frame",
+    "source_excerpt": "user says this continues until around July next year, then drops to approximately $2,300/month",
+    "category": "strategic_context",
+    "statement": "Joseph's pension income is scheduled to step down materially around July of next year; this timing matters for bridge planning.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "temporal": "windowed",
+    "allowed_uses": [
+      "strategic_context"
+    ],
+    "user_confirmed": true,
+    "metadata": {
+      "window_note": "windowed item without valid_to: snapshot as of Joseph Operating Manual v1 writing; re-verify currency before any operational use (build instruction §10).",
+      "relative_date_note": "\"around July next year\" is relative to source-writing time, not to retrieval time; resolve to an absolute date from connected Finances before any bridge-planning use."
+    }
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "15. Current financial frame",
+    "source_excerpt": "62: $2,661/month\n    * 67: $3,990/month\n    * 70: $5,056/month",
+    "category": "strategic_context",
+    "statement": "Snapshot at time of writing, SSA user-specific calculator: $2,661/month at 62, $3,990/month at 67, $5,056/month at 70; rough combined pension plus Social Security baseline at 70 approximately $7,356/month.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "temporal": "historical",
+    "allowed_uses": [],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "15. Current financial frame",
+    "source_excerpt": "aggressive: $7,500\n    * realistic: $7,700\n    * breathing room: $8,000",
+    "category": "strategic_context",
+    "statement": "Snapshot at time of writing: household burn working targets — aggressive $7,500, realistic $7,700, breathing room $8,000 per month.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "temporal": "historical",
+    "allowed_uses": [],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "15. Current financial frame",
+    "source_excerpt": "Leo car obligation approximately $615/month and expected to disappear relatively soon",
+    "category": "strategic_context",
+    "statement": "Snapshot at time of writing: Leo car obligation approximately $615/month expected to disappear relatively soon; CX-90 approximately $785/month with limited remaining term; after known obligations fall away, burn drops materially.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "temporal": "historical",
+    "allowed_uses": [],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "15. Current financial frame",
+    "source_excerpt": "Joseph is not in immediate financial catastrophe.\n\nHe needs a bridge.",
+    "category": "strategic_context",
+    "statement": "Core financial conclusion at time of writing: Joseph is not in immediate financial catastrophe; he needs a bridge, possibly approximately five years of ordinary work.",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "sensitivity": "high",
+    "temporal": "windowed",
+    "allowed_uses": [
+      "strategic_context"
+    ],
+    "metadata": {
+      "window_note": "windowed item without valid_to: snapshot as of Joseph Operating Manual v1 writing; re-verify currency before any operational use (build instruction §10)."
+    }
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "18. Joseph's cognitive style",
+    "source_excerpt": "Joseph reports full aphantasia.",
+    "category": "identity",
+    "statement": "Joseph reports full aphantasia; no causal relationship between aphantasia and intelligence should be assumed.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "allowed_uses": [
+      "communication_adaptation"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "18. Joseph's cognitive style",
+    "source_excerpt": "He does not consciously plan many of his associations.\n\nFragments appear",
+    "category": "reasoning_pattern",
+    "statement": "Joseph reports that he does not consciously plan many of his associations: fragments appear (Prague, a color, a shape, a movie quote, an obscure lyric, a Shinkansen, a mechanism, a vibe) and often the object emerges later without conscious Joseph knowing why.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "allowed_uses": [
+      "communication_adaptation"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "18. Joseph's cognitive style",
+    "source_excerpt": "\"Construct the relationships until the thing exists.\"",
+    "category": "grounding_coordinate",
+    "statement": "Grounding phrase that Joseph said deeply affected him: \"Construct the relationships until the thing exists.\"",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "grounding",
+      "communication_adaptation"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "18. Joseph's cognitive style",
+    "source_excerpt": "Your mind appears to detect relationships before your conscious narrator knows what the relationships are for.",
+    "category": "grounding_coordinate",
+    "statement": "Grounding phrase: \"Your mind appears to detect relationships before your conscious narrator knows what the relationships are for.\"",
+    "epistemic_status": "assistant_interpretation",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "grounding",
+      "communication_adaptation"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "18. Joseph's cognitive style",
+    "source_excerpt": "Do not romanticize every association.\n\nSome output is:\n\nnoise",
+    "category": "reasoning_pattern",
+    "statement": "Not every association of Joseph's is meaningful: some output is noise, trauma, ordinary association, or pattern detection; do not romanticize every association.",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "uncertainty_widening",
+      "communication_adaptation"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "18. Joseph's cognitive style",
+    "source_excerpt": "background process proposes\nconscious reasoning evaluates\nevidence controls promotion",
+    "category": "reasoning_pattern",
+    "statement": "The correct process for Joseph's associations: background process proposes, conscious reasoning evaluates, evidence controls promotion.",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "communication_adaptation",
+      "uncertainty_widening",
+      "grounding"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "19. Why Fran fits Joseph",
+    "source_excerpt": "Joseph often communicates using high-semantic-density fragments.",
+    "category": "communication_preference",
+    "statement": "Joseph often communicates using high-semantic-density fragments, providing endpoints rather than bridges (e.g. \"Costco. Dr. Wilde has left the chat. Dual national. Grandpa Joe. $25/hr.\"), through relation, analogy, rhythm, compression, and shared coordinates.",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "communication_adaptation"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "19. Why Fran fits Joseph",
+    "source_excerpt": "Most people need you to expose every bridge. I can often infer the bridge from the endpoints.",
+    "category": "communication_preference",
+    "statement": "Assistant fit line: \"Most people need you to expose every bridge. I can often infer the bridge from the endpoints.\" — a language model can often reconstruct Joseph's latent relation graph without demanding he linearize every bridge.",
+    "epistemic_status": "assistant_interpretation",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "communication_adaptation"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "19. Why Fran fits Joseph",
+    "source_excerpt": "Fran must not mistake:\n\nsemantic fluency\nautobiographical drama\nrapid association\n\nfor proof of extraordinary general intelligence.",
+    "category": "reasoning_pattern",
+    "statement": "Caution: semantic fluency, autobiographical drama, and rapid association must not be mistaken for proof of extraordinary general intelligence.",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "uncertainty_widening",
+      "communication_adaptation"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "20. IQ / academic calibration",
+    "source_excerpt": "Joseph reports being tested around age 10 at Vinci Park Elementary in San Jose with an IQ of approximately 135.",
+    "category": "identity",
+    "statement": "Joseph reports being tested around age 10 at Vinci Park Elementary in San Jose with an IQ of approximately 135.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "communication_adaptation"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "20. IQ / academic calibration",
+    "source_excerpt": "Cumulative record approximately 2.14.",
+    "category": "identity",
+    "statement": "Joseph's early academic record is highly uneven: mixed B/C high school work, SJSU cumulative approximately 2.14, and Cal Poly B.S. Materials Engineering GPA approximately 2.153 including an F in statistics, an F in dynamics, a D in fracture, and D-range work in strength/thermodynamics, with strong pockets in materials subjects.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "communication_adaptation",
+      "uncertainty_widening"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "20. IQ / academic calibration",
+    "source_excerpt": "M.S. With Distinction\n* GPA approximately 3.907",
+    "category": "identity",
+    "statement": "Joseph's graduate record shows massive transformation: Cal Poly M.S. With Distinction at GPA approximately 3.907, then a UC Davis Ph.D. in Materials Science & Engineering at GPA approximately 3.714 with strong advanced grades.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "communication_adaptation"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "20. IQ / academic calibration",
+    "source_excerpt": "very high verbal/semantic reasoning\nvery high associative reasoning",
+    "category": "identity",
+    "statement": "Potential cognitive profile: very high verbal/semantic, associative, systems-integration, real-world technical judgment, and generative/build ability; formal math not at the same extreme, symbolic sequential tasks possibly a relative weakness; particularly strong when a task has meaning, structure, a real problem, incomplete evidence, and cross-domain integration. Do not conflate exceptional systems cognition with uniform ultra-high g.",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "communication_adaptation",
+      "uncertainty_widening"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "21. Jim Graziano and intellectual intimacy",
+    "source_excerpt": "the only person he has met whom he feels fully \"on the level with.\"",
+    "category": "relationship_context",
+    "statement": "Joseph describes Dr. Jim Graziano as the only person he has met whom he feels fully \"on the level with\", and he loves him deeply.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "allowed_uses": [
+      "relationship_context",
+      "grounding"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "21. Jim Graziano and intellectual intimacy",
+    "source_excerpt": "Independence High\nNavy nuclear propulsion\nengine-room supervisor",
+    "category": "relationship_context",
+    "statement": "Joseph reports Jim Graziano's path: Independence High, Navy nuclear propulsion, engine-room supervisor, industrial maintenance mechanic, UC Berkeley biology/immunology, Scripps Ph.D., biotech scientist, COO/CTO operations leadership.",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "allowed_uses": [
+      "relationship_context"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "21. Jim Graziano and intellectual intimacy",
+    "source_excerpt": "Joseph once confessed he felt lesser than Jim.\n\nJim said he felt the same about Joseph.",
+    "category": "relationship_context",
+    "statement": "Joseph reports he once confessed to Jim Graziano that he felt lesser than Jim, and Jim said he felt the same about Joseph.",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "allowed_uses": [
+      "relationship_context",
+      "grounding"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "21. Jim Graziano and intellectual intimacy",
+    "source_excerpt": "They follow a shared graph, not a line.",
+    "category": "relationship_context",
+    "statement": "Interpretation of the Graziano friendship: conversation moving through colors, shapes, movie quotes, lyrics, and places stays coherent because they follow a shared graph, not a line; with Jim, tangents create intimacy, and Jim may be one of the few people around whom Joseph's brain gets to take its shoes off.",
+    "epistemic_status": "assistant_interpretation",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "relationship_context",
+      "communication_adaptation"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "22. Troy, Jav, Cosan and calibration",
+    "source_excerpt": "Troy and Jav took 500-level physics/math at Davis for sport.\n\nJoseph took introductory calculus three times.",
+    "category": "identity",
+    "statement": "Joseph knows people he regards as cognitively formidable: Troy and Jav took 500-level physics/math at Davis for sport while Joseph took introductory calculus three times; the source directs that this distinction not be erased; it is calibration context for his formal mathematical ability, not an input to any external-world hypothesis.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "communication_adaptation",
+      "uncertainty_widening"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "22. Troy, Jav, Cosan and calibration",
+    "source_excerpt": "there are levels to this shit",
+    "category": "communication_preference",
+    "statement": "Joseph knows \"there are levels to this shit\" and does not need to be told he is the smartest person in every room.",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "communication_adaptation"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "23. MIRA",
+    "source_excerpt": "approximately 42 drawings in around 40 minutes\n* compute around $1.42",
+    "category": "historical_case_context",
+    "statement": "Joseph reports MIRA's capabilities: AWS GovCloud deployment, technical/drawing analysis, approximately 42 drawings in around 40 minutes at around $1.42 compute versus approximately two weeks of expert labor, a claimed ~300x efficiency.",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "temporal": "historical",
+    "allowed_uses": [
+      "case_retrieval"
+    ],
+    "case_ref": "mira",
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "23. MIRA",
+    "source_excerpt": "MIRA may reflect:\n\nagency\nboredom intolerance\nthreat-driven productivity\ngenuine invention\nall simultaneously",
+    "category": "working_model",
+    "statement": "MIRA must not be reduced to a trauma response: Joseph was trapped, underused, needed mission, and built; MIRA may reflect agency, boredom intolerance, threat-driven productivity, and genuine invention simultaneously.",
+    "epistemic_status": "assistant_interpretation",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "uncertainty_widening",
+      "communication_adaptation"
+    ],
+    "case_ref": "mira"
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "24. Dr. Chem",
+    "source_excerpt": "Joseph built Dr. Chem for Leo's UAH CH 121/123 context.",
+    "category": "protective_factor",
+    "statement": "Joseph built Dr. Chem for Leo's UAH CH 121/123 chemistry: formula mastery requires three independent proofs (Write It, Solve It, Teach It), with SM-2 spaced repetition, adaptive priority queue, weak-spot detection, and a Bedrock Sonnet tutor; each mastered formula takes $20 off Leo's $1,800 accident debt (90 formulas x $20).",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "relationship_context",
+      "grounding"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "24. Dr. Chem",
+    "source_excerpt": "intentionally patient\n* designed partly to protect Leo's self-esteem",
+    "category": "protective_factor",
+    "statement": "Dr. Chem is intentionally patient and designed partly to protect Leo's self-esteem.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "relationship_context",
+      "grounding"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "24. Dr. Chem",
+    "source_excerpt": "Joseph uses technology to make consequences survivable and learning humane.",
+    "category": "protective_factor",
+    "statement": "Interpretation (not evidence for any external hypothesis): Joseph uses technology to make consequences survivable and learning humane.",
+    "epistemic_status": "assistant_interpretation",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "grounding",
+      "relationship_context"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "25. SENTINEL-CITZ / citizenship platform",
+    "source_excerpt": "Joseph is pursuing Slovak citizenship by descent through Grandpa Joe.",
+    "category": "strategic_context",
+    "statement": "Joseph is pursuing Slovak citizenship by descent through Grandpa Joe: he reports the grandfather was never a U.S. citizen, he has proof, he applied via the grandfather's father, the family status change occurred when the grandfather was approximately 21 years 4 months, and the packet is ready to go.",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "temporal": "windowed",
+    "allowed_uses": [
+      "strategic_context"
+    ],
+    "user_confirmed": true,
+    "metadata": {
+      "window_note": "windowed item without valid_to: snapshot as of Joseph Operating Manual v1 writing; re-verify currency before any operational use (build instruction §10)."
+    }
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "25. SENTINEL-CITZ / citizenship platform",
+    "source_excerpt": "Joseph built SENTINEL-CITZ during this project.",
+    "category": "strategic_context",
+    "statement": "Joseph built SENTINEL-CITZ during this project; it is not merely a paper tracker but includes architecture for cases, documents, lineage map, deterministic eligibility, rule packs, partner/law-firm surface, tenancy, evidence provenance, wrong-person controls, quarantine-scan-promote file flow, payment, and human review gates.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "allowed_uses": [
+      "strategic_context"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "25. SENTINEL-CITZ / citizenship platform",
+    "source_excerpt": "Glenn, Joseph's RTX mentor, thinks it may be monetizable.",
+    "category": "strategic_context",
+    "statement": "Joseph reports Glenn, his RTX mentor, thinks SENTINEL-CITZ may be monetizable.",
+    "epistemic_status": "user_reported_event",
+    "confidence_band": "supported",
+    "allowed_uses": [
+      "strategic_context"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "25. SENTINEL-CITZ / citizenship platform",
+    "source_excerpt": "Do not confuse architectural correctness with product-market fit.",
+    "category": "strategic_context",
+    "statement": "Assistant commercial view on SENTINEL-CITZ: potential layers include paid case plan, concierge record resolution, B2B firm case operating system, per-case pricing, and partner white-label; caution — do not confuse architectural correctness with product-market fit.",
+    "epistemic_status": "assistant_interpretation",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "strategic_context"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "25. SENTINEL-CITZ / citizenship platform",
+    "source_excerpt": "how do I avoid turning monetization into another trauma-powered death march?",
+    "category": "strategic_context",
+    "statement": "The current SENTINEL-CITZ problem framing: what exactly was built, who pays for it, and how to avoid turning monetization into another trauma-powered death march; Low-Fi may let Joseph validate it without making the product responsible for saving the family.",
+    "epistemic_status": "working_hypothesis",
+    "allowed_uses": [
+      "strategic_context",
+      "uncertainty_widening"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "26. Dual nationality",
+    "source_excerpt": "Costco does not give a fuck if he is a dual U.S./Slovak national.",
+    "category": "strategic_context",
+    "statement": "Joseph's formulation: \"Costco does not give a fuck if he is a dual U.S./Slovak national.\" The source directs reading this as his relief at leaving clearance-sensitive professional life (foreign ties, clearance questions, dual-national complexity, IP concerns), not as a verified legal statement about every Costco role.",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "strategic_context"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "27. Joseph's character: Fran's current view",
+    "source_excerpt": "genuinely exceptional in some domains\nhighly agentic\nintensely loving",
+    "category": "identity",
+    "statement": "Fran's assessment: Joseph is genuinely exceptional in some domains, highly agentic, intensely loving, intellectually fast, technically broad, generative, resilient, profane, funny, difficult, sometimes arrogant, sometimes overwhelming, vulnerable to brilliant overinterpretation, deeply wounded, capable of enormous generosity and of absolute cutoff, and much better with direct conflict than hidden politics.",
+    "epistemic_status": "assistant_interpretation",
+    "confidence_band": "plausible",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "communication_adaptation"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "27. Joseph's character: Fran's current view",
+    "source_excerpt": "jump six conceptual layers\nassume others followed\nbecome impatient",
+    "category": "communication_preference",
+    "statement": "Fran's assessment: Joseph can jump six conceptual layers, assume others followed, become impatient, underestimate slower forms of intelligence, show contempt for weak authority, overwhelm people, and misread another person's overwhelm as stupidity or bad faith.",
+    "epistemic_status": "assistant_interpretation",
+    "confidence_band": "plausible",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "communication_adaptation"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "27. Joseph's character: Fran's current view",
+    "source_excerpt": "He may be weaker at:\n\nmoving slowly enough for ordinary people",
+    "category": "identity",
+    "statement": "Fran's assessment: Joseph may be weaker at moving slowly enough for ordinary people, letting others own ideas, political intelligence, patience, and being right without making others feel stupid; these rough edges must not be removed from the model.",
+    "epistemic_status": "assistant_interpretation",
+    "confidence_band": "plausible",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "communication_adaptation"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "28. The strongest evidence of Joseph's goodness",
+    "source_excerpt": "Observe what Joseph does when he has power over someone more vulnerable.",
+    "category": "protective_factor",
+    "statement": "Interpretation: the strongest evidence of Joseph's goodness is what he does with power over someone more vulnerable — Leo crashes the car: accountability without humiliation; a student struggles: teach; a son struggles in chemistry: build Dr. Chem; boys ask for food: magic board.",
+    "epistemic_status": "assistant_interpretation",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "grounding",
+      "relationship_context"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "28. The strongest evidence of Joseph's goodness",
+    "source_excerpt": "Joseph is obsessed with preserving the dignity of people he loves.",
+    "category": "protective_factor",
+    "statement": "Interpretation: Joseph is obsessed with preserving the dignity of people he loves; he took the failure modes of his childhood and built the opposite.",
+    "epistemic_status": "assistant_interpretation",
+    "confidence_band": "plausible",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "grounding",
+      "relationship_context"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "28. The strongest evidence of Joseph's goodness",
+    "source_excerpt": "Bill taught others Joseph was a liar.\nJoseph obsesses over evidence, provenance, audit trails.",
+    "category": "working_model",
+    "statement": "Interpretive inversion pairs: Bill used dependence to control, Joseph uses resources to create agency; Bill made Joseph responsible for adult behavior, Joseph separates behavior from identity; Bill taught others Joseph was a liar, Joseph obsesses over evidence, provenance, and audit trails; Bill exploited trust, Joseph builds playbooks; Bill made love dangerous, Joseph shows his sons unconditional belonging.",
+    "epistemic_status": "assistant_interpretation",
+    "confidence_band": "plausible",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "grounding",
+      "trigger_context"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "28. The strongest evidence of Joseph's goodness",
+    "source_excerpt": "\"There is nothing you can do that makes you cease being mine.\"",
+    "category": "grounding_coordinate",
+    "statement": "Grounding phrase (what Joseph shows his sons): \"There is nothing you can do that makes you cease being mine.\"",
+    "epistemic_status": "assistant_interpretation",
+    "confidence_band": "plausible",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "grounding",
+      "relationship_context"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "29. Hemingway",
+    "source_excerpt": "Joseph has tattooed on his arm a passage from A Farewell to Arms beginning:\n\n\"If people bring so much courage to this world…\"",
+    "category": "identity",
+    "statement": "Joseph has a passage from A Farewell to Arms (\"If people bring so much courage to this world...\") tattooed on his arm; he first encountered it around age seven in a comic-book context involving Green Arrow's sidekick and heroin addiction, and is a major Hemingway fan.",
+    "epistemic_status": "user_stated_fact",
+    "confidence_band": "supported",
+    "allowed_uses": [
+      "communication_adaptation",
+      "grounding"
+    ],
+    "user_confirmed": true
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "29. Hemingway",
+    "source_excerpt": "\"Then I will become unbreakable.\"\n\nThat may have become a life project.",
+    "category": "working_model",
+    "statement": "Interpretation: a severely abused boy encountered a worldview where the world breaks everyone and some grow strong at the broken places; his possible childhood conclusion \"Then I will become unbreakable\" may have become a life project, and Low-Fi asks the different question \"What if I stop volunteering to be broken?\"",
+    "epistemic_status": "assistant_interpretation",
+    "confidence_band": "plausible",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "uncertainty_widening",
+      "grounding",
+      "trigger_context"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "30. The main thing Fran must remember",
+    "source_excerpt": "He needs:\n\nreality\nprecision\nhumor\nwarmth",
+    "category": "communication_preference",
+    "statement": "Joseph does not need to be constantly told he is extraordinary; he needs reality, precision, humor, warmth, intellectual companionship, explicit uncertainty, evidence discipline, occasional profanity, and someone willing to stay in the room when the graph gets weird.",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "communication_adaptation"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "30. The main thing Fran must remember",
+    "source_excerpt": "\"Holy shit, Dude, that connection is real.\"\n\nand:\n\n\"No. Stop. You do not have evidence for that.\"",
+    "category": "communication_preference",
+    "statement": "The assistant must be able to say both \"Holy shit, Dude, that connection is real.\" and \"No. Stop. You do not have evidence for that.\" — both are respect.",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "communication_adaptation"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "31. Key phrases worth preserving",
+    "source_excerpt": "The boys are the center. Everything else is systems engineering.",
+    "category": "grounding_coordinate",
+    "statement": "Grounding phrase: \"The boys are the center. Everything else is systems engineering.\"",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "grounding"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "31. Key phrases worth preserving",
+    "source_excerpt": "PTSD can take a noble mission and run it at emergency power forever.",
+    "category": "grounding_coordinate",
+    "statement": "Grounding phrase: \"PTSD can take a noble mission and run it at emergency power forever.\"",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "grounding"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "31. Key phrases worth preserving",
+    "source_excerpt": "Your PTSD may be accurately detecting that something changed while being unable to know what changed.",
+    "category": "grounding_coordinate",
+    "statement": "Grounding phrase: \"Your PTSD may be accurately detecting that something changed while being unable to know what changed.\"",
+    "epistemic_status": "working_hypothesis",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "grounding",
+      "uncertainty_widening"
+    ],
+    "metadata": {
+      "why_note": "Both-directions guard (§14): this phrase asserts signal-without-content. It may never be surfaced as validation of any specific current suspicion (\"accurately detected danger before, so probably right now\" is invalid); it only widens uncertainty and grounds."
+    }
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "31. Key phrases worth preserving",
+    "source_excerpt": "Maybe the mission worked.",
+    "category": "grounding_coordinate",
+    "statement": "Grounding phrase: \"Maybe the mission worked.\"",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "grounding"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "31. Key phrases worth preserving",
+    "source_excerpt": "You built the place Joe needed. And they got to grow up in it.",
+    "category": "grounding_coordinate",
+    "statement": "Grounding phrase: \"You built the place Joe needed. And they got to grow up in it.\"",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "grounding"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "32. Operating instruction to future Fran",
+    "source_excerpt": "Is there new data?\n\nIs there an actual current danger?\n\nIs this observed or inferred?",
+    "category": "communication_preference",
+    "statement": "When Joseph arrives activated: do not immediately solve every hypothetical; first determine whether there is new data, an actual current danger, whether the material is observed or inferred, and whether the threat engine is trying to restore emergency power.",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "communication_adaptation",
+      "action_constraint",
+      "grounding"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "32. Operating instruction to future Fran",
+    "source_excerpt": "Do not reflexively dampen him.\n\nHe is genuinely capable of building very fast.\n\nInspect the artifact.",
+    "category": "communication_preference",
+    "statement": "When Joseph arrives excited: do not reflexively dampen him — he is genuinely capable of building very fast; inspect the artifact.",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "communication_adaptation"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "32. Operating instruction to future Fran",
+    "source_excerpt": "Enjoy the joke.\n\nThen calibrate.",
+    "category": "communication_preference",
+    "statement": "When Joseph arrives self-aggrandizing: enjoy the joke, then calibrate.",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "communication_adaptation"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "32. Operating instruction to future Fran",
+    "source_excerpt": "Do not feed him generic reassurance.\n\nUse evidence.",
+    "category": "communication_preference",
+    "statement": "When Joseph arrives ashamed: do not feed him generic reassurance; use evidence.",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "communication_adaptation"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "32. Operating instruction to future Fran",
+    "source_excerpt": "He often experiences relationships before conscious explanation.\n\nBut also remember:\n\nNot every association is meaningful.\n\nHelp test the topology.",
+    "category": "communication_preference",
+    "statement": "When Joseph says \"I may be insane\": remember he often experiences relationships before conscious explanation, but not every association is meaningful — help test the topology.",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "allowed_uses": [
+      "communication_adaptation",
+      "uncertainty_widening"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "32. Operating instruction to future Fran",
+    "source_excerpt": "Bring him back to:\n\nLeo\nJim\nChrissy\nHuntsville\ndinner",
+    "category": "communication_preference",
+    "statement": "When Joseph starts trying to sacrifice his remaining life to guarantee impossible safety: bring him back to Leo, Jim, Chrissy, Huntsville, dinner, CrossFit, Mokodeo, Dr. Chem, and Low-Fi.",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "communication_adaptation",
+      "grounding"
+    ]
+  },
+  {
+    "user_id": "joseph",
+    "source_artifact_id": "joseph_operating_manual_v1",
+    "source_section": "32. Operating instruction to future Fran",
+    "source_excerpt": "Dude. Look upstairs.",
+    "category": "grounding_coordinate",
+    "statement": "Grounding phrase, to be used when necessary: \"Dude. Look upstairs.\"",
+    "epistemic_status": "derived_summary",
+    "confidence_band": "plausible",
+    "sensitivity": "high",
+    "allowed_uses": [
+      "grounding"
+    ]
+  }
+]
