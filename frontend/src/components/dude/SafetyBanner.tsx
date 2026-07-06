@@ -15,6 +15,22 @@ import { ShieldAlert } from "lucide-react";
 
 import type { SafetyPayload } from "@/lib/dudeApi";
 
+/**
+ * Never remove, always surface: exact duplicates collapse into one so a
+ * repeated crisis fires once visually, but nothing is ever dismissed.
+ * Shared by every DUDE surface that accumulates safety output.
+ */
+export function withAlert(
+  alerts: SafetyPayload[],
+  payload: SafetyPayload
+): SafetyPayload[] {
+  const key = JSON.stringify(payload);
+  if (alerts.some((existing) => JSON.stringify(existing) === key)) {
+    return alerts;
+  }
+  return [...alerts, payload];
+}
+
 export function SafetyBanner({ alerts }: { alerts: SafetyPayload[] }) {
   if (alerts.length === 0) return null;
 

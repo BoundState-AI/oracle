@@ -1,36 +1,32 @@
 /**
- * CaseWorkspace — the DUDE case screen: capture (text + hold-to-talk
- * voice), analyze, and the latest analysis.
+ * CaseWorkspace — the DUDE case screen, capture-first: hold-to-talk and
+ * text capture at the top, then the latest analysis, then the timeline.
  *
- * Design contract (spec v0.2 I1/I2, §5):
+ * Design contract (spec v0.2 I1/I2, §5 + mobile vision v0.1):
  *   - Safety output renders at the TOP, before any other content, and is
  *     never hidden, collapsed, or auto-dismissed (SafetyBanner).
  *   - Backend copy renders VERBATIM — capture acks, safety messages,
  *     replies, refusals, and the analysis summary are backend strings.
  *     This component owns UI chrome labels only ("Capture", "Analyze",
- *     "Timeline", "Hold to talk").
+ *     "Timeline", hold-to-talk state).
  *   - served_prior renders the evidence-state badge
  *     "No new data — showing last analysis" — exactly that, nothing about
  *     the user.
- *   - A voice refusal renders its reason plainly; voice is never faked.
+ *   - A voice refusal renders its reason plainly and hands the moment to
+ *     the text box; voice is never faked.
+ *   - Each analysis mode is remembered locally so the home screen can
+ *     speak the case's evidence-state line (dudeEvidenceState).
  */
 
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import {
-  ArrowLeft,
-  Compass,
-  Loader2,
-  Mic,
-  Scale,
-  Send,
-  ShieldAlert,
-} from "lucide-react";
+import { ArrowLeft, Loader2, Scale, Send, ShieldAlert } from "lucide-react";
 import { toast } from "sonner";
 
-import { SafetyBanner } from "@/components/dude/SafetyBanner";
+import { HoldToTalkButton } from "@/components/dude/HoldToTalkButton";
+import { SafetyBanner, withAlert } from "@/components/dude/SafetyBanner";
 import {
   analyzeCase,
   captureText,
@@ -39,7 +35,9 @@ import {
   type AnalyzeResponse,
   type SafetyPayload,
 } from "@/lib/dudeApi";
-import { useDudeVoice, type VoiceFrame } from "@/lib/useDudeVoice";
+import { rememberLastMode } from "@/lib/dudeEvidenceState";
+import { useHoldToTalk } from "@/lib/useHoldToTalk";
+import { type VoiceFrame } from "@/lib/useDudeVoice";
 
 const MODE_LABELS: Record<AnalysisMode, string> = {
   new_evidence: "new_evidence",
@@ -73,6 +71,7 @@ export function CaseWorkspace({ caseId }: { caseId: string }) {
   const [capturing, setCapturing] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const nextEntryId = useRef(0);
+  const textAreaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     fetchCases()
@@ -93,16 +92,8 @@ export function CaseWorkspace({ caseId }: { caseId: string }) {
     []
   );
 
-  // Never remove, always surface: exact duplicates collapse into one so a
-  // repeated crisis fires once visually, but nothing is ever dismissed.
   const appendAlert = useCallback((payload: SafetyPayload) => {
-    setAlerts((current) => {
-      const key = JSON.stringify(payload);
-      if (current.some((existing) => JSON.stringify(existing) === key)) {
-        return current;
-      }
-      return [...current, payload];
-    });
+    setAlerts((current) => withAlert(current, payload));
   }, []);
 
   const handleVoiceFrame = useCallback(
@@ -125,7 +116,11 @@ export function CaseWorkspace({ caseId }: { caseId: string }) {
           break;
         case "refusal":
           appendEntry("refusal", frame.reason);
+          // Voice failed: hand the moment to the text box, honestly.
+          textAreaRef.current?.focus();
           break;
+        case "case":
+          break; // No-case-bridge frame; this screen is already a case.
         case "audio":
           break; // Played by the hook; the reply text is already rendered.
       }
@@ -133,7 +128,7 @@ export function CaseWorkspace({ caseId }: { caseId: string }) {
     [appendAlert, appendEntry]
   );
 
-  const voice = useDudeVoice(caseId, handleVoiceFrame);
+  const voice = useHoldToTalk(caseId, handleVoiceFrame);
 
   const handleCapture = useCallback(async () => {
     const trimmed = text.trim();
@@ -163,7 +158,10 @@ export function CaseWorkspace({ caseId }: { caseId: string }) {
     if (analyzing) return;
     setAnalyzing(true);
     try {
-      setAnalysis(await analyzeCase(caseId));
+      const result = await analyzeCase(caseId);
+      setAnalysis(result);
+      // Feed the home screen's evidence-state line for this case.
+      rememberLastMode(caseId, result.mode);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Analyze failed");
     } finally {
@@ -172,17 +170,17 @@ export function CaseWorkspace({ caseId }: { caseId: string }) {
   }, [analyzing, caseId]);
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
+    <div className="min-h-dvh bg-background pb-[env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)] text-foreground">
       <div className="absolute inset-0 -z-10 overflow-hidden">
-        <div className="absolute left-[-10%] top-[-8rem] h-80 w-80 rounded-full bg-violet-500/10 blur-3xl" />
-        <div className="absolute inset-x-0 top-0 h-72 bg-[radial-gradient(circle_at_top,rgba(139,92,246,0.12),transparent_55%)]" />
+        <div className="absolute left-1/2 top-[-6rem] h-96 w-96 -translate-x-1/2 rounded-full bg-violet-500/10 blur-3xl" />
+        <div className="absolute inset-x-0 top-0 h-80 bg-[radial-gradient(circle_at_top,rgba(139,92,246,0.14),transparent_60%)]" />
       </div>
 
       {/* Safety output renders before ALL other content — even the header. */}
       <SafetyBanner alerts={alerts} />
       {analysis?.crisis_active && (
         <div role="alert" className="border-b-2 border-red-500/60 bg-red-950/60">
-          <div className="mx-auto flex max-w-4xl items-start gap-3 px-6 py-5">
+          <div className="mx-auto flex max-w-xl items-start gap-3 px-6 py-5">
             <ShieldAlert className="mt-0.5 h-6 w-6 shrink-0 text-red-300" />
             {/* Crisis-active analysis copy, verbatim from the backend. */}
             <p className="whitespace-pre-wrap text-base font-medium leading-7 text-red-50">
@@ -192,97 +190,65 @@ export function CaseWorkspace({ caseId }: { caseId: string }) {
         </div>
       )}
 
-      <header className="border-b border-border/80 bg-background/70 backdrop-blur-sm">
-        <div className="mx-auto flex max-w-4xl items-center justify-between px-6 py-4">
-          <div className="flex min-w-0 items-center gap-3">
-            <Compass className="h-5 w-5 shrink-0 text-violet-400" />
-            <span className="shrink-0 text-[10px] font-semibold uppercase tracking-[0.3em] text-muted-foreground">
-              DUDE
-            </span>
-            <span className="truncate text-sm font-medium text-foreground">
-              {title ?? "…"}
-            </span>
-          </div>
+      <header className="pt-[env(safe-area-inset-top)]">
+        <div className="mx-auto flex max-w-xl items-center gap-3 px-5 py-4">
           <Link
             href="/dude"
-            className="inline-flex h-9 shrink-0 items-center gap-2 rounded-lg border border-border px-4 text-sm font-medium text-foreground transition-colors hover:bg-accent"
+            aria-label="Back to DUDE"
+            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-border text-foreground transition-colors hover:bg-accent active:bg-accent"
           >
-            <ArrowLeft className="h-4 w-4" />
-            Cases
+            <ArrowLeft className="h-5 w-5" />
           </Link>
+          <h1 className="min-w-0 truncate text-base font-medium text-foreground">
+            {title ?? "…"}
+          </h1>
         </div>
       </header>
 
-      <main className="mx-auto max-w-4xl space-y-8 px-6 py-10">
-        <section className="rounded-[1.75rem] border border-border/80 bg-card/70 p-6 shadow-lg shadow-slate-950/10">
-          <h1 className="text-lg font-semibold text-foreground">Capture</h1>
+      <main className="mx-auto w-full max-w-xl space-y-6 px-5 pb-10 pt-2">
+        {/* Capture first — the case screen opens on "something happened". */}
+        <section className="rounded-[1.75rem] border border-border/80 bg-card/70 p-5 shadow-lg shadow-slate-950/10">
+          <div className="flex justify-center pt-2">
+            <HoldToTalkButton voice={voice} size="compact" />
+          </div>
           <textarea
+            ref={textAreaRef}
             value={text}
             onChange={(event) => setText(event.target.value)}
             placeholder="What happened? Facts, messages, dates — raw material."
-            rows={4}
-            className="mt-4 w-full resize-y rounded-lg border border-border bg-background px-3 py-2.5 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-2 focus:ring-violet-400/40"
+            rows={3}
+            className="mt-5 w-full resize-y rounded-xl border border-border bg-background px-4 py-3 text-base text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-2 focus:ring-violet-400/40"
           />
-          <div className="mt-3 flex flex-wrap items-center gap-3">
-            <button
-              type="button"
-              onClick={() => void handleCapture()}
-              disabled={!text.trim() || capturing}
-              className="inline-flex h-11 items-center gap-2 rounded-lg bg-violet-500 px-5 text-sm font-semibold text-white transition-colors hover:bg-violet-400 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              {capturing ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Send className="h-4 w-4" />
-              )}
-              Capture
-            </button>
-            <button
-              type="button"
-              onPointerDown={(event) => {
-                event.preventDefault();
-                void voice.start();
-              }}
-              onPointerUp={voice.stop}
-              onPointerLeave={voice.stop}
-              onPointerCancel={voice.stop}
-              onContextMenu={(event) => event.preventDefault()}
-              disabled={voice.sending}
-              className={`inline-flex h-11 touch-none select-none items-center gap-2 rounded-lg border px-5 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
-                voice.recording
-                  ? "border-red-400/60 bg-red-500/20 text-red-200"
-                  : "border-violet-400/40 bg-violet-400/10 text-violet-200 hover:bg-violet-400/20"
-              }`}
-            >
-              {voice.sending ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Mic className="h-4 w-4" />
-              )}
-              {voice.recording
-                ? "Recording — release to send"
-                : voice.sending
-                  ? "Sending…"
-                  : "Hold to talk"}
-            </button>
-            <button
-              type="button"
-              onClick={() => void handleAnalyze()}
-              disabled={analyzing}
-              className="ml-auto inline-flex h-11 items-center gap-2 rounded-lg border border-border px-5 text-sm font-semibold text-foreground transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              {analyzing ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Scale className="h-4 w-4" />
-              )}
-              Analyze
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={() => void handleCapture()}
+            disabled={!text.trim() || capturing}
+            className="mt-3 flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-violet-500 text-sm font-semibold text-white transition-colors hover:bg-violet-400 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {capturing ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Send className="h-4 w-4" />
+            )}
+            Capture
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleAnalyze()}
+            disabled={analyzing}
+            className="mt-3 flex h-12 w-full items-center justify-center gap-2 rounded-xl border border-violet-400/50 bg-violet-500/15 text-sm font-semibold text-violet-100 transition-colors hover:bg-violet-500/25 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {analyzing ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Scale className="h-4 w-4" />
+            )}
+            Analyze
+          </button>
         </section>
 
         {analysis && (
-          <section className="rounded-[1.75rem] border border-border/80 bg-card/70 p-6">
+          <section className="rounded-[1.75rem] border border-border/80 bg-card/70 p-5">
             <div className="mb-4 flex flex-wrap items-center gap-2">
               <h2 className="text-base font-semibold text-foreground">
                 Analysis
@@ -307,7 +273,7 @@ export function CaseWorkspace({ caseId }: { caseId: string }) {
         )}
 
         {timeline.length > 0 && (
-          <section className="rounded-[1.75rem] border border-border/80 bg-card/70 p-6">
+          <section className="rounded-[1.75rem] border border-border/80 bg-card/70 p-5">
             <h2 className="text-base font-semibold text-foreground">
               Timeline
             </h2>

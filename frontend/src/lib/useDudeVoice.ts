@@ -30,7 +30,17 @@ export type VoiceFrame =
   | ({ type: "safety" } & SafetyPayload)
   | { type: "reply"; text: string }
   | { type: "refusal"; reason: string }
-  | { type: "audio"; wav_base64: string };
+  | { type: "audio"; wav_base64: string }
+  // Emitted only by the no-case bridge (caseId = VOICE_NO_CASE): the
+  // utterance was filed into a freshly created, transcript-titled case.
+  | { type: "case"; case_id: string; title: string };
+
+/**
+ * Pseudo case id routing an utterance to the no-case bridge
+ * (`/api/dude/voice/new`), which transcribes it, creates a case titled
+ * from the transcript, attaches it, and emits a `case` frame.
+ */
+export const VOICE_NO_CASE = "new";
 
 interface UseDudeVoiceResult {
   /** True while the microphone is capturing (button held down). */
