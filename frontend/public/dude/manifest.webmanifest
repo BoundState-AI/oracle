@@ -1,0 +1,15 @@
+{
+  "name": "DUDE — Decision Support",
+  "short_name": "DUDE",
+  "description": "Evidence-aware decision support for humans under uncertainty",
+  "id": "/dude",
+  "start_url": "/dude",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0a0a0f",
+  "theme_color": "#1e1b4b",
+  "icons": [
+    { "src": "/dude/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/dude/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
