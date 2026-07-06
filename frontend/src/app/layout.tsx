@@ -36,13 +36,20 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  // WHY conditional: without a publishable key ClerkProvider throws at
+  // runtime; in password-gate deployments (see middleware.ts) the shell
+  // renders without Clerk and auth is enforced at the middleware layer.
+  const clerkConfigured = Boolean(process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY);
+  const shell = (
+    <>
+      {children}
+      <Toaster />
+    </>
+  );
   return (
     <html lang="en" className={`${inter.variable} h-full dark`}>
       <body className="min-h-full flex flex-col antialiased font-sans">
-        <ClerkProvider>
-          {children}
-          <Toaster />
-        </ClerkProvider>
+        {clerkConfigured ? <ClerkProvider>{shell}</ClerkProvider> : shell}
       </body>
     </html>
   );
