@@ -140,6 +140,22 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("case_id")
     p.set_defaults(func=_cmd_timeline)
 
+    p = sub.add_parser("pom", help="Personal Operating Manual subsystem")
+    pom_sub = p.add_subparsers(required=True)
+
+    pi = pom_sub.add_parser("import", help="ingest a source document")
+    pi.add_argument("--source", required=True, help="source title")
+    pi.add_argument("--file", required=True, help="path to the document")
+    pi.add_argument("--user", default="joseph")
+    pi.set_defaults(func=_cmd_pom_import)
+
+    pl = pom_sub.add_parser("items", help="list POM items")
+    pl.set_defaults(func=_cmd_pom_items)
+
+    pa = pom_sub.add_parser("audit", help="retrieval audit for a case")
+    pa.add_argument("case_id")
+    pa.set_defaults(func=_cmd_pom_audit)
+
     return parser
 
 
@@ -261,6 +277,50 @@ def _cmd_timeline(store: CaseStore, args: argparse.Namespace) -> int:
         stamp = (event.occurred_at or event.recorded_at).strftime("%Y-%m-%d %H:%M")
         marker = " [silence]" if event.is_silence_checkpoint else ""
         print(f"{stamp}  {event.description}{marker}")
+    return 0
+
+
+def _cmd_pom_import(store: CaseStore, args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from dude.pom.pipeline import ExtractionUnavailable, import_source
+    from dude.pom.store import PomStore
+
+    content = Path(args.file).read_text(encoding="utf-8")
+    pom = PomStore(store)
+    try:
+        artifact, items = import_source(pom, args.user, args.source, content)
+    except ExtractionUnavailable as exc:
+        # The source is ingested and hashed; extraction refused visibly.
+        print(f"REFUSED (extraction): {exc}", file=sys.stderr)
+        print("Source ingested immutably; re-run extraction when a model is configured.")
+        return EXIT_REFUSED
+    print(f"artifact {artifact.id} sha256={artifact.content_sha256[:16]}…")
+    print(f"{len(items)} items extracted (unconfirmed statuses stay unconfirmed)")
+    return 0
+
+
+def _cmd_pom_items(store: CaseStore, args: argparse.Namespace) -> int:  # noqa: ARG001
+    from dude.pom.store import PomStore
+
+    for item in PomStore(store).load().items:
+        confirmed = "confirmed" if item.user_confirmed else "unconfirmed"
+        print(
+            f"{item.id}  [{item.category.value}/{item.epistemic_status.value}/"
+            f"{confirmed}]  {item.statement}"
+        )
+    return 0
+
+
+def _cmd_pom_audit(store: CaseStore, args: argparse.Namespace) -> int:
+    from dude.pom.store import PomStore
+
+    for record in PomStore(store).load().retrievals:
+        if record.case_id == args.case_id:
+            print(
+                f"{record.retrieved_at:%Y-%m-%d %H:%M}  item={record.pom_item_id}  "
+                f"use={record.allowed_use.value}  why={record.retrieval_reason}"
+            )
     return 0
 
 
