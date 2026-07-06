@@ -114,6 +114,7 @@ class CreatedBy(str, Enum):
 
     USER = "user"
     ENGINE = "engine"
+    MODEL = "model"
     MODEL_STUB = "model_stub"
 
 

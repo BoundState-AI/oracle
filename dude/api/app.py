@@ -68,11 +68,18 @@ def create_app(
     store: CaseStore | None = None,
     stt: SpeechToText | None = None,
     tts: TextToSpeech | None = None,
+    passes: "PassSet | None" = None,
 ) -> FastAPI:
     """Build the app with injected dependencies. When stt/tts are None the
-    voice endpoint refuses visibly; REST capture always works."""
+    voice endpoint refuses visibly; REST capture always works. `passes`
+    defaults to environment resolution (live models with keys, visible
+    stubs without); tests inject an explicit PassSet to stay hermetic."""
+    from dude.pipeline.live_passes import resolve_passes
+    from dude.pipeline.passes import PassSet
+
     app = FastAPI(title="DUDE", version="0.2.0")
     case_store = store or CaseStore()
+    pass_set = passes if passes is not None else resolve_passes()
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -95,7 +102,7 @@ def create_app(
     @app.post("/cases/{case_id}/analyze")
     def rest_analyze(case_id: str) -> dict[str, object]:
         try:
-            result = analyze(case_store, case_id)
+            result = analyze(case_store, case_id, passes=pass_set)
         except StoreError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {

@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from dude.api.app import create_app
 from dude.data import Case
+from dude.pipeline.passes import PassSet
 from dude.store.jsonl import CaseStore
 from dude.voice.stt import TranscriptSegment, VoiceUnavailable
 
@@ -45,7 +46,9 @@ def _client(tmp_path, stt=None, tts=None) -> tuple[TestClient, CaseStore, str]:
     store = CaseStore(root=tmp_path / "dude_home")
     case = Case(title="voice case")
     store.create_case(case)
-    app = create_app(store=store, stt=stt, tts=tts)
+    # Explicit stub PassSet keeps tests hermetic even when the developer's
+    # environment carries live provider keys.
+    app = create_app(store=store, stt=stt, tts=tts, passes=PassSet())
     return TestClient(app), store, case.id
 
 
