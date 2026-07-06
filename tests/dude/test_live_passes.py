@@ -76,11 +76,13 @@ class TestRouterIndependence:
 
 class TestJsonContracts:
     def test_malformed_output_becomes_refusal_after_retry(self, tmp_path) -> None:
-        """v0.2 I12: fail closed — two bad replies, zero fabricated output."""
-        chat = FakeChat("anthropic", ["not json at all", "{still: bad"])
+        """v0.2 I12: fail closed — persistent bad replies, zero fabricated
+        output. Two corrective retries (raised from one after a production
+        truncation+extras double-fault cost a hypotheses pass)."""
+        chat = FakeChat("anthropic", ["not json", "{still: bad", "nope"])
         _store, bundle = _bundle(tmp_path)
         output = LiveSeparator(chat).run(bundle)
-        assert chat.calls == 2  # exactly one corrective retry
+        assert chat.calls == 3  # exactly two corrective retries
         assert not output.observations
         assert any("invalid JSON" in r.reason for r in output.refusals)
 

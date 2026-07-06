@@ -61,7 +61,7 @@ from dude.store.jsonl import CaseBundle
 
 LOGGER = logging.getLogger("dude.pipeline.live_passes")
 
-_RETRIES = 1
+_RETRIES = 2
 
 SYSTEM_PREAMBLE = (
     "You are a pass inside DUDE, an evidence-aware decision engine. "
@@ -74,7 +74,12 @@ P = TypeVar("P", bound=BaseModel)
 
 
 class _ParseModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    # WHY extra="ignore" here (unlike every DudeModel contract): these
+    # models parse LLM output, not our data. An unknown key from a model
+    # is noise to tolerate, not a defect to refuse over — refusing on
+    # extras cost a production hypotheses pass its second retry. The
+    # extra="forbid" rule applies at our API boundary, which this is not.
+    model_config = ConfigDict(extra="ignore")
 
 
 class _ObservationOut(_ParseModel):
@@ -136,7 +141,9 @@ def _call_json(
             LOGGER.warning("%s: invalid JSON (attempt %d): %s", pass_name, attempt, exc)
             prompt = (
                 f"{user}\n\nYour previous reply was invalid: {exc}\n"
-                "Return ONLY the corrected JSON object."
+                "Return ONLY the corrected JSON object, minified, with no "
+                "fields beyond the schema and every description under 40 "
+                "words."
             )
     return None, [
         Refusal(
@@ -287,6 +294,7 @@ class LiveHypotheses:
             "catastrophic_to_user when the hypothesis, if true, means "
             "ongoing danger or irreversible harm to the user. Every credible "
             "hypothesis needs falsifiers (what evidence would change it). "
+            "Keep every description under 40 words. "
             'JSON: {"hypotheses": [{"title", "description", "archetype", '
             '"harm_class": "none|recoverable|catastrophic_to_user", '
             '"falsifiers": [], "not_credible_here": false}]}\n\n'

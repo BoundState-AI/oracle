@@ -45,7 +45,7 @@ LOGGER = logging.getLogger("dude.pipeline.router")
 
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5"
 DEFAULT_OPENAI_MODEL = "gpt-5.4"
-MAX_OUTPUT_TOKENS = 4096
+MAX_OUTPUT_TOKENS = 8192
 REQUEST_TIMEOUT_SECONDS = 120.0
 
 
