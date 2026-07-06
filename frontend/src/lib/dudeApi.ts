@@ -49,6 +49,69 @@ export interface AnalyzeResponse {
   crisis_active: boolean;
 }
 
+/** An observed fact — backend statement rendered verbatim. */
+export interface ObservedStatement {
+  statement: string;
+  user_confirmed: boolean;
+}
+
+/** An open unknown — backend statement plus its importance label. */
+export interface UnknownStatement {
+  statement: string;
+  importance: string;
+}
+
+/** One adversary attack on a hypothesis, with the links it found weak. */
+export interface AdversaryAttack {
+  attack: string;
+  unsupported_links: string[];
+}
+
+export type HypothesisArchetype =
+  | "user_favored"
+  | "boring"
+  | "mixed_cause"
+  | "missing_variable"
+  | "adversarial_cause";
+
+/** Evidence bands are words by contract — never numbers or percentages. */
+export type EvidenceBand =
+  | "supported"
+  | "plausible"
+  | "weakly_supported"
+  | "unresolved"
+  | "contradicted";
+
+export interface Hypothesis {
+  title: string;
+  description: string;
+  archetype: HypothesisArchetype;
+  band: EvidenceBand;
+  harm_class: string;
+  falsifiers: string[];
+  not_credible_here: boolean;
+  attacks: AdversaryAttack[];
+}
+
+export interface LastRun {
+  mode: AnalysisMode;
+  summary: string;
+  crisis_active: boolean;
+  refusals: string[];
+}
+
+/** Full case state from GET /cases/{id} — Reality + Models + last run. */
+export interface CaseDetail {
+  case_id: string;
+  title: string;
+  status: string;
+  observed: ObservedStatement[];
+  inferred: string[];
+  unknown: UnknownStatement[];
+  hypotheses: Hypothesis[];
+  last_run: LastRun | null;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`/api/dude${path}`, {
     cache: "no-store",
@@ -84,3 +147,6 @@ export const analyzeCase = (caseId: string) =>
   request<AnalyzeResponse>(`/cases/${encodeURIComponent(caseId)}/analyze`, {
     method: "POST",
   });
+
+export const fetchCaseDetail = (caseId: string) =>
+  request<CaseDetail>(`/cases/${encodeURIComponent(caseId)}`);

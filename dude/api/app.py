@@ -65,6 +65,54 @@ LOGGER = logging.getLogger("dude.api.app")
 WS_UNAUTHORIZED = 4401
 
 
+def import_bundled_pom(case_store: CaseStore) -> dict[str, object] | None:
+    """Idempotently import the repo-bundled, Oracle-reviewed POM (manual +
+    dataset) into this deployment's store. Keyed on artifact hash and item
+    ids, append-only — safe to run on every startup (DUDE_POM_AUTOIMPORT)
+    and via the guarded route. Returns None if no bundle ships with this
+    build."""
+    import json as _json
+    from pathlib import Path
+
+    from dude.pom.contracts import PomItem, SourceArtifact
+    from dude.pom.store import PomStore
+
+    sources = Path(__file__).resolve().parent.parent / "pom" / "sources"
+    manual = sources / "joseph_operating_manual_v1.md"
+    dataset = sources / "joseph_pom_dataset_v1.json"
+    if not manual.exists() or not dataset.exists():
+        return None
+    pom = PomStore(case_store)
+    bundle = pom.load()
+    content = manual.read_text(encoding="utf-8")
+    probe = SourceArtifact(user_id="joseph", title="probe", content=content)
+    artifact = next(
+        (a for a in bundle.source_artifacts
+         if a.content_sha256 == probe.content_sha256),
+        None,
+    )
+    if artifact is None:
+        artifact = SourceArtifact(
+            user_id="joseph",
+            title="Joseph Operating Manual v1",
+            content=content,
+        )
+        pom.append(artifact)
+    existing_ids = {i.id for i in bundle.items}
+    imported = 0
+    for raw in _json.loads(dataset.read_text(encoding="utf-8")):
+        item = PomItem.model_validate({**raw, "source_artifact_id": artifact.id})
+        if item.id not in existing_ids:
+            pom.append(item)
+            imported += 1
+    LOGGER.info("Bundled POM import: %d new items", imported)
+    return {
+        "artifact_sha256": artifact.content_sha256,
+        "items_imported": imported,
+        "items_total": len(existing_ids) + imported,
+    }
+
+
 class CreateCaseRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     title: str
@@ -187,50 +235,10 @@ def create_router(
 
     @router.post("/pom/import-bundled", **guarded)
     def pom_import_bundled() -> dict[str, object]:
-        """Idempotently import the repo-bundled, Oracle-reviewed POM
-        (manual + dataset) into this deployment's store. Skips anything
-        already present (by artifact hash / item id) — append-only."""
-        import json as _json
-        from pathlib import Path
-
-        from dude.pom.contracts import PomItem, SourceArtifact
-        from dude.pom.store import PomStore
-
-        sources = Path(__file__).resolve().parent.parent / "pom" / "sources"
-        manual = sources / "joseph_operating_manual_v1.md"
-        dataset = sources / "joseph_pom_dataset_v1.json"
-        if not manual.exists() or not dataset.exists():
+        result = import_bundled_pom(case_store)
+        if result is None:
             raise HTTPException(status_code=404, detail="Bundled POM not present.")
-        pom = PomStore(case_store)
-        bundle = pom.load()
-        content = manual.read_text(encoding="utf-8")
-        probe = SourceArtifact(user_id="joseph", title="probe", content=content)
-        artifact = next(
-            (a for a in bundle.source_artifacts
-             if a.content_sha256 == probe.content_sha256),
-            None,
-        )
-        if artifact is None:
-            artifact = SourceArtifact(
-                user_id="joseph",
-                title="Joseph Operating Manual v1",
-                content=content,
-            )
-            pom.append(artifact)
-        existing_ids = {i.id for i in bundle.items}
-        imported = 0
-        for raw in _json.loads(dataset.read_text(encoding="utf-8")):
-            item = PomItem.model_validate(
-                {**raw, "source_artifact_id": artifact.id}
-            )
-            if item.id not in existing_ids:
-                pom.append(item)
-                imported += 1
-        return {
-            "artifact_sha256": artifact.content_sha256,
-            "items_imported": imported,
-            "items_total": len(existing_ids) + imported,
-        }
+        return result
 
     @router.post("/cases/{case_id}/capture", **guarded)
     def rest_capture(case_id: str, request: CaptureRequest) -> dict[str, object]:

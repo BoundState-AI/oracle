@@ -11,7 +11,12 @@
  *     "Timeline", hold-to-talk state).
  *   - served_prior renders the evidence-state badge
  *     "No new data — showing last analysis" — exactly that, nothing about
- *     the user.
+ *     the user. The badge LEADS the analysis panel (above the stored run's
+ *     own mode badge and summary) so a gated tap reads correctly.
+ *   - Reality (observed / inferred / unknown) and Models (hypotheses +
+ *     adversary attacks) render below the Analysis panel from
+ *     GET /cases/{id} and refresh after every capture and analyze
+ *     (see RealityModels.tsx for their design contract).
  *   - A voice refusal renders its reason plainly and hands the moment to
  *     the text box; voice is never faked.
  *   - Each analysis mode is remembered locally so the home screen can
@@ -26,13 +31,19 @@ import { ArrowLeft, Loader2, Scale, Send, ShieldAlert } from "lucide-react";
 import { toast } from "sonner";
 
 import { HoldToTalkButton } from "@/components/dude/HoldToTalkButton";
+import {
+  ModelsSection,
+  RealitySection,
+} from "@/components/dude/RealityModels";
 import { SafetyBanner, withAlert } from "@/components/dude/SafetyBanner";
 import {
   analyzeCase,
   captureText,
+  fetchCaseDetail,
   fetchCases,
   type AnalysisMode,
   type AnalyzeResponse,
+  type CaseDetail,
   type SafetyPayload,
 } from "@/lib/dudeApi";
 import { rememberLastMode } from "@/lib/dudeEvidenceState";
@@ -67,6 +78,7 @@ export function CaseWorkspace({ caseId }: { caseId: string }) {
   const [alerts, setAlerts] = useState<SafetyPayload[]>([]);
   const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
   const [analysis, setAnalysis] = useState<AnalyzeResponse | null>(null);
+  const [detail, setDetail] = useState<CaseDetail | null>(null);
   const [text, setText] = useState("");
   const [capturing, setCapturing] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
@@ -81,6 +93,22 @@ export function CaseWorkspace({ caseId }: { caseId: string }) {
       })
       .catch(() => setTitle(caseId));
   }, [caseId]);
+
+  // Reality + Models come from GET /cases/{id}. A failed refresh keeps the
+  // last-known sections on screen rather than blanking them mid-session;
+  // capture/analyze surface their own errors via toast, so this refresh
+  // never double-reports.
+  const refreshDetail = useCallback(async () => {
+    try {
+      setDetail(await fetchCaseDetail(caseId));
+    } catch {
+      // Intentionally quiet — see WHY above.
+    }
+  }, [caseId]);
+
+  useEffect(() => {
+    void refreshDetail();
+  }, [refreshDetail]);
 
   const appendEntry = useCallback(
     (kind: TimelineEntry["kind"], entryText: string) => {
@@ -147,12 +175,14 @@ export function CaseWorkspace({ caseId }: { caseId: string }) {
           resources: response.resources,
         });
       }
+      // New evidence may have landed in Reality — refresh the sections.
+      void refreshDetail();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Capture failed");
     } finally {
       setCapturing(false);
     }
-  }, [text, capturing, caseId, appendEntry, appendAlert]);
+  }, [text, capturing, caseId, appendEntry, appendAlert, refreshDetail]);
 
   const handleAnalyze = useCallback(async () => {
     if (analyzing) return;
@@ -162,12 +192,14 @@ export function CaseWorkspace({ caseId }: { caseId: string }) {
       setAnalysis(result);
       // Feed the home screen's evidence-state line for this case.
       rememberLastMode(caseId, result.mode);
+      // Hypotheses/bands may have moved — refresh Reality + Models.
+      void refreshDetail();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Analyze failed");
     } finally {
       setAnalyzing(false);
     }
-  }, [analyzing, caseId]);
+  }, [analyzing, caseId, refreshDetail]);
 
   return (
     <div className="min-h-dvh bg-background pb-[env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)] text-foreground">
@@ -249,6 +281,16 @@ export function CaseWorkspace({ caseId }: { caseId: string }) {
 
         {analysis && (
           <section className="rounded-[1.75rem] border border-border/80 bg-card/70 p-5">
+            {/* served_prior LEADS the panel — the evidence-state badge sits
+                above the stored run's own mode badge and summary, so a
+                gated tap reads "no new data" before the old run's chrome. */}
+            {analysis.served_prior && (
+              <div className="mb-3">
+                <span className="inline-block rounded-full border border-border bg-secondary px-3 py-1 text-[11px] font-medium text-secondary-foreground">
+                  {SERVED_PRIOR_BADGE}
+                </span>
+              </div>
+            )}
             <div className="mb-4 flex flex-wrap items-center gap-2">
               <h2 className="text-base font-semibold text-foreground">
                 Analysis
@@ -256,11 +298,6 @@ export function CaseWorkspace({ caseId }: { caseId: string }) {
               <span className="rounded-full border border-violet-400/25 bg-violet-400/10 px-3 py-0.5 text-[10px] font-medium uppercase tracking-[0.2em] text-violet-200">
                 {MODE_LABELS[analysis.mode] ?? analysis.mode}
               </span>
-              {analysis.served_prior && (
-                <span className="rounded-full border border-border bg-secondary px-3 py-0.5 text-[11px] font-medium text-secondary-foreground">
-                  {SERVED_PRIOR_BADGE}
-                </span>
-              )}
               <span className="ml-auto text-xs text-muted-foreground">
                 run {analysis.run_id}
               </span>
@@ -270,6 +307,19 @@ export function CaseWorkspace({ caseId }: { caseId: string }) {
               {analysis.summary}
             </p>
           </section>
+        )}
+
+        {/* Reality + Models — the case's epistemic state, below Analysis.
+            Both sections self-hide while their backend lists are empty. */}
+        {detail && (
+          <>
+            <RealitySection
+              observed={detail.observed}
+              inferred={detail.inferred}
+              unknown={detail.unknown}
+            />
+            <ModelsSection hypotheses={detail.hypotheses} />
+          </>
         )}
 
         {timeline.length > 0 && (

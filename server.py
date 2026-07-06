@@ -1867,6 +1867,19 @@ app.include_router(
     )
 )
 
+# Env-gated startup import of the bundled, Oracle-reviewed POM. Idempotent
+# (artifact-hash / item-id keyed, append-only), so it is safe on every
+# boot; gated so non-DUDE deployments of this server skip it entirely.
+if os.environ.get("DUDE_POM_AUTOIMPORT", "").strip() == "1":
+    from dude.api.app import import_bundled_pom as _import_bundled_pom  # noqa: E402
+    from dude.store.jsonl import CaseStore as _DudeCaseStore  # noqa: E402
+
+    _pom_result = _import_bundled_pom(_DudeCaseStore())
+    if _pom_result is not None:
+        logging.getLogger("dude.api.app").info(
+            "POM autoimport complete: %s items total", _pom_result["items_total"]
+        )
+
 
 @app.get("/health")
 async def health():
