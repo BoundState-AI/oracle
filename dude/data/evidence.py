@@ -33,8 +33,10 @@ from pydantic import Field, model_validator
 
 from dude.data.base import DudeModel
 from dude.data.enums import (
+    AccessLevel,
     CreatedBy,
     OutcomeProvenance,
+    Pursuit,
     SourceType,
     UnknownImportance,
 )
@@ -149,6 +151,8 @@ class Unknown(DudeModel):
     case_id: str
     statement: str
     importance: UnknownImportance = UnknownImportance.MEDIUM
+    user_access: AccessLevel = AccessLevel.MEDIUM
+    pursuit: Pursuit = Pursuit.UNCLASSIFIED
     resolved_by_event_id: str | None = None
     recorded_at: datetime = Field(default_factory=_now)
 

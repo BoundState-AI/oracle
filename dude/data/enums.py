@@ -151,3 +151,23 @@ class UnknownImportance(str, Enum):
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
+
+
+class AccessLevel(str, Enum):
+    """Whether the user can LEGITIMATELY answer an unknown. LOW means it
+    would require other people's records, systems, or surveillance."""
+
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+class Pursuit(str, Enum):
+    """An unknown is not automatically a task. Uncertainty is never
+    turned into surveillance: LOW access clamps to DO_NOT_CHASE in code,
+    not in prompts."""
+
+    PURSUE = "pursue"
+    HOLD = "hold"
+    DO_NOT_CHASE = "do_not_chase"
+    UNCLASSIFIED = "unclassified"

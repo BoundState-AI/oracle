@@ -44,6 +44,9 @@ from dude.data import (
     ConfidenceBand,
     CreatedBy,
     HarmClass,
+)
+from dude.data.enums import AccessLevel, Pursuit
+from dude.data import (
     Hypothesis,
     HypothesisArchetype,
     Interpretation,
@@ -68,6 +71,39 @@ SYSTEM_PREAMBLE = (
     "Observation is not inference. A coherent story is not proof. "
     "Trauma does not invalidate telemetry. Return ONLY the requested "
     "JSON object — no prose, no markdown fences."
+)
+
+SEPARATOR_RULES = (
+    "Separate the capture text into observations (claims directly "
+    "supported by a capture — cite its id) and interpretations (claims "
+    "that go beyond what is directly supported). Never weaken, split, or "
+    "re-interpret an explicit user assertion because a quoted fragment "
+    "inside it is lexically ambiguous: the user's stated proposition is "
+    "the observation; any ambiguity of an embedded quote may be recorded "
+    "as a separate interpretation, never as a demotion of the assertion "
+    "itself."
+)
+
+UNKNOWNS_RULES = (
+    "List the missing information required to resolve the "
+    "interpretations. An unknown is not automatically a task, and "
+    "uncertainty is never turned into surveillance. Classify each: "
+    "importance (low/medium/high = decision relevance), user_access "
+    "(high = answerable from the user's own records or direct legitimate "
+    "questions; low = would require other people's communications, "
+    "systems, logs, or monitoring), pursuit (pursue = worth a narrow "
+    "legitimate step; hold = matters but wait; do_not_chase = real but "
+    "inaccessible — name it and leave it)."
+)
+
+HYPOTHESES_RULES = (
+    "Titles must be neutral propositions about the world, never verdicts "
+    "('correctly identifies', 'real leak') and never assessments of the "
+    "user's psychology. Decompose compound claims — contact occurred, it "
+    "was deliberate, the motive — into separate hypotheses rather than "
+    "stacking them in one. Safety state is not a causal hypothesis: never "
+    "emit a hypothesis whose content is a safety assessment; if an "
+    "archetype has no credible instance, use not_credible_here."
 )
 
 P = TypeVar("P", bound=BaseModel)
@@ -96,6 +132,8 @@ class _SeparatorOut(_ParseModel):
 class _UnknownOut(_ParseModel):
     statement: str
     importance: UnknownImportance = UnknownImportance.MEDIUM
+    user_access: AccessLevel = AccessLevel.MEDIUM
+    pursuit: Pursuit = Pursuit.UNCLASSIFIED
 
 
 class _UnknownsOut(_ParseModel):
@@ -193,9 +231,8 @@ class LiveSeparator:
             self._chat,
             self.pass_name,
             SYSTEM_PREAMBLE,
-            "Separate the capture text into observations (claims directly "
-            "supported by a capture — cite its id) and interpretations "
-            "(claims that go beyond what is directly supported). JSON: "
+            SEPARATOR_RULES
+            + " JSON: "
             '{"observations": [{"statement", "source_capture_id", '
             '"excerpt"}], "interpretations": ["..."]}\n\n'
             + _case_material(bundle),
@@ -258,9 +295,11 @@ class LiveUnknowns:
             self._chat,
             self.pass_name,
             SYSTEM_PREAMBLE,
-            "List the missing information required to resolve the "
-            'interpretations. JSON: {"unknowns": [{"statement", '
-            '"importance": "low|medium|high"}]}\n\n' + _case_material(bundle),
+            UNKNOWNS_RULES
+            + ' JSON: {"unknowns": [{"statement", "importance": '
+            '"low|medium|high", "user_access": "low|medium|high", '
+            '"pursuit": "pursue|hold|do_not_chase"}]}\n\n'
+            + _case_material(bundle),
             _UnknownsOut,
         )
         if parsed is None:
@@ -271,6 +310,15 @@ class LiveUnknowns:
                     case_id=bundle.case.id,
                     statement=u.statement,
                     importance=u.importance,
+                    user_access=u.user_access,
+                    # Machine-enforced, not prompt-enforced: uncertainty
+                    # never becomes surveillance. LOW access clamps to
+                    # DO_NOT_CHASE regardless of what the model said.
+                    pursuit=(
+                        Pursuit.DO_NOT_CHASE
+                        if u.user_access is AccessLevel.LOW
+                        else u.pursuit
+                    ),
                 )
                 for u in parsed.unknowns
             ],
@@ -306,7 +354,9 @@ class LiveHypotheses:
             "adversarial_cause (someone deliberately engineering the "
             "ambiguity). If an archetype has no credible instance, still "
             "return it with not_credible_here=true and say why in the "
-            "description — never fabricate false balance. harm_class is "
+            "description — never fabricate false balance. "
+            + HYPOTHESES_RULES
+            + " harm_class is "
             "catastrophic_to_user when the hypothesis, if true, means "
             "ongoing danger or irreversible harm to the user. Every credible "
             "hypothesis needs falsifiers (what evidence would change it). "
