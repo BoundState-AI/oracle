@@ -147,6 +147,18 @@ def analyze(store: CaseStore, case_id: str, passes: PassSet | None = None) -> An
     # is append + reload — reconcile() is bookkeeping, not judgment, I10).
     bundle = store.load_case(case_id)
 
+    # Recompute the fingerprint AFTER pass output landed, so the stored
+    # run gates the next unchanged tap instead of seeing its own pass
+    # output as "the hypothesis set changed" (found in production).
+    current = fingerprint.scope_fingerprint(
+        case=bundle.case,
+        captures=bundle.captures,
+        artifacts=bundle.artifacts,
+        events=bundle.events,
+        interpretations=bundle.interpretations,
+        hypotheses=bundle.hypotheses,
+        last_run_at=prior.recorded_at if prior else None,
+    )
     matches = trigger_engine.match(store.load_triggers(), bundle.all_text())
     adjustment = trigger_engine.merge(matches)
     patterns = conduct.accrue(bundle.events)

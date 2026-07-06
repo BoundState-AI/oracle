@@ -281,6 +281,12 @@ class LiveHypotheses:
         self._chat = chat
 
     def run(self, bundle: CaseBundle) -> PassOutput:
+        # WHY idempotence: regenerating on every run appends duplicate
+        # hypotheses, which mutates the scope fingerprint and breaks the
+        # anti-rumination gate (found in production). Existing live
+        # hypotheses stand; users add new ones explicitly.
+        if any(h.is_live() for h in bundle.hypotheses):
+            return PassOutput()
         parsed, refusals = _call_json(
             self._chat,
             self.pass_name,

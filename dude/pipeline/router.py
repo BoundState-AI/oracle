@@ -143,6 +143,10 @@ def resolve_router() -> ModelRouter | None:
     has_anthropic = bool(os.environ.get("ANTHROPIC_API_KEY"))
     has_openai = bool(os.environ.get("OPENAI_API_KEY"))
     if has_anthropic and has_openai:
+        # DUDE_PRIMARY_PROVIDER=openai flips the roles: OpenAI builds,
+        # Anthropic attacks. Both roles always exist (§55).
+        if os.environ.get("DUDE_PRIMARY_PROVIDER", "").lower() == "openai":
+            return ModelRouter(primary=OpenAIChat(), adversary=AnthropicChat())
         return ModelRouter(primary=AnthropicChat(), adversary=OpenAIChat())
     if has_anthropic:
         LOGGER.warning("Single provider (anthropic): adversary pass will refuse.")
