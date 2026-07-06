@@ -44,12 +44,13 @@ dev = [
 ]
 
 [project.scripts]
+dude = "dude.cli:main"
 hearth = "hearth.cli:main"
 oracle = "oracle.cli:main"
 sentinel-tocr = "sentinel.tocr.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["oracle", "sentinel", "hearth"]
+packages = ["oracle", "sentinel", "hearth", "dude"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
