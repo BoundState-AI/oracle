@@ -9,6 +9,7 @@
  *   - /workspace/* — requires sign-in, redirects to /sign-in if not
  *   - /api/oracle/* — requires sign-in (browser-facing proxy)
  *   - /hearth/* and /api/hearth/* — requires sign-in (founder-mode HEARTH)
+ *   - /dude/* and /api/dude/* — requires sign-in (DUDE decision support)
  *   - / (landing), /sign-in, /health, _next/* — public
  */
 
@@ -19,6 +20,8 @@ const isProtectedRoute = createRouteMatcher([
   "/api/oracle(.*)",
   "/hearth(.*)",
   "/api/hearth(.*)",
+  "/dude(.*)",
+  "/api/dude(.*)",
 ]);
 
 export default clerkMiddleware(async (auth, req) => {

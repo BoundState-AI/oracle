@@ -7,7 +7,7 @@
 
 import ReactMarkdown from "react-markdown";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ConsensusVisualizer } from "@/components/ConsensusVisualizer";
 import { VerdictIndicator } from "@/components/VerdictIndicator";
 import { RotateCcw, ArrowRight } from "lucide-react";

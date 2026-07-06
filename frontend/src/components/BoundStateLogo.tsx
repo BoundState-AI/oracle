@@ -11,6 +11,48 @@ interface BoundStateLogoProps {
   className?: string;
 }
 
+// Declared at module scope so React does not remount it on every render of
+// BoundStateLogo (react-hooks/static-components).
+function SignatureIcon({ iconSize }: { iconSize: number }) {
+  const strokeWidth = Math.max(3, iconSize / 12);
+  const lineWidth = Math.max(2, iconSize / 16);
+
+  return (
+    <svg
+      width={iconSize}
+      height={iconSize}
+      viewBox="0 0 100 100"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <path
+        d="M 25 35 L 25 75 Q 25 80 30 80 L 70 80 Q 75 80 75 75 L 75 55 L 75 50 L 70 45 L 65 40"
+        stroke="#60a5fa"
+        strokeWidth={strokeWidth}
+        strokeLinecap="square"
+        fill="none"
+      />
+      <line
+        x1="32"
+        y1="70"
+        x2="68"
+        y2="70"
+        stroke="#3b82f6"
+        strokeWidth={lineWidth * 1.5}
+      />
+      <line
+        x1="38"
+        y1="58"
+        x2="62"
+        y2="58"
+        stroke="#93c5fd"
+        strokeWidth={lineWidth}
+        opacity="0.7"
+      />
+    </svg>
+  );
+}
+
 export function BoundStateLogo({
   variant = "full",
   size = "sm",
@@ -23,46 +65,6 @@ export function BoundStateLogo({
   };
 
   const s = sizes[size];
-
-  const SignatureIcon = ({ iconSize }: { iconSize: number }) => {
-    const strokeWidth = Math.max(3, iconSize / 12);
-    const lineWidth = Math.max(2, iconSize / 16);
-
-    return (
-      <svg
-        width={iconSize}
-        height={iconSize}
-        viewBox="0 0 100 100"
-        fill="none"
-        xmlns="http://www.w3.org/2000/svg"
-      >
-        <path
-          d="M 25 35 L 25 75 Q 25 80 30 80 L 70 80 Q 75 80 75 75 L 75 55 L 75 50 L 70 45 L 65 40"
-          stroke="#60a5fa"
-          strokeWidth={strokeWidth}
-          strokeLinecap="square"
-          fill="none"
-        />
-        <line
-          x1="32"
-          y1="70"
-          x2="68"
-          y2="70"
-          stroke="#3b82f6"
-          strokeWidth={lineWidth * 1.5}
-        />
-        <line
-          x1="38"
-          y1="58"
-          x2="62"
-          y2="58"
-          stroke="#93c5fd"
-          strokeWidth={lineWidth}
-          opacity="0.7"
-        />
-      </svg>
-    );
-  };
 
   if (variant === "icon") {
     return (
