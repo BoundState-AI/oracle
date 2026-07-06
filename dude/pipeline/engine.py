@@ -134,6 +134,7 @@ def analyze(store: CaseStore, case_id: str, passes: PassSet | None = None) -> An
             LOGGER.info("Gate: NO_NEW_DATA for case %s; serving prior run", case_id)
             return AnalysisResult(run=prior, safety=scan, served_prior=True)
 
+    pre_pass = bundle  # the evidence snapshot the passes actually see
     refusals: list[Refusal] = []
     for model_pass in (passes.separator, passes.unknowns, passes.hypotheses, passes.adversary):
         output = model_pass.run(bundle)
@@ -147,15 +148,18 @@ def analyze(store: CaseStore, case_id: str, passes: PassSet | None = None) -> An
     # is append + reload — reconcile() is bookkeeping, not judgment, I10).
     bundle = store.load_case(case_id)
 
-    # Recompute the fingerprint AFTER pass output landed, so the stored
-    # run gates the next unchanged tap instead of seeing its own pass
-    # output as "the hypothesis set changed" (found in production).
+    # Recompute the fingerprint with the post-pass HYPOTHESIS set but the
+    # PRE-PASS evidence snapshot. Evidence must come from the snapshot the
+    # passes actually analyzed: a capture landing mid-run (models take
+    # tens of seconds) must stay OUTSIDE this run's fingerprint, or the
+    # gate will believe evidence was analyzed that no pass ever saw
+    # (found in production — the Vann captures were swallowed).
     current = fingerprint.scope_fingerprint(
-        case=bundle.case,
-        captures=bundle.captures,
-        artifacts=bundle.artifacts,
-        events=bundle.events,
-        interpretations=bundle.interpretations,
+        case=pre_pass.case,
+        captures=pre_pass.captures,
+        artifacts=pre_pass.artifacts,
+        events=pre_pass.events,
+        interpretations=pre_pass.interpretations,
         hypotheses=bundle.hypotheses,
         last_run_at=prior.recorded_at if prior else None,
     )
