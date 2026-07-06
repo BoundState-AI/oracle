@@ -188,6 +188,34 @@ def create_router(
         except StoreError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         last = bundle.analysis_runs[-1] if bundle.analysis_runs else None
+
+        def _dedupe(items: list, key) -> list:
+            # WHY display-level dedupe: pre-idempotence runs appended
+            # duplicate records; the store is append-only by design, so
+            # the view collapses exact repeats instead of rewriting
+            # history. First occurrence wins, order preserved.
+            seen: set = set()
+            out = []
+            for item in items:
+                k = key(item)
+                if k not in seen:
+                    seen.add(k)
+                    out.append(item)
+            return out
+
+        bundle.observations = _dedupe(bundle.observations, lambda o: o.statement)
+        bundle.interpretations = _dedupe(
+            bundle.interpretations, lambda i: i.statement
+        )
+        bundle.unknowns = _dedupe(bundle.unknowns, lambda u: u.statement)
+        live_hyps = [
+            h for h in bundle.hypotheses if h.is_live() or h.not_credible_here
+        ]
+        live_hyps = _dedupe(
+            sorted(live_hyps, key=lambda h: -len(h.annotations)),
+            lambda h: (h.archetype.value, h.title.lower()),
+        )
+        bundle.hypotheses = live_hyps
         return {
             "case_id": bundle.case.id,
             "title": bundle.case.title,
@@ -219,7 +247,6 @@ def create_router(
                     ],
                 }
                 for h in bundle.hypotheses
-                if h.is_live() or h.not_credible_here
             ],
             "last_run": (
                 {

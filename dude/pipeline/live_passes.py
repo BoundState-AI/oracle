@@ -180,7 +180,13 @@ class LiveSeparator:
         self._chat = chat
 
     def run(self, bundle: CaseBundle) -> PassOutput:
-        known = {c.id for c in bundle.captures}
+        # Idempotence: only captures no observation cites yet get extracted
+        # (re-running on cited captures appended duplicate observations in
+        # production). Same rationale as LiveHypotheses.
+        cited = {
+            p.source_id for o in bundle.observations for p in o.provenance
+        }
+        known = {c.id for c in bundle.captures if c.id not in cited}
         if not known:
             return PassOutput()
         parsed, refusals = _call_json(
@@ -244,6 +250,10 @@ class LiveUnknowns:
         self._chat = chat
 
     def run(self, bundle: CaseBundle) -> PassOutput:
+        # Idempotence: unknowns stand until resolved; regenerating each run
+        # appended near-duplicates in production.
+        if bundle.unknowns:
+            return PassOutput()
         parsed, refusals = _call_json(
             self._chat,
             self.pass_name,
