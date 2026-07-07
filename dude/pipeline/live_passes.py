@@ -409,7 +409,10 @@ class LiveAdversary:
         self._chat = chat
 
     def run(self, bundle: CaseBundle) -> PassOutput:
-        live = [h for h in bundle.hypotheses if h.is_live()]
+        # Idempotence: each hypothesis is attacked once. Re-attacking every
+        # run stacked duplicate annotations in production; a superseded or
+        # newly added hypothesis arrives annotation-free and gets attacked.
+        live = [h for h in bundle.hypotheses if h.is_live() and not h.annotations]
         if not live:
             return PassOutput()
         listing = "\n".join(

@@ -189,6 +189,30 @@ def create_router(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         last = bundle.analysis_runs[-1] if bundle.analysis_runs else None
 
+        def _norm(text: str) -> str:
+            # Near-duplicate key: pre-idempotence runs stored the same
+            # statement under varying subjects/phrasings. Person-name and
+            # punctuation variance collapses; content stays the judge.
+            import re as _re
+
+            lowered = text.lower()
+            for phrase in ("the capture author", "the author", "the user",
+                           "author", "dude", "joe"):
+                lowered = lowered.replace(phrase, "@")
+            return _re.sub(r"[^a-z0-9@]+", " ", lowered).strip()[:160]
+
+        def _dude(text: str) -> str:
+            # Display-name transform only — the append-only store keeps
+            # original wording; the person is Dude on every surface.
+            import re as _re
+
+            out = _re.sub(r"\b[Tt]he (capture )?author('s)?\b",
+                          lambda m: "Dude's" if m.group(2) else "Dude", text)
+            out = _re.sub(r"\b[Tt]he user('s)?\b",
+                          lambda m: "Dude's" if m.group(1) else "Dude", out)
+            out = _re.sub(r"^Author\b", "Dude", out)
+            return out
+
         def _dedupe(items: list, key) -> list:
             # WHY display-level dedupe: pre-idempotence runs appended
             # duplicate records; the store is append-only by design, so
@@ -203,11 +227,13 @@ def create_router(
                     out.append(item)
             return out
 
-        bundle.observations = _dedupe(bundle.observations, lambda o: o.statement)
-        bundle.interpretations = _dedupe(
-            bundle.interpretations, lambda i: i.statement
+        bundle.observations = _dedupe(
+            bundle.observations, lambda o: _norm(o.statement)
         )
-        bundle.unknowns = _dedupe(bundle.unknowns, lambda u: u.statement)
+        bundle.interpretations = _dedupe(
+            bundle.interpretations, lambda i: _norm(i.statement)
+        )
+        bundle.unknowns = _dedupe(bundle.unknowns, lambda u: _norm(u.statement))
         live_hyps = [
             h for h in bundle.hypotheses if h.is_live() or h.not_credible_here
         ]
@@ -221,12 +247,16 @@ def create_router(
             "title": bundle.case.title,
             "status": bundle.case.status.value,
             "observed": [
-                {"statement": o.statement, "user_confirmed": o.user_confirmed}
+                {"statement": _dude(o.statement), "user_confirmed": o.user_confirmed}
                 for o in bundle.observations
             ],
-            "inferred": [i.statement for i in bundle.interpretations],
+            "inferred": [_dude(i.statement) for i in bundle.interpretations],
             "unknown": [
-                {"statement": u.statement, "importance": u.importance.value}
+                {
+                    "statement": _dude(u.statement),
+                    "importance": u.importance.value,
+                    "pursuit": u.pursuit.value,
+                }
                 for u in bundle.unknowns
             ],
             "hypotheses": [
