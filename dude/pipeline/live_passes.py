@@ -82,7 +82,10 @@ SEPARATOR_RULES = (
     "inside it is lexically ambiguous: the user's stated proposition is "
     "the observation; any ambiguity of an embedded quote may be recorded "
     "as a separate interpretation, never as a demotion of the assertion "
-    "itself."
+    "itself. When a quoted message is elliptical or subject-ambiguous "
+    "(e.g. 'May call tawnya?'), the OBSERVATION is the verbatim quote "
+    "with its speaker; any resolution of who would do the action is an "
+    "interpretation, never an observation — do not promote one reading."
 )
 
 UNKNOWNS_RULES = (

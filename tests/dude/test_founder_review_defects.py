@@ -50,6 +50,19 @@ class TestDefect2_UserFactNotDegraded:
         assert "Never weaken" in SEPARATOR_RULES
         assert "demotion of the assertion" in SEPARATOR_RULES
 
+    def test_elliptical_may_call_tawyna_not_promoted_to_vann_will_call(
+        self,
+    ) -> None:
+        """Production fixture: Vann's 'May call tawnya?' was extracted as
+        'Vann might call Tawnya' — a subject-ambiguous ellipsis promoted
+        to one reading. The separator contract requires the verbatim
+        quote as the observation and any subject resolution as an
+        interpretation. ('Vann recommends Dude call Tawyna' vs 'Vann
+        intends to call Tawyna' are radically different graphs.)"""
+        assert "elliptical or subject-ambiguous" in SEPARATOR_RULES
+        assert "verbatim quote" in SEPARATOR_RULES
+        assert "never an observation" in SEPARATOR_RULES
+
 
 class TestDefect3_UnknownsAreNotTasks:
     def test_low_access_unknowns_are_never_chased(self, tmp_path) -> None:
