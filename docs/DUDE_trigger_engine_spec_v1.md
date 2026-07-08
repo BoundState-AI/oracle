@@ -1,4 +1,13 @@
-# DUDE Trigger Calibration Engine — Spec v1 (founder source, verbatim)
+# DUDE Trigger Calibration Engine — Spec v1 (REDACTED per v1.1 R6)
+
+Raw calibration scores and real-life identifiers were removed from
+this committed copy on the owner's instruction (custody decision,
+v1.1 R6). The full-fidelity calibration source lives in the
+git-excluded local seed (dude/pom/sources/local/) and imports into
+the deployed store directly. Pre-redaction history retained by
+owner choice.
+
+---
 
 Status: PRE-IMPLEMENTATION. Per §14, an ORACLE review of this design runs
 first; implementation begins only after blocking findings are resolved.
@@ -135,8 +144,8 @@ Example:
 "being misunderstood" is too broad.
 
 User response:
-- false motive attributed by person with no power = 1
-- same false motive attributed by person controlling employment = 5
+- false motive attributed by person with no power = [score: local seed]
+- same false motive attributed by person controlling employment = [score: local seed]
 
 Therefore the likely mechanism is not generic misunderstanding.
 It is closer to:
@@ -178,9 +187,9 @@ Definition:
 A person or institution with meaningful power assigns the user a harmful motive the user does not recognize as their own, and that interpretation can materially affect the user's life.
 
 Evidence:
-- "powerful person accuses you of a motive you do not have" = 4
-- false motive, zero power over life = 1
-- same false motive, controls employment = 5
+- "powerful person accuses you of a motive you do not have" = [score: local seed]
+- false motive, zero power over life = [score: local seed]
+- same false motive, controls employment = [score: local seed]
 
 Status:
 strongly_supported
@@ -213,9 +222,9 @@ Definition:
 A bounded past event is used as proof of permanent present character or untrustworthiness.
 
 Evidence:
-- old mistake used as evidence of who user is now = 4
-- 1994 raised privately as factual concern with explanation allowed = 1
-- 1994 used as proof user is fundamentally untrustworthy now = 5
+- old mistake used as evidence of who user is now = [score: local seed]
+- [bounded past event] raised privately as factual concern with explanation allowed = [score: local seed]
+- [bounded past event] used as proof user is fundamentally untrustworthy now = [score: local seed]
 
 Status:
 strongly_supported
@@ -231,9 +240,9 @@ Definition:
 An authority enters, searches, inspects, accesses, or controls a personal/professional space while the limits of its authority are unclear to the user.
 
 Evidence:
-- someone searches belongings/space/phone/files/work = 4
-- valid warrant, clear scope, counsel present = 1
-- search while unsure what they may legally touch = 5
+- someone searches belongings/space/phone/files/work = [score: local seed]
+- valid warrant, clear scope, counsel present = [score: local seed]
+- search while unsure what they may legally touch = [score: local seed]
 
 Status:
 strongly_supported
@@ -254,9 +263,9 @@ Definition:
 The user cannot leave physically or functionally without serious loss.
 
 Evidence:
-- cannot leave without losing something important = 5
-- physically trapped with trustworthy person = 3
-- physically free to leave meeting but leaving could destroy career = 4
+- cannot leave without losing something important = [score: local seed]
+- physically trapped with trustworthy person = [score: local seed]
+- physically free to leave meeting but leaving could destroy career = [score: local seed]
 
 Status:
 strongly_supported
@@ -278,10 +287,10 @@ Definition:
 Another person or institution has discretionary control over an important outcome without clear rules, limits, accountability, or meaningful recourse.
 
 Evidence:
-- dependent on someone who can arbitrarily withhold money/work/access/permission = 5
-- boss can fire user but gives clear rules/direct feedback/appeal path = 0
-- boss cannot fire user but can arbitrarily block work without explanation = 3
-- "trust the process" without explaining process = 3
+- dependent on someone who can arbitrarily withhold money/work/access/permission = [score: local seed]
+- boss can fire user but gives clear rules/direct feedback/appeal path = [score: local seed]
+- boss cannot fire user but can arbitrarily block work without explanation = [score: local seed]
+- "trust the process" without explaining process = [score: local seed]
 
 Status:
 strongly_supported
@@ -299,11 +308,11 @@ Definition:
 A child or dependent is in danger, being humiliated, falsely accused, harmed, or otherwise needs protection.
 
 Evidence:
-- son unexpectedly unreachable = 4
-- son bullied/humiliated/falsely accused by authority = 4
-- accused of failing as father = 4
-- own actions may threaten family safety/home/future = 4
-- child in trouble with full access and clear plan = 4
+- dependent unexpectedly unreachable = [score: local seed]
+- dependent bullied/humiliated/falsely accused by authority = [score: local seed]
+- accused of failing as father = [score: local seed]
+- own actions may threaten family safety/home/future = [score: local seed]
+- child in trouble with full access and clear plan = [score: local seed]
 
 Status:
 strongly_supported
@@ -312,7 +321,7 @@ Related amplifier:
 blocked_protective_access
 
 Evidence:
-- child in trouble and authority controls whether user can reach/protect him = 5
+- child in trouble and authority controls whether user can reach/protect him = [score: local seed]
 
 Important:
 Do not reduce the entire trigger to helplessness.
@@ -326,10 +335,10 @@ Definition:
 The user becomes highly visible to powerful people or is singled out positively by them.
 
 Evidence:
-- highly successful but mostly invisible = 0
-- highly visible and praised by powerful people = 5
-- doing well/becoming visible and expecting something bad to follow = 4
-- good thing happening but unable to relax because reversal expected = 3
+- highly successful but mostly invisible = [score: local seed]
+- highly visible and praised by powerful people = [score: local seed]
+- doing well/becoming visible and expecting something bad to follow = [score: local seed]
+- good thing happening but unable to relax because reversal expected = [score: local seed]
 
 Status:
 provisionally_supported, high priority for further calibration
@@ -359,11 +368,11 @@ Definition:
 A meaningful outcome remains unresolved while another person or institution controls timing.
 
 Evidence:
-- another person controls whether life changes = 4
-- forced to repeatedly prepare for moving threat = 4
-- six-month wait with explicit rules/date/criteria = 3
-- six-week wait with moving dates/no explanation = 4
-- ordinary repeated delay = 2
+- another person controls whether life changes = [score: local seed]
+- forced to repeatedly prepare for moving threat = [score: local seed]
+- six-month wait with explicit rules/date/criteria = [score: local seed]
+- six-week wait with moving dates/no explanation = [score: local seed]
+- ordinary repeated delay = [score: local seed]
 
 Status:
 provisionally_supported
@@ -384,9 +393,9 @@ Definition:
 The user loses attribution, control, access, or the ability to use work they created.
 
 Evidence:
-- someone takes credit for creation = 4
-- invention used without credit but user retains use = 3
-- someone gains control and can exclude user from invention = 4
+- someone takes credit for creation = [score: local seed]
+- invention used without credit but user retains use = [score: local seed]
+- someone gains control and can exclude user from invention = [score: local seed]
 
 Status:
 provisionally_supported
@@ -408,11 +417,11 @@ Definition:
 A legitimate concern is dismissed through claims about PTSD, instability, toxicity, dangerousness, or irrationality rather than evaluated on evidence.
 
 Evidence:
-- legitimate concern attributed to PTSD instead of evaluated = 5
-- implied dangerous/toxic/unstable without concrete examples = 4
-- intensity treated as evidence of irrationality = 3
-- spouse suggests PTSD may affect urgency but still examines evidence = 2
-- authority says "just PTSD" and refuses evidence = 3
+- legitimate concern attributed to PTSD instead of evaluated = [score: local seed]
+- implied dangerous/toxic/unstable without concrete examples = [score: local seed]
+- intensity treated as evidence of irrationality = [score: local seed]
+- spouse suggests PTSD may affect urgency but still examines evidence = [score: local seed]
+- authority says "just PTSD" and refuses evidence = [score: local seed]
 
 Status:
 provisionally_supported
@@ -442,14 +451,14 @@ The following broad candidates were weak in current self-report and must NOT be 
 - consent followed by consequence
 
 Examples of low scores:
-- important person suddenly stops replying = 1
-- sense people discuss user somewhere inaccessible = 1
-- rules change after action = 1
-- inaccurate paraphrase = 1
-- leaving job/relationship/institution and expecting retaliation = 1
-- public misunderstanding = 1
-- truth itself may not protect user = 1
-- consented without understanding consequences = 1
+- important person suddenly stops replying = [score: local seed]
+- sense people discuss user somewhere inaccessible = [score: local seed]
+- rules change after action = [score: local seed]
+- inaccurate paraphrase = [score: local seed]
+- leaving job/relationship/institution and expecting retaliation = [score: local seed]
+- public misunderstanding = [score: local seed]
+- truth itself may not protect user = [score: local seed]
+- consented without understanding consequences = [score: local seed]
 
 Store these as:
 candidate_with_low_support
