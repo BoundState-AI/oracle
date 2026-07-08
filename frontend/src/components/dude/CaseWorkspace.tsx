@@ -1,22 +1,20 @@
 /**
  * CaseWorkspace — the DUDE case screen, capture-first: hold-to-talk and
- * text capture at the top, then the latest analysis, then the timeline.
+ * text capture at the top, then the PRIMARY Reality Check card, then the
+ * collapsed "How the sausage is made" detail (Reality, Models, Timeline).
  *
- * Design contract (spec v0.2 I1/I2, §5 + mobile vision v0.1):
+ * Design contract (spec v0.2 I1/I2, §5 + mobile vision v0.1 + founder
+ * brief "answer 'PTSD or real?' in five seconds"):
  *   - Safety output renders at the TOP, before any other content, and is
  *     never hidden, collapsed, or auto-dismissed (SafetyBanner).
  *   - Backend copy renders VERBATIM — capture acks, safety messages,
  *     replies, refusals, and the analysis summary are backend strings.
  *     This component owns UI chrome labels only ("Capture", "Analyze",
- *     "Timeline", hold-to-talk state).
- *   - served_prior renders the evidence-state badge
- *     "No new data — showing last analysis" — exactly that, nothing about
- *     the user. The badge LEADS the analysis panel (above the stored run's
- *     own mode badge and summary) so a gated tap reads correctly.
- *   - Reality (observed / inferred / unknown) and Models (hypotheses +
- *     adversary attacks) render below the Analysis panel from
- *     GET /cases/{id} and refresh after every capture and analyze
- *     (see RealityModels.tsx for their design contract).
+ *     "Timeline", "How the sausage is made", hold-to-talk state).
+ *   - The Reality Check card (RealityCheck.tsx) is the default view; the
+ *     epistemology — Reality, Models, Timeline — lives behind the sausage
+ *     toggle, collapsed by default, its open state remembered per case in
+ *     localStorage.
  *   - A voice refusal renders its reason plainly and hands the moment to
  *     the text box; voice is never faked.
  *   - Each analysis mode is remembered locally so the home screen can
@@ -27,10 +25,18 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { ArrowLeft, Loader2, Scale, Send, ShieldAlert } from "lucide-react";
+import {
+  ArrowLeft,
+  ChevronDown,
+  Loader2,
+  Scale,
+  Send,
+  ShieldAlert,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { HoldToTalkButton } from "@/components/dude/HoldToTalkButton";
+import { RealityCheck } from "@/components/dude/RealityCheck";
 import {
   ModelsSection,
   RealitySection,
@@ -41,7 +47,6 @@ import {
   captureText,
   fetchCaseDetail,
   fetchCases,
-  type AnalysisMode,
   type AnalyzeResponse,
   type CaseDetail,
   type SafetyPayload,
@@ -50,15 +55,9 @@ import { rememberLastMode } from "@/lib/dudeEvidenceState";
 import { useHoldToTalk } from "@/lib/useHoldToTalk";
 import { type VoiceFrame } from "@/lib/useDudeVoice";
 
-const MODE_LABELS: Record<AnalysisMode, string> = {
-  new_evidence: "new_evidence",
-  new_hypothesis_reanalysis: "new_hypothesis_reanalysis",
-  scope_change: "scope_change",
-  no_new_data: "no_new_data",
-};
-
-// Exact evidence-state copy required for served_prior (no paraphrase).
-const SERVED_PRIOR_BADGE = "No new data — showing last analysis";
+// Per-case persistence for the sausage toggle — reopening a case restores
+// whether its detail view was left expanded.
+const SAUSAGE_OPEN_PREFIX = "dude:sausage-open:";
 
 interface TimelineEntry {
   id: number;
@@ -279,90 +278,132 @@ export function CaseWorkspace({ caseId }: { caseId: string }) {
           </button>
         </section>
 
-        {analysis && (
-          <section className="rounded-[1.75rem] border border-border/80 bg-card/70 p-5">
-            {/* served_prior LEADS the panel — the evidence-state badge sits
-                above the stored run's own mode badge and summary, so a
-                gated tap reads "no new data" before the old run's chrome. */}
-            {analysis.served_prior && (
-              <div className="mb-3">
-                <span className="inline-block rounded-full border border-border bg-secondary px-3 py-1 text-[11px] font-medium text-secondary-foreground">
-                  {SERVED_PRIOR_BADGE}
-                </span>
-              </div>
-            )}
-            <div className="mb-4 flex flex-wrap items-center gap-2">
-              <h2 className="text-base font-semibold text-foreground">
-                Analysis
-              </h2>
-              <span className="rounded-full border border-violet-400/25 bg-violet-400/10 px-3 py-0.5 text-[10px] font-medium uppercase tracking-[0.2em] text-violet-200">
-                {MODE_LABELS[analysis.mode] ?? analysis.mode}
-              </span>
-              <span className="ml-auto text-xs text-muted-foreground">
-                run {analysis.run_id}
-              </span>
-            </div>
-            {/* The summary is backend copy and renders verbatim. */}
-            <p className="whitespace-pre-wrap text-sm leading-7 text-foreground">
-              {analysis.summary}
-            </p>
-          </section>
-        )}
+        {/* PRIMARY view — "PTSD or real?" answered in labeled rows. */}
+        <RealityCheck detail={detail} analysis={analysis} />
 
-        {/* Reality + Models — the case's epistemic state, below Analysis.
-            Both sections self-hide while their backend lists are empty. */}
-        {detail && (
-          <>
-            <RealitySection
-              observed={detail.observed}
-              inferred={detail.inferred}
-              unknown={detail.unknown}
-            />
-            <ModelsSection hypotheses={detail.hypotheses} />
-          </>
-        )}
-
-        {timeline.length > 0 && (
-          <section className="rounded-[1.75rem] border border-border/80 bg-card/70 p-5">
-            <h2 className="text-base font-semibold text-foreground">
-              Timeline
-            </h2>
-            <ul className="mt-4 space-y-3">
-              {timeline.map((entry) => (
-                <li
-                  key={entry.id}
-                  className={`rounded-xl border p-4 ${
-                    entry.kind === "refusal"
-                      ? "border-destructive/50 bg-destructive/10"
-                      : "border-border/60 bg-background/40"
-                  }`}
-                >
-                  <p
-                    className={`text-[10px] font-semibold uppercase tracking-[0.2em] ${
-                      entry.kind === "refusal"
-                        ? "text-red-300"
-                        : "text-muted-foreground"
-                    }`}
-                  >
-                    {TIMELINE_CHROME[entry.kind]}
-                  </p>
-                  {/* Entry text is backend copy (ack, transcript, reply,
-                      refusal reason) rendered verbatim. */}
-                  <p
-                    className={`mt-1 whitespace-pre-wrap text-sm leading-6 ${
-                      entry.kind === "refusal"
-                        ? "text-red-100/90"
-                        : "text-foreground"
-                    }`}
-                  >
-                    {entry.text}
-                  </p>
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
+        {/* SECONDARY — the epistemology, collapsed by default. */}
+        <SausageSection caseId={caseId} detail={detail} timeline={timeline} />
       </main>
     </div>
+  );
+}
+
+/**
+ * The "How the sausage is made" toggle: Reality, Models, and Timeline —
+ * everything the Reality Check card was computed from. Collapsed by
+ * default; the open state persists per case in localStorage.
+ */
+function SausageSection({
+  caseId,
+  detail,
+  timeline,
+}: {
+  caseId: string;
+  detail: CaseDetail | null;
+  timeline: TimelineEntry[];
+}) {
+  const [open, setOpen] = useState(false);
+
+  // Restore in an effect, not the initial state — localStorage doesn't
+  // exist during server render and the first client render must match it.
+  useEffect(() => {
+    try {
+      setOpen(window.localStorage.getItem(SAUSAGE_OPEN_PREFIX + caseId) === "1");
+    } catch {
+      // Storage denied (private mode): the section simply starts closed.
+    }
+  }, [caseId]);
+
+  const toggle = useCallback(() => {
+    setOpen((current) => {
+      const next = !current;
+      try {
+        window.localStorage.setItem(
+          SAUSAGE_OPEN_PREFIX + caseId,
+          next ? "1" : "0"
+        );
+      } catch {
+        // Storage denied: the toggle still works for this visit.
+      }
+      return next;
+    });
+  }, [caseId]);
+
+  return (
+    <section className="space-y-6">
+      <button
+        type="button"
+        onClick={toggle}
+        aria-expanded={open}
+        className="flex w-full items-center justify-between rounded-[1.75rem] border border-border/80 bg-card/70 px-5 py-4 text-sm font-semibold text-foreground transition-colors hover:bg-accent/40 active:bg-accent/40"
+      >
+        How the sausage is made
+        <ChevronDown
+          aria-hidden
+          className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${
+            open ? "rotate-180" : ""
+          }`}
+        />
+      </button>
+      {open && (
+        <>
+          {/* Reality + Models — the case's epistemic state. Both sections
+              self-hide while their backend lists are empty. */}
+          {detail && (
+            <>
+              <RealitySection
+                observed={detail.observed}
+                inferred={detail.inferred}
+                unknown={detail.unknown}
+              />
+              <ModelsSection hypotheses={detail.hypotheses} />
+            </>
+          )}
+          <TimelineSection timeline={timeline} />
+        </>
+      )}
+    </section>
+  );
+}
+
+function TimelineSection({ timeline }: { timeline: TimelineEntry[] }) {
+  if (timeline.length === 0) return null;
+  return (
+    <section className="rounded-[1.75rem] border border-border/80 bg-card/70 p-5">
+      <h2 className="text-base font-semibold text-foreground">Timeline</h2>
+      <ul className="mt-4 space-y-3">
+        {timeline.map((entry) => (
+          <li
+            key={entry.id}
+            className={`rounded-xl border p-4 ${
+              entry.kind === "refusal"
+                ? "border-destructive/50 bg-destructive/10"
+                : "border-border/60 bg-background/40"
+            }`}
+          >
+            <p
+              className={`text-[10px] font-semibold uppercase tracking-[0.2em] ${
+                entry.kind === "refusal"
+                  ? "text-red-300"
+                  : "text-muted-foreground"
+              }`}
+            >
+              {TIMELINE_CHROME[entry.kind]}
+            </p>
+            {/* Entry text is backend copy (ack, transcript, reply,
+                refusal reason) rendered verbatim. */}
+            <p
+              className={`mt-1 whitespace-pre-wrap text-sm leading-6 ${
+                entry.kind === "refusal"
+                  ? "text-red-100/90"
+                  : "text-foreground"
+              }`}
+            >
+              {entry.text}
+            </p>
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }

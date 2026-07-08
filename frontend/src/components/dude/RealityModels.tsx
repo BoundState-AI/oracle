@@ -8,8 +8,9 @@
  *     backend copy and renders VERBATIM. This module owns UI chrome labels
  *     only ("Reality", "Observed", "Inferred", "interpretation, not fact",
  *     "Unknown", "Models", "Would change this:", "Adversary",
- *     "Unsupported links", "no credible instance", "confirmed").
- *     Nothing here says anything about the user's psychology.
+ *     "Unsupported links", "no credible instance", "confirmed", and the
+ *     "do not chase" tooltip). Nothing here says anything about the
+ *     user's psychology.
  *   - Inferred renders VISIBLY distinct from Observed (dashed violet,
  *     italic, labeled "interpretation, not fact") — this distinction IS
  *     the product, not decoration.
@@ -122,6 +123,31 @@ function InferredGroup({ inferred }: { inferred: string[] }) {
   );
 }
 
+// Pursuit chips color by triage: pursue is active (violet), hold neutral,
+// "do not chase" dims — real but not legitimately accessible, named + left.
+const PURSUIT_STYLES: Record<string, string> = {
+  pursue: "border-violet-400/30 bg-violet-400/10 text-violet-200",
+  hold: "border-border bg-secondary text-secondary-foreground",
+};
+
+const DO_NOT_CHASE_STYLE = "border-border/50 bg-transparent text-muted-foreground/60";
+
+const DO_NOT_CHASE_TITLE =
+  "Real but not legitimately accessible — named and left";
+
+function PursuitChip({ pursuit }: { pursuit: string }) {
+  const style = PURSUIT_STYLES[pursuit];
+  return (
+    <span
+      className={`${CHIP} whitespace-nowrap ${style ?? DO_NOT_CHASE_STYLE}`}
+      title={style ? undefined : DO_NOT_CHASE_TITLE}
+    >
+      {/* Backend pursuit word, verbatim. */}
+      {pursuit}
+    </span>
+  );
+}
+
 function UnknownGroup({ unknown }: { unknown: UnknownStatement[] }) {
   return (
     <div className="mt-5">
@@ -136,11 +162,14 @@ function UnknownGroup({ unknown }: { unknown: UnknownStatement[] }) {
             <p className="min-w-0 flex-1 whitespace-pre-wrap text-sm leading-6 text-foreground">
               {item.statement}
             </p>
-            {/* Importance is a backend word, rendered verbatim in a chip. */}
-            <span
-              className={`${CHIP} shrink-0 border-amber-400/30 bg-amber-400/10 text-amber-200`}
-            >
-              {item.importance}
+            <span className="flex shrink-0 flex-col items-end gap-1">
+              {/* Importance is a backend word, rendered verbatim in a chip. */}
+              <span
+                className={`${CHIP} border-amber-400/30 bg-amber-400/10 text-amber-200`}
+              >
+                {item.importance}
+              </span>
+              <PursuitChip pursuit={item.pursuit} />
             </span>
           </li>
         ))}

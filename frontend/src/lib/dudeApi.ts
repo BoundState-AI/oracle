@@ -55,10 +55,17 @@ export interface ObservedStatement {
   user_confirmed: boolean;
 }
 
-/** An open unknown — backend statement plus its importance label. */
+/**
+ * Backend triage word for an unknown: worth chasing, parked, or real but
+ * not legitimately accessible ("do not chase" — named and left).
+ */
+export type UnknownPursuit = "pursue" | "hold" | "do not chase";
+
+/** An open unknown — backend statement plus importance + pursuit labels. */
 export interface UnknownStatement {
   statement: string;
   importance: string;
+  pursuit: UnknownPursuit;
 }
 
 /** One adversary attack on a hypothesis, with the links it found weak. */
@@ -93,11 +100,21 @@ export interface Hypothesis {
   attacks: AdversaryAttack[];
 }
 
+/** How PTSD-overlap adjusted the run: not at all, widened, or flagged. */
+export type AdjustmentEffect = "none" | "widen" | "attend";
+
 export interface LastRun {
   mode: AnalysisMode;
   summary: string;
   crisis_active: boolean;
   refusals: string[];
+  /** Known-pattern names that matched this case (backend copy, verbatim). */
+  trigger_matches: string[];
+  /** How many known patterns were checked — the M in "N of M". */
+  trigger_total: number;
+  /** Backend note on what the overlap did to the analysis — verbatim. */
+  adjustment_note: string;
+  adjustment_effect: AdjustmentEffect;
 }
 
 /** Full case state from GET /cases/{id} — Reality + Models + last run. */
