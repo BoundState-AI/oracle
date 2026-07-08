@@ -134,6 +134,14 @@ function OverlapRow({ run }: { run: LastRun }) {
           {run.trigger_matches.join(" · ")}
         </p>
       )}
+      {/* WHY this caption exists: "overlap" was ambiguous in dogfooding.
+          It states what the row measures — resemblance, not reaction,
+          not evidence. Chrome copy; evidence-state language only. */}
+      <p className="mt-1 text-xs leading-5 text-muted-foreground/80">
+        How closely this situation resembles your known trigger patterns —
+        not how you are reacting, and not evidence about what happened.
+        Overlap raises the evidence bar in both directions.
+      </p>
     </Row>
   );
 }
