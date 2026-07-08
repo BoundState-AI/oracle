@@ -54,5 +54,37 @@
     "confidence": "user_stated",
     "user_confirmed": true,
     "active": true
+  },
+  {
+    "name": "Inactivity as threat",
+    "cues": ["nothing to do", "idle", "underused", "not working", "no work", "waiting around", "can't relax", "downtime"],
+    "description": "User-stated 2026-07-08: 'I can't relax at all. Inactivity is dangerous to me.' Manual §2: equates visible productivity with safety.",
+    "confidence": "user_stated",
+    "user_confirmed": true,
+    "active": true
+  },
+  {
+    "name": "Being helped or cared for",
+    "cues": ["did it for me", "doing it for me", "offered to help", "did me a favor", "asking for you", "take care of it for you", "on my behalf"],
+    "description": "User-stated 2026-07-08: 'I don't like people doing shit for me.'",
+    "confidence": "user_stated",
+    "user_confirmed": true,
+    "active": true
+  },
+  {
+    "name": "Public praise or visibility",
+    "cues": ["praised", "called me a genius", "everyone says", "recognition", "in front of everyone", "shout out", "spotlight"],
+    "description": "User-stated 2026-07-08: 'I don't like being publicly praised.'",
+    "confidence": "user_stated",
+    "user_confirmed": true,
+    "active": true
+  },
+  {
+    "name": "Fatigue amplification",
+    "cues": ["tired", "exhausted", "didn't sleep", "no sleep", "up all night", "running on empty", "jet lag", "jetlag"],
+    "description": "User-stated 2026-07-08: 'If I'm tired threats are super magnified.' Somatic amplifier, not a situational pattern: when matched, certainty in BOTH directions is worth less than usual.",
+    "confidence": "user_stated",
+    "user_confirmed": true,
+    "active": true
   }
 ]
