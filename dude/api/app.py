@@ -149,7 +149,7 @@ def import_bundled_pom(case_store: CaseStore) -> dict[str, object] | None:
     return {
         "artifact_sha256": artifact.content_sha256,
         "items_imported": imported,
-        "items_total": len(existing_ids) + imported,
+        "items_total": len(existing_keys),
     }
 
 

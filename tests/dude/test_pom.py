@@ -336,3 +336,20 @@ class TestModelLag:
         )
         [verdict] = model_lag_check(model)
         assert verdict.status is LagStatus.UNRESOLVED
+
+
+class TestBundledImportIdempotence:
+    def test_bundled_import_runs_twice_without_duplicates(self, tmp_path) -> None:
+        """Production regression: id-based dedupe re-imported all items on
+        every boot (1980 after 11 deploys), then the content-keyed fix
+        crashed the boot on a stale variable in the return path. This
+        exercises the FULL function twice, return value included."""
+        from dude.api.app import import_bundled_pom
+        from dude.store.jsonl import CaseStore
+
+        store = CaseStore(root=tmp_path / "dude_home")
+        first = import_bundled_pom(store)
+        assert first is not None and first["items_imported"] > 0
+        second = import_bundled_pom(store)
+        assert second["items_imported"] == 0
+        assert second["items_total"] == first["items_total"]
