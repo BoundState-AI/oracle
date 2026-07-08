@@ -162,7 +162,14 @@ def retrieve(
     bundle = store.load()
     lowered = [c.lower() for c in cues]
     retrieved: list[PomItem] = []
+    # Defense against historical import duplicates (the pre-fix boot loop
+    # re-imported the dataset per deploy): one retrieval per statement.
+    seen_statements: set[str] = set()
     for item in bundle.items:
+        norm = " ".join(item.statement.split()).lower()
+        if norm in seen_statements:
+            continue
+        seen_statements.add(norm)
         try:
             authorize(item, resolved)
         except PolicyViolation:

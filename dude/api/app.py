@@ -118,11 +118,18 @@ def import_bundled_pom(case_store: CaseStore) -> dict[str, object] | None:
             content=content,
         )
         pom.append(artifact)
-    existing_ids = {i.id for i in bundle.items}
+    # WHY content keying: dataset rows carry no ids, so id-based dedupe
+    # minted fresh uuids every boot and re-imported all 180 items per
+    # deploy (found in production: 1980 items after 11 deploys).
+    def _key(statement: str, category: str) -> tuple[str, str]:
+        return (" ".join(statement.split()).lower(), category)
+
+    existing_keys = {_key(i.statement, i.category.value) for i in bundle.items}
     imported = 0
     for raw in _json.loads(dataset.read_text(encoding="utf-8")):
         item = PomItem.model_validate({**raw, "source_artifact_id": artifact.id})
-        if item.id not in existing_ids:
+        if _key(item.statement, item.category.value) not in existing_keys:
+            existing_keys.add(_key(item.statement, item.category.value))
             pom.append(item)
             imported += 1
     LOGGER.info("Bundled POM import: %d new items", imported)
