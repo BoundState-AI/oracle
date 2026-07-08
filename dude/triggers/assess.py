@@ -786,6 +786,34 @@ def _supported_confirmed(
     return supported
 
 
+def confirmed_overlap_labels(
+    tb: TriggerBundle, case_id: str, user_id: str
+) -> list[str]:
+    """De-identified family labels behind the overlap statistic (R8/R9):
+    user-confirmed, undenied assessments on self_report_supported
+    profiles — exactly the set _resolve_layer counts. Labels only, never
+    scores (R6c)."""
+    return sorted({f.label for _a, f, _p in _supported_confirmed(tb, case_id, user_id)})
+
+
+def pending_proposals(
+    tb: TriggerBundle, case_id: str, user_id: str
+) -> list[tuple[CaseTriggerAssessment, TriggerFamily]]:
+    """Model proposals still awaiting the user's disposition (R5: the
+    matcher proposes, the user disposes), paired with their family shape
+    so surfaces can render the de-identified label."""
+    by_id = {f.id: f for f in tb.families}
+    return [
+        (a, by_id[a.trigger_family_id])
+        for a in tb.assessments
+        if a.case_id == case_id
+        and a.user_id == user_id
+        and not a.user_confirmed
+        and not a.user_denied
+        and a.trigger_family_id in by_id
+    ]
+
+
 def _resolve_layer(
     store: TriggerStore,
     bundle: CaseBundle,

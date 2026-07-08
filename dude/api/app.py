@@ -41,6 +41,7 @@ __safety_critical__: bool = True
 __psychologically_critical__: bool = True
 
 import logging
+from datetime import datetime, timedelta, timezone
 
 from fastapi import (
     APIRouter,
@@ -53,9 +54,18 @@ from fastapi import (
 )
 from pydantic import BaseModel, ConfigDict
 
-from dude.data import Case, SafetyScanResult, SourceType
+from dude.data import AnalysisRun, Case, SafetyScanResult, SourceType
 from dude.pipeline.engine import analyze, capture
 from dude.store.jsonl import CaseStore, StoreError
+from dude.triggers import assess as trigger_assess
+from dude.triggers import distortion
+from dude.triggers.contracts import (
+    DEFAULT_USER_ID,
+    CalibrationPrompt,
+    EvidenceSourceType,
+    OverlapLevel,
+)
+from dude.triggers.store import TriggerBundle, TriggerStore
 from dude.voice.stt import SpeechToText, VoiceUnavailable
 from dude.voice.tts import TextToSpeech
 
@@ -63,6 +73,16 @@ LOGGER = logging.getLogger("dude.api.app")
 
 # Websocket close code for failed auth (4000-range = application-defined).
 WS_UNAUTHORIZED = 4401
+
+# The Lab tap scale (spec v1 §8). The server declares the scale; the
+# contract computes out_of_range from it and never clamps the raw score.
+LAB_SCALE_MIN = 0
+LAB_SCALE_MAX = 5
+
+# R6f state stamp: a crisis SafetyEvent anywhere in the store within this
+# window marks calibration as captured under an active crisis flag, which
+# the contract force-quarantines (provisional pending reconfirmation).
+CRISIS_STATE_WINDOW = timedelta(hours=24)
 
 
 def import_bundled_pom(case_store: CaseStore) -> dict[str, object] | None:
@@ -126,6 +146,127 @@ def import_bundled_pom(case_store: CaseStore) -> dict[str, object] | None:
     }
 
 
+def _trigger_view(
+    case_store: CaseStore, case_id: str, last: AnalysisRun | None
+) -> dict[str, object]:
+    """Trigger-engine view for case_detail (trigger spec v1.1 R3/R5/R8):
+    the run's single overlap statistic as a LEVEL WORD with de-identified
+    family labels, the live proposals awaiting user disposition, and the
+    vetted template copy verbatim — never scores, never calibration text."""
+    tb = TriggerStore(case_store).load()
+    proposals = trigger_assess.pending_proposals(tb, case_id, DEFAULT_USER_ID)
+    labels = [family.label for _a, family in proposals]
+    run_fields: dict[str, object] = {}
+    if last is not None:
+        run_fields = {
+            "trigger_overlap": last.trigger_overlap,
+            "overlap_labels": trigger_assess.confirmed_overlap_labels(
+                tb, case_id, DEFAULT_USER_ID
+            ),
+            # R3/R2 render rules live in the renderer: empty below
+            # moderate overlap and always empty while a crisis is active.
+            "distortion_block": distortion.render_distortion_block(
+                OverlapLevel(last.trigger_overlap), last.crisis_active
+            ),
+            # R3 mirrored invariant: the exact vetted no-match copy, so
+            # the UI never paraphrases NO_TRIGGER_MATCH into a verdict.
+            "no_match_copy": distortion.NO_MATCH_COPY,
+        }
+    return {
+        "run": run_fields,
+        "proposals": [
+            {"assessment_id": a.id, "label": family.label}
+            for a, family in proposals
+        ],
+        "note": distortion.render_possible_overlap(labels) if labels else "",
+    }
+
+
+def _evidence_source_counts(
+    tb: TriggerBundle, family_slug: str
+) -> list[dict[str, object]]:
+    """Evidence SOURCE TYPES with counts for the Lab's per-family "why"
+    (R6c: provenance renders; response text and scores never do).
+    Calibration responses and pair contrasts count from their own streams;
+    the evidence stream covers the remaining types (its per-family
+    calibration_response summary rows would double-count the stream)."""
+    prompt_ids = {p.id for p in tb.prompts if p.family_slug == family_slug}
+    counts: dict[str, int] = {}
+    usable = [
+        r
+        for r in tb.calibration
+        if r.prompt_id in prompt_ids and not r.quarantined and not r.revoked
+    ]
+    if usable:
+        counts[EvidenceSourceType.CALIBRATION_RESPONSE.value] = len(usable)
+    contrasts = [c for c in tb.contrasts if c.family_slug == family_slug]
+    if contrasts:
+        counts[EvidenceSourceType.MATCHED_PAIR_CONTRAST.value] = len(contrasts)
+    stream_backed = {
+        EvidenceSourceType.CALIBRATION_RESPONSE,
+        EvidenceSourceType.MATCHED_PAIR_CONTRAST,
+    }
+    for record in tb.evidence:
+        if record.family_slug == family_slug and record.source_type not in stream_backed:
+            key = record.source_type.value
+            counts[key] = counts.get(key, 0) + 1
+    return [
+        {"source_type": source, "count": count}
+        for source, count in sorted(counts.items())
+    ]
+
+
+def _pending_units(tb: TriggerBundle) -> list[dict[str, object]]:
+    """Unanswered calibration prompts as rating units (v1 §2/§8): a
+    matched pair with BOTH arms unanswered is one two-scenario unit (the
+    "which hits harder" chrome lives in the UI); everything else single.
+    Prompt text only — prior answers and scores are never served."""
+    answered = {r.prompt_id for r in tb.calibration if not r.revoked}
+    by_id = {p.id: p for p in tb.prompts}
+    units: list[dict[str, object]] = []
+    in_pair: set[str] = set()
+    for pair in tb.pairs:
+        high = by_id.get(pair.high_arm_prompt_id)
+        low = by_id.get(pair.low_arm_prompt_id)
+        if high and low and high.id not in answered and low.id not in answered:
+            units.append(
+                {
+                    "kind": "pair",
+                    "pair_id": pair.id,
+                    "prompts": [_prompt_view(high), _prompt_view(low)],
+                }
+            )
+            in_pair.update({high.id, low.id})
+    units.extend(
+        {"kind": "single", "pair_id": None, "prompts": [_prompt_view(prompt)]}
+        for prompt in tb.prompts
+        if prompt.id not in answered and prompt.id not in in_pair
+    )
+    return units
+
+
+def _prompt_view(prompt: CalibrationPrompt) -> dict[str, str]:
+    return {"prompt_id": prompt.id, "text": prompt.text}
+
+
+def _recent_crisis(store: CaseStore) -> bool:
+    """Whether any case recorded a crisis SafetyEvent inside the window —
+    the backend-computed input to state_at_capture (R6f). Never trusted
+    from the caller."""
+    cutoff = datetime.now(timezone.utc) - CRISIS_STATE_WINDOW
+    for case_id in store.list_case_ids():
+        bundle = store.load_case(case_id)
+        if any(e.crisis and e.recorded_at >= cutoff for e in bundle.safety_events):
+            return True
+    return False
+
+
+def _lab_session_id() -> str:
+    """One Lab sitting per UTC day: coarser than the 24h separation floor
+    in status math, so a burst of ratings never counts as two sessions."""
+    return f"lab_{datetime.now(timezone.utc):%Y%m%d}"
+
+
 class CreateCaseRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     title: str
@@ -136,6 +277,13 @@ class CaptureRequest(BaseModel):
     text: str
 
 
+class CalibrationAnswerRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    prompt_id: str
+    raw_score: int
+    raw_response_text: str = ""
+
+
 def create_router(
     store: CaseStore | None = None,
     stt: SpeechToText | None = None,
@@ -143,20 +291,21 @@ def create_router(
     passes: "PassSet | None" = None,
     prefix: str = "",
     api_key: str = "",
+    assessor: "TriggerAssessor | None" = None,
 ) -> APIRouter:
     """Build the DUDE router with injected dependencies. When stt/tts are
     None the voice endpoint refuses visibly; REST capture always works.
-    `passes` defaults to environment resolution (live models with keys,
-    visible stubs without); tests inject an explicit PassSet to stay
+    `passes` and `assessor` default to environment resolution (live models
+    with keys, visible stubs without); tests inject explicit fakes to stay
     hermetic. `api_key` enables X-API-Key auth on every route including
     the websocket (empty = auth off, matching the server.py pattern)."""
     from dude.pipeline.live_passes import resolve_passes
     from dude.pipeline.passes import PassSet
-    from dude.triggers.assess import resolve_assessor
+    from dude.triggers.assess import TriggerAssessor, resolve_assessor  # noqa: F401
 
     case_store = store or CaseStore()
     pass_set = passes if passes is not None else resolve_passes()
-    assessor = resolve_assessor()
+    assessor = assessor if assessor is not None else resolve_assessor()
 
     async def verify_key(request: Request) -> None:
         if api_key and request.headers.get("X-API-Key", "") != api_key:
@@ -257,6 +406,7 @@ def create_router(
             lambda h: (h.archetype.value, h.title.lower()),
         )
         bundle.hypotheses = live_hyps
+        trigger_view = _trigger_view(case_store, case_id, last)
         return {
             "case_id": bundle.case.id,
             "title": bundle.case.title,
@@ -305,10 +455,17 @@ def create_router(
                     "trigger_total": len(case_store.load_triggers()),
                     "adjustment_note": last.adjustment.user_facing_note,
                     "adjustment_effect": last.adjustment.net_effect.value,
+                    # Trigger spec v1.1 R3/R8 display feed — level word,
+                    # labels, and vetted copy from _trigger_view.
+                    **trigger_view["run"],
                 }
                 if last
                 else None
             ),
+            # R5: proposals awaiting the user's confirm/deny, live from
+            # the trigger store (a disposed proposal drops out on refresh).
+            "trigger_proposals": trigger_view["proposals"],
+            "possible_overlap_note": trigger_view["note"],
         }
 
     @router.post("/pom/import-bundled", **guarded)
@@ -345,6 +502,146 @@ def create_router(
         finally:
             temp_path.unlink(missing_ok=True)
         return report.__dict__
+
+    def _dispose_assessment(
+        case_id: str, assessment_id: str, confirm: bool
+    ) -> dict[str, object]:
+        """R5: the user disposes. Confirmation/denial is a SUPERSEDING
+        record (contracts in dude.triggers.contracts), never a flag flip;
+        an already-disposed proposal conflicts instead of double-writing."""
+        from dude.triggers.assess import confirm_assessment, deny_assessment
+
+        tstore = TriggerStore(case_store)
+        tb = tstore.load()
+        assessment = next(
+            (
+                a
+                for a in tb.assessments
+                if a.id == assessment_id and a.case_id == case_id
+            ),
+            None,
+        )
+        if assessment is None:
+            raise HTTPException(
+                status_code=404, detail="Unknown assessment for this case."
+            )
+        if assessment.user_confirmed or assessment.user_denied:
+            raise HTTPException(
+                status_code=409,
+                detail="Assessment already carries a user disposition.",
+            )
+        updated = (confirm_assessment if confirm else deny_assessment)(
+            tstore, assessment
+        )
+        return {
+            "assessment_id": updated.id,
+            "supersedes": assessment.id,
+            "user_confirmed": updated.user_confirmed,
+            "user_denied": updated.user_denied,
+        }
+
+    @router.post(
+        "/cases/{case_id}/assessments/{assessment_id}/confirm", **guarded
+    )
+    def confirm_trigger_assessment(
+        case_id: str, assessment_id: str
+    ) -> dict[str, object]:
+        return _dispose_assessment(case_id, assessment_id, confirm=True)
+
+    @router.post("/cases/{case_id}/assessments/{assessment_id}/deny", **guarded)
+    def deny_trigger_assessment(
+        case_id: str, assessment_id: str
+    ) -> dict[str, object]:
+        return _dispose_assessment(case_id, assessment_id, confirm=False)
+
+    @router.get("/triggers/families", **guarded)
+    def trigger_families() -> list[dict[str, object]]:
+        """Lab family list (v1.1 R6c): label, status word, calibration
+        tag, feature descriptions, and evidence SOURCE TYPES with counts.
+        Intensity scores and raw_response_text never leave the store on
+        this surface — the fire-rate caveat renders as the vetted template
+        string, never as a rate."""
+        from dude.triggers.assess import FIRE_RATE_CEILING, fire_rates
+
+        tb = TriggerStore(case_store).load()
+        rates = fire_rates(tb.assessments)
+        by_id = {f.id: f for f in tb.families}
+        listing: list[dict[str, object]] = []
+        for profile in tb.profiles_for(DEFAULT_USER_ID):
+            family = by_id.get(profile.trigger_family_id)
+            if family is None:
+                continue
+            listing.append(
+                {
+                    "slug": family.slug,
+                    "label": family.label,
+                    "description": family.description,
+                    "status": profile.status.value,
+                    "calibration": profile.calibration.value,
+                    "fire_rate_caveat": (
+                        distortion.render_low_diagnostic(family.label)
+                        if rates.get(family.slug, 0.0)
+                        > FIRE_RATE_CEILING
+                        else ""
+                    ),
+                    "features": [
+                        {
+                            "slug": feature.feature_slug,
+                            "description": feature.description,
+                            "feature_type": feature.feature_type.value,
+                        }
+                        for feature in family.features
+                    ],
+                    "evidence_sources": _evidence_source_counts(tb, family.slug),
+                }
+            )
+        return listing
+
+    @router.get("/triggers/calibration/pending", **guarded)
+    def calibration_pending() -> list[dict[str, object]]:
+        return _pending_units(TriggerStore(case_store).load())
+
+    @router.post("/triggers/calibration", **guarded)
+    def calibration_answer(request: CalibrationAnswerRequest) -> dict[str, object]:
+        """One Lab rating -> a TriggerCalibrationResponse. The backend
+        stamps state_at_capture and the declared scale (R6f/§13);
+        out-of-range and crisis quarantine are computed by the contract,
+        never trusted from the caller."""
+        from dude.triggers.contracts import (
+            CaptureState,
+            TriggerCalibrationResponse,
+        )
+
+        tstore = TriggerStore(case_store)
+        prompt = next(
+            (p for p in tstore.load().prompts if p.id == request.prompt_id), None
+        )
+        if prompt is None:
+            raise HTTPException(
+                status_code=404, detail="Unknown calibration prompt."
+            )
+        response = TriggerCalibrationResponse(
+            user_id=DEFAULT_USER_ID,
+            prompt_id=prompt.id,
+            session_id=_lab_session_id(),
+            raw_score=request.raw_score,
+            declared_scale_min=LAB_SCALE_MIN,
+            declared_scale_max=LAB_SCALE_MAX,
+            raw_response_text=(
+                request.raw_response_text
+                or f"Rated {request.raw_score} on the Lab "
+                f"{LAB_SCALE_MIN}-{LAB_SCALE_MAX} scale."
+            ),
+            state_at_capture=CaptureState(
+                crisis_flag_active=_recent_crisis(case_store)
+            ),
+        )
+        tstore.append(response)
+        return {
+            "response_id": response.id,
+            "out_of_range": response.out_of_range,
+            "quarantined": response.quarantined,
+        }
 
     @router.post("/cases/{case_id}/capture", **guarded)
     def rest_capture(case_id: str, request: CaptureRequest) -> dict[str, object]:
@@ -422,15 +719,19 @@ def create_app(
     stt: SpeechToText | None = None,
     tts: TextToSpeech | None = None,
     passes: "PassSet | None" = None,
+    assessor: "TriggerAssessor | None" = None,
 ) -> FastAPI:
     """Standalone DUDE app (tests, single-service deployment). The shared
     server (server.py) mounts create_router() under /dude with the
     repo-wide API key instead."""
     from dude.pipeline.passes import PassSet  # noqa: F401  (type reference)
+    from dude.triggers.assess import TriggerAssessor  # noqa: F401  (type ref)
 
     app = FastAPI(title="DUDE", version="0.2.0")
     app.include_router(
-        create_router(store=store, stt=stt, tts=tts, passes=passes)
+        create_router(
+            store=store, stt=stt, tts=tts, passes=passes, assessor=assessor
+        )
     )
     return app
 

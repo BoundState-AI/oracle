@@ -100,21 +100,45 @@ export interface Hypothesis {
   attacks: AdversaryAttack[];
 }
 
-/** How PTSD-overlap adjusted the run: not at all, widened, or flagged. */
+/** How trigger overlap adjusted the run: not at all, widened, or flagged. */
 export type AdjustmentEffect = "none" | "widen" | "attend";
+
+/**
+ * The single confirmed-family overlap statistic (trigger spec v1.1 R8):
+ * a LEVEL WORD, never a count and never a score.
+ */
+export type OverlapLevel = "none" | "low" | "moderate" | "high";
 
 export interface LastRun {
   mode: AnalysisMode;
   summary: string;
   crisis_active: boolean;
   refusals: string[];
-  /** Known-pattern names that matched this case (backend copy, verbatim). */
+  /** Matched pattern names that fed the adjustment (backend copy, verbatim). */
   trigger_matches: string[];
-  /** How many known patterns were checked — the M in "N of M". */
+  /** How many legacy patterns were checked (kept for contract mirroring). */
   trigger_total: number;
   /** Backend note on what the overlap did to the analysis — verbatim. */
   adjustment_note: string;
   adjustment_effect: AdjustmentEffect;
+  /** The run's confirmed-family overlap level (v1.1 R8) — a band word. */
+  trigger_overlap: OverlapLevel;
+  /** De-identified labels of the confirmed families behind the level. */
+  overlap_labels: string[];
+  /**
+   * Vetted distortion copy (v1.1 R3), rendered VERBATIM. The backend
+   * serves it empty below moderate overlap and always empty in crisis.
+   */
+  distortion_block: string;
+  /** Exact vetted no-match copy (R3 mirrored invariant) — verbatim. */
+  no_match_copy: string;
+}
+
+/** A model-assessed trigger proposal awaiting the user's confirm/deny (R5). */
+export interface TriggerProposal {
+  assessment_id: string;
+  /** De-identified family label — backend copy, verbatim. Never a score. */
+  label: string;
 }
 
 /** Full case state from GET /cases/{id} — Reality + Models + last run. */
@@ -127,6 +151,50 @@ export interface CaseDetail {
   unknown: UnknownStatement[];
   hypotheses: Hypothesis[];
   last_run: LastRun | null;
+  /** Proposals still awaiting user disposition — live store state. */
+  trigger_proposals: TriggerProposal[];
+  /** Vetted "possible overlap" template copy — verbatim, "" when none. */
+  possible_overlap_note: string;
+}
+
+/** One trigger-family feature shape for the Lab's "why" (descriptions only). */
+export interface TriggerFeatureView {
+  slug: string;
+  description: string;
+  feature_type: string;
+}
+
+/** Evidence provenance for the Lab's "why": SOURCE TYPES with counts —
+ * never response text, never scores (v1.1 R6). */
+export interface EvidenceSourceCount {
+  source_type: string;
+  count: number;
+}
+
+export interface TriggerFamilyView {
+  slug: string;
+  label: string;
+  description: string;
+  /** Profile status word (candidate / self_report_supported / ...). */
+  status: string;
+  /** WIDEN/ATTEND calibration tag word. */
+  calibration: string;
+  /** Vetted low-diagnostic caveat (R8) — verbatim, "" when none. */
+  fire_rate_caveat: string;
+  features: TriggerFeatureView[];
+  evidence_sources: EvidenceSourceCount[];
+}
+
+export interface CalibrationPromptView {
+  prompt_id: string;
+  text: string;
+}
+
+/** One rating unit: a single scenario, or a matched pair (two scenarios). */
+export interface CalibrationUnit {
+  kind: "single" | "pair";
+  pair_id: string | null;
+  prompts: CalibrationPromptView[];
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -167,3 +235,34 @@ export const analyzeCase = (caseId: string) =>
 
 export const fetchCaseDetail = (caseId: string) =>
   request<CaseDetail>(`/cases/${encodeURIComponent(caseId)}`);
+
+/** R5 disposition — confirmation supersedes the proposal record with
+ * user_confirmed=true on the backend; never a flag flip. */
+const disposeAssessment = (caseId: string, assessmentId: string, verb: string) =>
+  request<{ assessment_id: string }>(
+    `/cases/${encodeURIComponent(caseId)}/assessments/${encodeURIComponent(
+      assessmentId
+    )}/${verb}`,
+    { method: "POST" }
+  );
+
+export const confirmAssessment = (caseId: string, assessmentId: string) =>
+  disposeAssessment(caseId, assessmentId, "confirm");
+
+export const denyAssessment = (caseId: string, assessmentId: string) =>
+  disposeAssessment(caseId, assessmentId, "deny");
+
+export const fetchTriggerFamilies = () =>
+  request<TriggerFamilyView[]>("/triggers/families");
+
+export const fetchPendingCalibration = () =>
+  request<CalibrationUnit[]>("/triggers/calibration/pending");
+
+/** POST one Lab rating. The backend stamps the declared scale, session,
+ * and state_at_capture — the client sends only the prompt and the score. */
+export const submitCalibration = (promptId: string, rawScore: number) =>
+  request<{ response_id: string }>("/triggers/calibration", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt_id: promptId, raw_score: rawScore }),
+  });

@@ -35,6 +35,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { CalibrationLab } from "@/components/dude/CalibrationLab";
 import { HoldToTalkButton } from "@/components/dude/HoldToTalkButton";
 import { RealityCheck } from "@/components/dude/RealityCheck";
 import {
@@ -278,11 +279,20 @@ export function CaseWorkspace({ caseId }: { caseId: string }) {
           </button>
         </section>
 
-        {/* PRIMARY view — "PTSD or real?" answered in labeled rows. */}
-        <RealityCheck detail={detail} analysis={analysis} />
+        {/* PRIMARY view — "trigger or real?" answered in labeled rows.
+            Proposal confirm/deny writes to the store, so the card asks
+            for a detail refresh after each disposition. */}
+        <RealityCheck
+          detail={detail}
+          analysis={analysis}
+          onDetailChanged={() => void refreshDetail()}
+        />
 
         {/* SECONDARY — the epistemology, collapsed by default. */}
         <SausageSection caseId={caseId} detail={detail} timeline={timeline} />
+
+        {/* Lab: Trigger Calibration (spec v1 §8) — a sibling toggle. */}
+        <CalibrationLab />
       </main>
     </div>
   );
