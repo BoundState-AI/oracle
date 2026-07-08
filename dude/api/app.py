@@ -152,9 +152,11 @@ def create_router(
     the websocket (empty = auth off, matching the server.py pattern)."""
     from dude.pipeline.live_passes import resolve_passes
     from dude.pipeline.passes import PassSet
+    from dude.triggers.assess import resolve_assessor
 
     case_store = store or CaseStore()
     pass_set = passes if passes is not None else resolve_passes()
+    assessor = resolve_assessor()
 
     async def verify_key(request: Request) -> None:
         if api_key and request.headers.get("X-API-Key", "") != api_key:
@@ -316,6 +318,34 @@ def create_router(
             raise HTTPException(status_code=404, detail="Bundled POM not present.")
         return result
 
+    @router.post("/triggers/seed", **guarded)
+    async def trigger_seed(request: Request) -> dict[str, object]:
+        """Import the calibration source (git-excluded per trigger spec
+        v1.1 R6) into this deployment's trigger store. The full-fidelity
+        markdown arrives as the request body over the authed channel —
+        it never ships in the build image. Idempotent by family slug."""
+        import tempfile
+        from pathlib import Path as _Path
+
+        from dude.triggers.seed import SeedError, import_seed
+        from dude.triggers.store import TriggerStore
+
+        body = (await request.body()).decode("utf-8")
+        if "TRIGGER" not in body.upper():
+            raise HTTPException(status_code=422, detail="Not a calibration source.")
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".md", delete=False, encoding="utf-8"
+        ) as handle:
+            handle.write(body)
+            temp_path = _Path(handle.name)
+        try:
+            report = import_seed(TriggerStore(case_store), source_path=temp_path)
+        except SeedError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        finally:
+            temp_path.unlink(missing_ok=True)
+        return report.__dict__
+
     @router.post("/cases/{case_id}/capture", **guarded)
     def rest_capture(case_id: str, request: CaptureRequest) -> dict[str, object]:
         try:
@@ -327,7 +357,7 @@ def create_router(
     @router.post("/cases/{case_id}/analyze", **guarded)
     def rest_analyze(case_id: str) -> dict[str, object]:
         try:
-            result = analyze(case_store, case_id, passes=pass_set)
+            result = analyze(case_store, case_id, passes=pass_set, assessor=assessor)
         except StoreError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {

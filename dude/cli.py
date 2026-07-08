@@ -235,8 +235,11 @@ def _cmd_trigger(store: CaseStore, args: argparse.Namespace) -> int:
 
 def _cmd_analyze(store: CaseStore, args: argparse.Namespace) -> int:
     from dude.pipeline.live_passes import resolve_passes
+    from dude.triggers.assess import resolve_assessor
 
-    result = analyze(store, args.case_id, passes=resolve_passes())
+    result = analyze(
+        store, args.case_id, passes=resolve_passes(), assessor=resolve_assessor()
+    )
     if result.served_prior:
         from dude.core.loop import mode_message
         from dude.data import GateMode

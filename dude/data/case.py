@@ -118,6 +118,10 @@ class AnalysisRun(DudeModel):
     deltas: list[HypothesisDelta] = Field(default_factory=list)
     cumulative_patterns: list[CumulativePattern] = Field(default_factory=list)
     trigger_matches: list[TriggerMatch] = Field(default_factory=list)
+    # The single overlap statistic (trigger spec v1.1 R8/R9), stored as
+    # the OverlapLevel value. A plain str keeps dude.data free of any
+    # import from dude.triggers (which imports dude.data).
+    trigger_overlap: str = "none"
     adjustment: ConfidenceAdjustment = Field(default_factory=ConfidenceAdjustment)
     refusals: list[Refusal] = Field(default_factory=list)
     user_facing_summary: str = ""
