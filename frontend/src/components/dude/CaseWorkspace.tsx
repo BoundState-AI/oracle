@@ -50,6 +50,7 @@ import {
   fetchCases,
   type AnalyzeResponse,
   type CaseDetail,
+  type InstantRead,
   type SafetyPayload,
 } from "@/lib/dudeApi";
 import { rememberLastMode } from "@/lib/dudeEvidenceState";
@@ -82,6 +83,9 @@ export function CaseWorkspace({ caseId }: { caseId: string }) {
   const [text, setText] = useState("");
   const [capturing, setCapturing] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
+  // The capture response's deterministic first read — shown until the
+  // next analyze replaces it with the full Reality Check data.
+  const [instantRead, setInstantRead] = useState<InstantRead | null>(null);
   const nextEntryId = useRef(0);
   const textAreaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -138,6 +142,13 @@ export function CaseWorkspace({ caseId }: { caseId: string }) {
             flags: frame.flags,
             resources: frame.resources,
           });
+          // A crisis clears any earlier first read — crisis owns the
+          // moment (the backend also stops sending instant_read frames).
+          if (frame.crisis) setInstantRead(null);
+          break;
+        case "instant_read":
+          // Deterministic first read on the spoken path, verbatim fields.
+          setInstantRead(frame);
           break;
         case "reply":
           appendEntry("reply", frame.text);
@@ -165,6 +176,9 @@ export function CaseWorkspace({ caseId }: { caseId: string }) {
     try {
       const response = await captureText(caseId, trimmed);
       setText("");
+      // Instant first read, when the backend sent one. Absent on crisis
+      // (crisis owns the moment) — clearing keeps no stale read around.
+      setInstantRead(response.instant_read ?? null);
       // The backend acknowledgement message renders verbatim.
       appendEntry("capture", response.message);
       if (response.crisis || response.flags.length > 0) {
@@ -190,6 +204,8 @@ export function CaseWorkspace({ caseId }: { caseId: string }) {
     try {
       const result = await analyzeCase(caseId);
       setAnalysis(result);
+      // The full Reality Check supersedes the capture-time first read.
+      setInstantRead(null);
       // Feed the home screen's evidence-state line for this case.
       rememberLastMode(caseId, result.mode);
       // Hypotheses/bands may have moved — refresh Reality + Models.
@@ -279,6 +295,11 @@ export function CaseWorkspace({ caseId }: { caseId: string }) {
           </button>
         </section>
 
+        {/* Instant first read from the last capture — deterministic cue
+            resemblance, visually lighter than the Reality Check below.
+            Cleared once the next analyze delivers the full picture. */}
+        <InstantReadCard read={instantRead} />
+
         {/* PRIMARY view — "trigger or real?" answered in labeled rows.
             Proposal confirm/deny writes to the store, so the card asks
             for a detail refresh after each disposition. */}
@@ -295,6 +316,43 @@ export function CaseWorkspace({ caseId }: { caseId: string }) {
         <CalibrationLab />
       </main>
     </div>
+  );
+}
+
+/**
+ * The capture-time first read: the backend's deterministic prefilter
+ * result, rendered VERBATIM (hint band word, de-identified candidate
+ * labels, vetted possibility/no-match note, exact evidence-effect line).
+ * Deliberately lighter chrome than the Reality Check card — this is a
+ * first read from cue resemblance, not the analysis, and the one chrome
+ * caption says exactly that.
+ */
+function InstantReadCard({ read }: { read: InstantRead | null }) {
+  if (!read) return null;
+  return (
+    <section className="rounded-2xl border border-border/60 bg-card/40 px-5 py-4">
+      <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-muted-foreground">
+        Instant read — cue resemblance, not the analysis
+      </p>
+      {/* The backend hint word, verbatim (band words are the contract). */}
+      <p className="mt-1 text-sm font-semibold text-foreground">
+        Possible overlap: {read.overlap_hint.toUpperCase()}
+      </p>
+      {read.candidate_labels.length > 0 && (
+        /* De-identified candidate family labels — backend copy, verbatim. */
+        <p className="mt-1 text-xs leading-5 text-muted-foreground">
+          {read.candidate_labels.join(" · ")}
+        </p>
+      )}
+      {/* Vetted template note (possible-overlap or no-match) — verbatim. */}
+      <p className="mt-1 whitespace-pre-wrap text-xs leading-5 text-muted-foreground">
+        {read.note}
+      </p>
+      {/* The exact evidence-effect line — verbatim, always shown. */}
+      <p className="mt-1 text-xs leading-5 text-muted-foreground">
+        {read.verdict_line}
+      </p>
+    </section>
   );
 }
 

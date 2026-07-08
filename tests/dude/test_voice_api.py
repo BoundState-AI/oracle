@@ -96,6 +96,59 @@ class TestVoiceRoundTrip:
         # SafetyEvent persisted through the shared capture path.
         assert store.load_case(case_id).safety_events
 
+    def test_benign_utterance_with_cue_gets_instant_read_frame(
+        self, tmp_path
+    ) -> None:
+        """The spoken path gets the same deterministic first read as REST
+        capture: an instant_read frame between transcript and reply —
+        candidates only, vetted copy, no scores."""
+        from dude.triggers.contracts import (
+            DEFAULT_USER_ID,
+            FeatureType,
+            PersonalTriggerProfile,
+            ProvenanceClass,
+            TriggerFamily,
+            TriggerFamilyStatus,
+            TriggerFeature,
+        )
+        from dude.triggers.store import TriggerStore
+
+        client, store, case_id = _client(tmp_path, FakeSTT(BENIGN_UTTERANCE))
+        tstore = TriggerStore(store)
+        family = TriggerFamily(
+            slug="disclosure_pressure",
+            label="Disclosure pressure",
+            description="Pressure to disclose work before it is ready.",
+            features=[
+                TriggerFeature(
+                    feature_slug="disclosure_pushed",
+                    description="Someone pushes for public disclosure.",
+                    feature_type=FeatureType.REQUIRED,
+                    provenance_class=ProvenanceClass.INTERPERSONAL_PERFORMED,
+                )
+            ],
+            prefilter_cues=["open source"],
+        )
+        tstore.append(family)
+        tstore.append(
+            PersonalTriggerProfile(
+                user_id=DEFAULT_USER_ID,
+                trigger_family_id=family.id,
+                family_slug=family.slug,
+                status=TriggerFamilyStatus.SELF_REPORT_SUPPORTED,
+            )
+        )
+        with client.websocket_connect(f"/cases/{case_id}/voice") as ws:
+            _speak(ws)
+            transcript = ws.receive_json()
+            instant = ws.receive_json()
+            reply = ws.receive_json()
+        assert transcript["type"] == "transcript"
+        assert instant["type"] == "instant_read"
+        assert instant["overlap_hint"] == "low"
+        assert instant["candidate_labels"] == ["Disclosure pressure"]
+        assert reply["type"] == "reply"
+
     def test_missing_stt_refuses_visibly(self, tmp_path) -> None:
         client, _store, case_id = _client(tmp_path, stt=None)
         with client.websocket_connect(f"/cases/{case_id}/voice") as ws:

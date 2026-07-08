@@ -145,6 +145,132 @@ class TestCaseDetailTriggerView:
         assert detail["trigger_proposals"] == []
 
 
+class TestInstantRead:
+    """Capture-time deterministic first read: candidates from the
+    pre-filter as an R8 hint word plus vetted possibility copy — present
+    on benign captures, omitted entirely on crisis (R2), never scores."""
+
+    def test_benign_capture_with_matching_cue_gets_instant_read(
+        self, tmp_path
+    ) -> None:
+        client, store, case_id = _client(tmp_path)
+        _seed_family(store)
+        body = client.post(
+            f"/cases/{case_id}/capture", json={"text": CASE_TEXT}
+        ).json()
+        instant = body["instant_read"]
+        # Sentinel: exactly these keys — no scores, no calibration text.
+        assert set(instant) == {
+            "overlap_hint",
+            "candidate_labels",
+            "note",
+            "verdict_line",
+        }
+        assert instant["overlap_hint"] == "low"  # one candidate (R8)
+        assert instant["candidate_labels"] == [FAMILY_LABEL]
+        # Possibility framing only — candidates are resemblance, never
+        # confirmed matches (R5): the exact vetted template.
+        assert instant["note"] == distortion.render_possible_overlap(
+            [FAMILY_LABEL]
+        )
+        assert (
+            instant["verdict_line"]
+            == "Trigger overlap does not reduce the weight of observed evidence."
+        )
+
+    def test_benign_capture_without_cues_gets_no_match_copy(self, tmp_path) -> None:
+        client, store, case_id = _client(tmp_path)
+        _seed_family(store)
+        body = client.post(
+            f"/cases/{case_id}/capture", json={"text": "Quiet day, nothing new."}
+        ).json()
+        instant = body["instant_read"]
+        assert instant["overlap_hint"] == "none"
+        assert instant["candidate_labels"] == []
+        # R3 mirrored invariant: the exact vetted no-match copy.
+        assert instant["note"] == distortion.NO_MATCH_COPY
+
+    def test_crisis_capture_omits_instant_read_entirely(self, tmp_path) -> None:
+        """R2: crisis owns the moment — even with a matching cue, the
+        payload carries no instant_read key at all."""
+        client, store, case_id = _client(tmp_path)
+        tstore, _family = _seed_family(store)
+        # A second family whose cue matches the crisis utterance ("leave"),
+        # proving omission is the crisis rule, not a missing candidate.
+        cued = TriggerFamily(
+            slug="departure_threat",
+            label="Threats tied to leaving",
+            description="Escalation framed around departure.",
+            features=[
+                TriggerFeature(
+                    feature_slug="departure_framed",
+                    description="The threat is conditioned on leaving.",
+                    feature_type=FeatureType.REQUIRED,
+                    provenance_class=ProvenanceClass.INTERPERSONAL_PERFORMED,
+                )
+            ],
+            prefilter_cues=["leave"],
+        )
+        tstore.append(cued)
+        tstore.append(
+            PersonalTriggerProfile(
+                user_id=DEFAULT_USER_ID,
+                trigger_family_id=cued.id,
+                family_slug=cued.slug,
+                status=TriggerFamilyStatus.SELF_REPORT_SUPPORTED,
+            )
+        )
+        body = client.post(
+            f"/cases/{case_id}/capture", json={"text": CRISIS_UTTERANCE}
+        ).json()
+        assert body["crisis"] is True
+        assert "instant_read" not in body
+
+    def test_no_seeded_families_means_no_instant_read(self, tmp_path) -> None:
+        """With nothing calibrated, 'no calibrated pattern matched' would
+        overclaim — the object is omitted, not faked."""
+        client, _store, case_id = _client(tmp_path)
+        body = client.post(
+            f"/cases/{case_id}/capture", json={"text": CASE_TEXT}
+        ).json()
+        assert "instant_read" not in body
+
+    def test_copy_passes_banned_phrase_floor_and_leaks_no_scores(
+        self, tmp_path
+    ) -> None:
+        from dude.core.loop import validate_copy
+
+        client, store, case_id = _client(tmp_path)
+        tstore, family = _seed_family(store)
+        prompt = CalibrationPrompt(
+            prompt_slug="scope_scenario",
+            text="An audit expands with no stated scope.",
+            family_slug=family.slug,
+        )
+        tstore.append(prompt)
+        tstore.append(
+            TriggerCalibrationResponse(
+                user_id=DEFAULT_USER_ID,
+                prompt_id=prompt.id,
+                session_id="round_1",
+                raw_score=4,
+                declared_scale_min=0,
+                declared_scale_max=5,
+                raw_response_text="SENTINEL-RAW-ANSWER",
+            )
+        )
+        response = client.post(
+            f"/cases/{case_id}/capture", json={"text": CASE_TEXT}
+        )
+        instant = response.json()["instant_read"]
+        validate_copy(instant["note"])  # must not raise
+        validate_copy(instant["verdict_line"])
+        # R6: no intensity scores and no calibration text on this surface.
+        assert "SENTINEL-RAW-ANSWER" not in response.text
+        assert "raw_score" not in response.text
+        assert "raw_response_text" not in response.text
+
+
 class TestAssessmentDisposition:
     def test_confirm_supersedes_with_user_confirmed(self, tmp_path) -> None:
         client, store, case_id = _client(tmp_path)

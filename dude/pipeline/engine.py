@@ -44,6 +44,7 @@ __psychologically_critical__: bool = True
 
 import logging
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -62,8 +63,15 @@ from dude.data import (
     SourceType,
 )
 from dude.data.actions import ActionEvaluation, ActionRecommendation
-from dude.pipeline.passes import PassSet
-from dude.store.jsonl import CaseBundle, CaseStore
+from dude.pipeline.passes import (
+    AdversaryPass,
+    HypothesisPass,
+    PassOutput,
+    PassSet,
+    SeparatorPass,
+    UnknownsPass,
+)
+from dude.store.jsonl import CaseBundle, CaseStore, StoreError
 from dude.triggers import assess as trigger_assess
 from dude.triggers import distortion
 from dude.triggers.assess import StubAssessor, TriggerAssessor, TriggerLayerResult
@@ -232,24 +240,68 @@ def _run_model_passes(
 ) -> tuple[CaseBundle, list[Refusal]]:
     """Run the four model passes, persist their output, and reload so
     pass output participates downstream (annotation attachment is append
-    + reload — reconcile() is bookkeeping, not judgment, I10)."""
+    + reload — reconcile() is bookkeeping, not judgment, I10).
+
+    Latency: the three builder passes are independent reads of the same
+    pre-pass evidence snapshot, so they run CONCURRENTLY; wall time drops
+    from the sum of the passes to max(builders) + adversary. The
+    adversary runs AFTER an append+reload so it sees the hypotheses
+    minted this run. Store appends stay on the main thread and happen in
+    the fixed builder order — the append-only JSONL store is not proven
+    thread-safe, and the stream must stay deterministic."""
     refusals: list[Refusal] = []
-    for model_pass in (
-        passes.separator,
-        passes.unknowns,
-        passes.hypotheses,
-        passes.adversary,
-    ):
-        output = model_pass.run(bundle)
+    builders = (passes.separator, passes.unknowns, passes.hypotheses)
+    with ThreadPoolExecutor(max_workers=len(builders)) as pool:
+        futures = [pool.submit(_run_pass_fail_closed, p, bundle) for p in builders]
+        outputs = [future.result() for future in futures]
+    for output in outputs:
         refusals.extend(output.refusals)
-        for record in (
-            output.observations
-            + output.interpretations
-            + output.unknowns
-            + output.hypotheses
-        ):
-            store.append(record)
+        _persist_pass_output(store, output)
+    reloaded = store.load_case(bundle.case.id)
+    adversary_output = _run_pass_fail_closed(passes.adversary, reloaded)
+    refusals.extend(adversary_output.refusals)
+    _persist_pass_output(store, adversary_output)
     return store.load_case(bundle.case.id), refusals
+
+
+def _run_pass_fail_closed(
+    model_pass: SeparatorPass | UnknownsPass | HypothesisPass | AdversaryPass,
+    bundle: CaseBundle,
+) -> PassOutput:
+    """One pass, fail closed: an unexpected exception is logged in full
+    and becomes that pass's visible refusal — one broken provider must
+    never crash the run or discard the sibling passes' completed work.
+    StoreError re-raises untouched (module never-suppress rule: a failed
+    write aborts the run loudly; passes themselves never touch the store)."""
+    try:
+        return model_pass.run(bundle)
+    except StoreError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — WHY broad: any pass crash
+        # must degrade to a refusal, exactly like a ModelCallError would.
+        name = getattr(model_pass, "pass_name", type(model_pass).__name__)
+        LOGGER.exception("Pass %s raised; recording a refusal", name)
+        return PassOutput(
+            refusals=[
+                Refusal(
+                    pass_name=name,
+                    reason=f"Pass raised {type(exc).__name__}: {exc}",
+                )
+            ]
+        )
+
+
+def _persist_pass_output(store: CaseStore, output: PassOutput) -> None:
+    """Serial, main-thread persistence of one pass's records (append
+    order within a pass is the contract order: observations,
+    interpretations, unknowns, hypotheses — unchanged)."""
+    for record in (
+        output.observations
+        + output.interpretations
+        + output.unknowns
+        + output.hypotheses
+    ):
+        store.append(record)
 
 
 def _deltas(bundle: CaseBundle, prior: AnalysisRun | None) -> list[HypothesisDelta]:

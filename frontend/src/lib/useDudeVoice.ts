@@ -23,11 +23,14 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import type { SafetyPayload } from "@/lib/dudeApi";
+import type { InstantRead, SafetyPayload } from "@/lib/dudeApi";
 
 export type VoiceFrame =
   | { type: "transcript"; text: string; capture_id?: string }
   | ({ type: "safety" } & SafetyPayload)
+  // Deterministic capture-time first read — never sent on a crisis
+  // utterance (the backend omits it; crisis owns the moment).
+  | ({ type: "instant_read" } & InstantRead)
   | { type: "reply"; text: string }
   | { type: "refusal"; reason: string }
   | { type: "audio"; wav_base64: string }

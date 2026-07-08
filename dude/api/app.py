@@ -11,6 +11,10 @@ Voice websocket protocol (/cases/{case_id}/voice):
   server -> client:  {"type": "transcript", "text": ...}
                      {"type": "safety", "crisis": bool, "message": ...,
                       "resources": [...]}          — only when flags fire
+                     {"type": "instant_read", "overlap_hint": ...,
+                      "candidate_labels": [...], "note": ...,
+                      "verdict_line": ...}         — deterministic first
+                                                     read; never on crisis
                      {"type": "reply", "text": ...} — evidence-state copy
                      binary frame                   — WAV of the reply,
                                                       only if TTS available
@@ -54,6 +58,7 @@ from fastapi import (
 )
 from pydantic import BaseModel, ConfigDict
 
+from dude.core.loop import validate_copy
 from dude.data import AnalysisRun, Case, SafetyScanResult, SourceType
 from dude.pipeline.engine import analyze, capture
 from dude.store.jsonl import CaseStore, StoreError
@@ -64,6 +69,7 @@ from dude.triggers.contracts import (
     CalibrationPrompt,
     EvidenceSourceType,
     OverlapLevel,
+    TriggerFamilyStatus,
 )
 from dude.triggers.store import TriggerBundle, TriggerStore
 from dude.voice.stt import SpeechToText, VoiceUnavailable
@@ -186,6 +192,54 @@ def _trigger_view(
             for a, family in proposals
         ],
         "note": distortion.render_possible_overlap(labels) if labels else "",
+    }
+
+
+def _instant_read(
+    case_store: CaseStore, text: str, scan: SafetyScanResult
+) -> dict[str, object] | None:
+    """Deterministic first read at capture (founder brief: "PTSD trigger
+    or warranted?" needs a first answer INSTANTLY, not after the model
+    passes). Runs ONLY the substring pre-filter (trigger_assess.prefilter)
+    over the seeded families — no model call, sub-second — and is honest
+    about what that is: cue RESEMBLANCE nominating CANDIDATES, never
+    confirmed matches ("possible" copy only, R5). Vetted template copy
+    exclusively, validated against the banned-phrase floor; never scores,
+    never calibration text (R6). Returns None when the scan is a crisis
+    (R2 — crisis owns the moment) or when no families are seeded (with
+    nothing calibrated, "no calibrated pattern matched" would overclaim).
+    """
+    if scan.crisis:
+        return None
+    tb = TriggerStore(case_store).load()
+    by_id = {f.id: f for f in tb.families}
+    families = [
+        by_id[p.trigger_family_id]
+        for p in tb.profiles_for(DEFAULT_USER_ID)
+        if p.status is not TriggerFamilyStatus.RETIRED
+        and p.trigger_family_id in by_id
+    ]
+    if not families:
+        return None
+    candidates = trigger_assess.prefilter(families, text)
+    labels = sorted({f.label for f in candidates})
+    # WHY overlap_level with empty rates: the hint word reuses the exact
+    # R8 count thresholds (0=none / 1=low / 2=moderate / >=3=high) over
+    # the CANDIDATE count; fire-rate discounting applies to confirmed
+    # matches only, so rates stay empty here.
+    level, _counted, _low_diag = trigger_assess.overlap_level(
+        [f.slug for f in candidates], {}
+    )
+    note = (
+        distortion.render_possible_overlap(labels)
+        if labels
+        else distortion.NO_MATCH_COPY
+    )
+    return {
+        "overlap_hint": level.value,
+        "candidate_labels": labels,
+        "note": validate_copy(note),
+        "verdict_line": validate_copy(distortion.EVIDENCE_EFFECT_COPY),
     }
 
 
@@ -656,10 +710,23 @@ def create_router(
             record, scan = capture(case_store, case_id, request.text)
         except StoreError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return {"capture_id": record.id, **_safety_payload(scan)}
+        payload: dict[str, object] = {
+            "capture_id": record.id,
+            **_safety_payload(scan),
+        }
+        # Instant deterministic read (candidates, not matches); omitted
+        # entirely on a crisis scan — crisis owns the moment (R2).
+        instant = _instant_read(case_store, request.text, scan)
+        if instant is not None:
+            payload["instant_read"] = instant
+        return payload
 
     @router.post("/cases/{case_id}/analyze", **guarded)
     def rest_analyze(case_id: str) -> dict[str, object]:
+        # WHY a sync def: Starlette runs it on a worker thread and never
+        # cancels it on client disconnect, so a long model run always
+        # persists its AnalysisRun (analyze() appends before returning)
+        # even if the browser or the 120s frontend proxy gives up first.
         try:
             result = analyze(case_store, case_id, passes=pass_set, assessor=assessor)
         except StoreError as exc:
@@ -783,6 +850,11 @@ async def _finish_utterance(
     )
     if scan.flags:
         await websocket.send_json({"type": "safety", **_safety_payload(scan)})
+    # Instant deterministic read on the spoken path too — None on a
+    # crisis scan (R2), so no frame competes with the resources above.
+    instant = _instant_read(store, transcript, scan)
+    if instant is not None:
+        await websocket.send_json({"type": "instant_read", **instant})
     # WHY the crisis message IS the spoken reply: on a crisis utterance the
     # only correct voice response is the resources, not capture chrome.
     reply = (

@@ -31,8 +31,31 @@ export interface SafetyPayload {
   resources: SafetyResource[];
 }
 
+/**
+ * Deterministic first read computed at capture time (backend prefilter,
+ * no model call): CANDIDATE cue resemblance, never confirmed matches.
+ * All four fields are backend copy/level words and render VERBATIM —
+ * never scores, never calibration text (trigger spec v1.1 R5/R6).
+ */
+export interface InstantRead {
+  /** R8-threshold hint word over the CANDIDATE count — a band word. */
+  overlap_hint: OverlapLevel;
+  /** De-identified candidate family labels — backend copy, verbatim. */
+  candidate_labels: string[];
+  /** Vetted possible-overlap or no-match template copy — verbatim. */
+  note: string;
+  /** Exact evidence-effect line — verbatim. */
+  verdict_line: string;
+}
+
 export interface CaptureResponse extends SafetyPayload {
   capture_id: string;
+  /**
+   * Present on non-crisis captures when trigger families are seeded;
+   * omitted entirely while a crisis scan fired (R2 — crisis owns the
+   * moment) or when nothing is calibrated.
+   */
+  instant_read?: InstantRead;
 }
 
 export type AnalysisMode =

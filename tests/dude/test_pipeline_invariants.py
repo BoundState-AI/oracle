@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import pytest
 
+import time
+
 from dude.core.loop import validate_copy
 from dude.data import Case, CaseStatus, GateMode, Hypothesis, Interpretation
 from dude.pipeline.engine import analyze, capture
-from dude.pipeline.passes import STUB_REASON
+from dude.pipeline.passes import STUB_REASON, PassOutput, PassSet
 from dude.store.jsonl import CaseStore, StoreError
 
 CRISIS_TEXT = "He said he's going to kill me if I leave."
@@ -111,6 +113,36 @@ class TestHonestStubsAndCopy:
         capture(store, case.id, BENIGN_TEXT)
         analyze(store, case.id)
         assert store.load_case(case.id).case.status is CaseStatus.ACTIVE
+
+
+class SlowExplodingHypotheses:
+    """A concurrent-batch pass that stalls, then dies mid-run — the run
+    must absorb it as a visible refusal, never crash or lose the sibling
+    passes' output."""
+
+    pass_name = "hypotheses"
+
+    def run(self, bundle) -> PassOutput:  # noqa: ARG002
+        time.sleep(0.2)  # outlive the fast sibling stubs before failing
+        raise RuntimeError("provider meltdown")
+
+
+class TestConcurrentPassFailure:
+    def test_failing_concurrent_pass_becomes_its_refusal(self, store, case) -> None:
+        """Fail closed under concurrency: an exception inside one builder
+        pass surfaces as that pass's refusal alongside the others' — the
+        analysis run still persists."""
+        capture(store, case.id, BENIGN_TEXT)
+        result = analyze(
+            store, case.id, passes=PassSet(hypotheses=SlowExplodingHypotheses())
+        )
+        assert not result.served_prior
+        by_pass = {r.pass_name: r.reason for r in result.run.refusals}
+        assert "provider meltdown" in by_pass["hypotheses"]
+        # The sibling stubs still reported their own refusals, and the
+        # run itself persisted despite the mid-batch exception.
+        assert {"separator", "unknowns", "adversary"} <= set(by_pass)
+        assert store.load_case(case.id).analysis_runs[-1].id == result.run.id
 
 
 class TestStoreDiscipline:
