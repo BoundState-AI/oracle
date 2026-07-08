@@ -106,6 +106,19 @@ def import_bundled_pom(case_store: CaseStore) -> dict[str, object] | None:
             pom.append(item)
             imported += 1
     LOGGER.info("Bundled POM import: %d new items", imported)
+
+    # Trigger profile seed (spec v0.1 §8, T1–T7): idempotent by name.
+    triggers_file = sources / "joseph_triggers_v1.json"
+    if triggers_file.exists():
+        from dude.data import TriggerPattern
+
+        existing_names = {t.name for t in case_store.load_triggers()}
+        seeded = 0
+        for raw in _json.loads(triggers_file.read_text(encoding="utf-8")):
+            if raw["name"] not in existing_names:
+                case_store.append_trigger(TriggerPattern.model_validate(raw))
+                seeded += 1
+        LOGGER.info("Trigger profile seed: %d new triggers", seeded)
     return {
         "artifact_sha256": artifact.content_sha256,
         "items_imported": imported,
@@ -284,6 +297,12 @@ def create_router(
                     "summary": last.user_facing_summary,
                     "crisis_active": last.crisis_active,
                     "refusals": [r.pass_name for r in last.refusals],
+                    "trigger_matches": [
+                        m.trigger_name for m in last.trigger_matches
+                    ],
+                    "trigger_total": len(case_store.load_triggers()),
+                    "adjustment_note": last.adjustment.user_facing_note,
+                    "adjustment_effect": last.adjustment.net_effect.value,
                 }
                 if last
                 else None

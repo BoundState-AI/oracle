@@ -1,0 +1,58 @@
+[
+  {
+    "name": "Ambiguity from powerful people",
+    "cues": ["no reply", "didn't reply", "did not reply", "no response", "went quiet", "radio silence", "stopped responding", "hasn't responded"],
+    "calibration": "neutral",
+    "confidence": "user_stated",
+    "user_confirmed": true,
+    "active": true
+  },
+  {
+    "name": "Trusted people suddenly disappearing",
+    "cues": ["disappeared", "stopped talking", "cut me off", "ghosted", "gone quiet"],
+    "calibration": "neutral",
+    "confidence": "user_stated",
+    "user_confirmed": true,
+    "active": true
+  },
+  {
+    "name": "Someone rewriting my motives",
+    "cues": ["smear", "talking about me", "shit talking", "called me a liar", "rumor", "rewrite"],
+    "calibration": "neutral",
+    "confidence": "user_stated",
+    "user_confirmed": true,
+    "active": true
+  },
+  {
+    "name": "Hidden authority",
+    "cues": ["behind the scenes", "backchannel", "back channel", "hidden channel", "someone above"],
+    "calibration": "neutral",
+    "confidence": "user_stated",
+    "user_confirmed": true,
+    "active": true
+  },
+  {
+    "name": "Loss of control over my work",
+    "cues": ["my work", "took credit", "ownership", "commercialize", "MIRA"],
+    "calibration": "neutral",
+    "confidence": "user_stated",
+    "user_confirmed": true,
+    "active": true
+  },
+  {
+    "name": "Institutional silence",
+    "cues": ["NASA", "institutional", "agency", "official channels", "leadership"],
+    "calibration": "historically_accurate",
+    "confidence": "user_stated",
+    "user_confirmed": true,
+    "active": true
+  },
+  {
+    "name": "Being framed as the problem",
+    "cues": ["my fault", "the problem", "pushy", "toxic", "blamed"],
+    "calibration": "neutral",
+    "confidence": "user_stated",
+    "user_confirmed": true,
+    "active": true
+  }
+]
