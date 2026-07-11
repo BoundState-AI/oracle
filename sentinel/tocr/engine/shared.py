@@ -15,9 +15,9 @@ between the diff-based (RuleEngine) and scan-based (ScanEngine) pipelines.
 Spec: BS-SPEC-TOCR-001, Section 2 (Signal Computation)
 """
 
-__safety_critical__: bool = True
-
 from __future__ import annotations
+
+__safety_critical__: bool = True
 
 from typing import TYPE_CHECKING
 

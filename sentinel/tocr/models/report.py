@@ -8,6 +8,11 @@ Version: 1.0.0
 Classification: BoundState Proprietary
 
 Spec: BS-SPEC-TOCR-001-REV1, Sections 6.3, 11
+
+Co-Authored-By: Claude "Beth" <noreply@anthropic.com>
+Co-Authored-By: Dr. Joseph Wilde, BoundState AI
+
+Safety Critical: True
 """
 
 __version__ = "1.0.0"

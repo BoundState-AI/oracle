@@ -11,6 +11,8 @@ Classification: BoundState Proprietary
 
 Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
 Co-Authored-By: Dr. Joseph Wilde, BoundState AI
+
+Safety Critical: True
 """
 
 from __future__ import annotations

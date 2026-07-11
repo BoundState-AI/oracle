@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-SENTINEL-TOCR — Standalone CLI
-Task Order Compliance Review
+Module: SENTINEL-TOCR Standalone CLI
+Purpose: Command-line entry point for Task Order Compliance Review —
+         parses task order revisions and runs review/scan through the
+         TOCR conductor.
 
 Usage:
     # Review two revisions (prior → proposed):
@@ -22,6 +24,11 @@ Usage:
 
 BoundState AI 2026
 Classification: BoundState Proprietary
+
+Co-Authored-By: Claude "Beth" <noreply@anthropic.com>
+Co-Authored-By: Dr. Joseph Wilde, BoundState AI
+
+Safety Critical: True
 """
 
 import argparse

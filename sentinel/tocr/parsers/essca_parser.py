@@ -12,6 +12,11 @@ Handles the specific ESSCA format:
 - Summary of Changes in Table 0
 - Sub-tasks demarcated by 'SubTask Title' paragraph style
 - Structured sections within each sub-task (Description, Skills, etc.)
+
+Co-Authored-By: Claude "Beth" <noreply@anthropic.com>
+Co-Authored-By: Dr. Joseph Wilde, BoundState AI
+
+Safety Critical: True
 """
 
 __version__ = "1.0.0"

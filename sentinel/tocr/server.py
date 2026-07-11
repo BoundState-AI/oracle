@@ -9,6 +9,11 @@ Classification: BoundState Proprietary
 Usage:
     python -m sentinel.tocr.server
     # Then open http://localhost:8099/tocr
+
+Co-Authored-By: Claude "Beth" <noreply@anthropic.com>
+Co-Authored-By: Dr. Joseph Wilde, BoundState AI
+
+Safety Critical: True
 """
 
 import logging
