@@ -194,6 +194,8 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "grok-4.5": 131_072,
     "grok-4.20": 131_072,
     "grok-4": 131_072,
+    "gemini-3.1-pro-preview": 1_048_576,
+    "gemini-3.5-flash": 1_048_576,
     "gemini-2.5-pro": 1_048_576,
     "gemini-2.5-flash": 1_048_576,
 }
@@ -1989,7 +1991,7 @@ def _configured_review_models() -> list[str]:
             ("ORACLE_FRAN_MODEL", "gpt-5.6-terra"),
             ("ORACLE_CODEX_MODEL", "gpt-5.6-terra"),
             ("ORACLE_GROK_MODEL", "grok-4.5"),
-            ("ORACLE_GEMINI_MODEL", "gemini-2.5-pro"),
+            ("ORACLE_GEMINI_MODEL", "gemini-3.5-flash"),
         )
     ]
 

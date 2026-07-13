@@ -517,7 +517,7 @@ ORACLE_ROSTER: dict[str, OracleConfig] = {
         name="Gemini",
         role="domain_context",
         provider="gemini",
-        model=os.environ.get("ORACLE_GEMINI_MODEL", "gemini-2.5-pro"),
+        model=os.environ.get("ORACLE_GEMINI_MODEL", "gemini-3.5-flash"),
         system_prompt=GEMINI_REVIEWER_PROMPT,
         max_tokens=int(os.environ.get("ORACLE_GEMINI_MAX_TOKENS", "8192")),
     ),
@@ -2710,7 +2710,7 @@ Environment variables:
   ORACLE_FRAN_MODEL   — Override Fran model  (default: gpt-5.6-terra)
   ORACLE_CODEX_MODEL  — Override Codex model (default: gpt-5.6-terra)
   ORACLE_GROK_MODEL   — Override Grok model  (default: grok-4.5)
-  ORACLE_GEMINI_MODEL — Override Gemini model (default: gemini-2.5-pro)
+  ORACLE_GEMINI_MODEL — Override Gemini model (default: gemini-3.5-flash)
   ORACLE_SONNET_MODEL — Override Sonnet model (default: claude-sonnet-4-6)
 
 Examples:
