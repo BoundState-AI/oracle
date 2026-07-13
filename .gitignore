@@ -30,6 +30,7 @@ venv/
 oracle_packs/
 oracle_reviews/
 oracle_sessions/
+oracle_builds/
 
 # OS
 .DS_Store

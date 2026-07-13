@@ -15,6 +15,7 @@ import { toast } from "sonner";
 import { OracleChatPanel } from "@/components/OracleChatPanel";
 import { ReviewTab } from "@/components/ReviewTab";
 import { PackLibraryTab } from "@/components/PackLibraryTab";
+import { PipelineTab } from "@/components/PipelineTab";
 import { apiGet, apiPost, normalizeDownloadUrl } from "@/lib/oracleApi";
 import { connectSSE, readLogMessages, startStatusPolling } from "@/lib/oracleSSE";
 import type { Phase, PackSummary } from "@/components/ReviewTab";
@@ -38,7 +39,7 @@ function parsePackParts(parts: string): number[] {
 
 export function OracleWorkspace() {
   /* ---- tab state ---- */
-  const [activeTab, setActiveTab] = useState<"review" | "packs" | "chat">("review");
+  const [activeTab, setActiveTab] = useState<"review" | "packs" | "chat" | "pipeline">("review");
 
   /* ---- review state ---- */
   const [file, setFile] = useState<File | null>(null);
@@ -311,6 +312,17 @@ export function OracleWorkspace() {
             >
               Chat
             </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab("pipeline")}
+              className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
+                activeTab === "pipeline"
+                  ? "bg-primary text-primary-foreground"
+                  : "text-muted-foreground hover:bg-accent hover:text-foreground"
+              }`}
+            >
+              Pipeline
+            </button>
           </div>
         </div>
       </header>
@@ -357,6 +369,8 @@ export function OracleWorkspace() {
                 packsLoading={packsLoading}
               />
             )}
+
+            {activeTab === "pipeline" && <PipelineTab />}
           </div>
         </div>
       </main>

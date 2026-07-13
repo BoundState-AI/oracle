@@ -100,3 +100,48 @@ def test_load_pack_verify_false_skips_integrity_checks(tmp_path):
     pack_data, _ = load_pack(slug, pack_dir, verify=False)
 
     assert pack_data["extra_field"] == "modified"
+
+
+# ---------------------------------------------------------------------------
+# Manifest schema validation tests (Section 4.4)
+# ---------------------------------------------------------------------------
+
+from oracle.pack_validator import validate_manifest, MANIFEST_SCHEMA
+
+
+def test_validate_manifest_accepts_well_formed_manifest():
+    m = {
+        "schema_version": "oracle_packs/v1",
+        "description": "test",
+        "packs": {
+            "foo": {
+                "name": "Foo",
+                "slug": "foo",
+                "file": "foo.json",
+                "schema": "generic",
+                "standard_id": "FOO",
+                "rule_count": 3,
+                "status": "draft",
+            }
+        },
+    }
+    errs = validate_manifest(m)
+    assert errs == []
+
+
+def test_validate_manifest_rejects_bad_schema_version():
+    m = {"schema_version": "wrong", "packs": {}}
+    errs = validate_manifest(m)
+    assert any("oracle_packs/v1" in e for e in errs)
+
+
+def test_validate_manifest_rejects_missing_required_entry_fields():
+    m = {
+        "schema_version": "oracle_packs/v1",
+        "packs": {
+            "bad": {"slug": "bad"}  # missing file, schema, status
+        },
+    }
+    errs = validate_manifest(m)
+    assert len(errs) >= 1
+    assert any("file" in e or "schema" in e or "status" in e for e in errs)

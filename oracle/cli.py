@@ -269,11 +269,28 @@ def _load_manifest(pack_dir: Path) -> dict:
         return manifest
 
     try:
-        return json.loads(mp.read_text(encoding="utf-8"))
+        manifest = json.loads(mp.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         # Corrupt manifest — attempt rebuild from pack files (Section 13.5)
         LOGGER.warning("manifest.json is corrupt — attempting rebuild from pack files")
         return _rebuild_manifest(pack_dir)
+
+    # Validate manifest structure (normative schema per Section 4.4).
+    # A PARSEABLE manifest that fails schema validation is schema DRIFT, not
+    # corruption — rebuilding here would overwrite the promotion audit trail
+    # and silently drop packs (silent evidence destruction in a compliance
+    # tool). Rebuild is reserved for JSONDecodeError above; on drift we warn
+    # loudly and proceed with the manifest exactly as stored.
+    from oracle.pack_validator import validate_manifest
+    merrors = validate_manifest(manifest)
+    if merrors:
+        LOGGER.error(
+            "manifest.json failed schema validation (%d error(s)): %s — proceeding "
+            "with the manifest AS-IS. Review and migrate it manually; the file "
+            "was NOT rewritten.",
+            len(merrors), "; ".join(merrors[:3]),
+        )
+    return manifest
 
 
 def _save_manifest(manifest: dict, pack_dir: Path) -> None:
@@ -316,7 +333,31 @@ def _rebuild_manifest(pack_dir: Path) -> dict:
             if not isinstance(pack_data, dict):
                 LOGGER.warning(f"  Skipping non-pack JSON file {pack_file.name}")
                 continue
-            meta = pack_data.get("oracle_metadata", {})
+
+            # Validate each candidate per Section 13.5: "validating each pack JSON"
+            # and skip malformed (including oracle_metadata not being a dict).
+            # Invalid packs must not abort recovery of the rest of the library.
+            try:
+                from oracle.pack_validator import validate_pack
+                verrs = validate_pack(pack_data)
+                if verrs:
+                    LOGGER.warning(
+                        f"  Skipping invalid pack file {pack_file.name} (validate_pack): "
+                        f"{'; '.join(verrs[:2])}"
+                    )
+                    continue
+            except Exception as ve:  # validator failure must not poison recovery
+                LOGGER.warning(f"  Skipping {pack_file.name} — validator error during rebuild: {ve}")
+                continue
+
+            meta = pack_data.get("oracle_metadata") or {}
+            if not isinstance(meta, dict):
+                LOGGER.warning(
+                    f"  Skipping pack {pack_file.name}: oracle_metadata must be a dict "
+                    f"(got {type(meta).__name__}) per Section 4.5 / 13.5"
+                )
+                continue
+
             slug = meta.get("slug", pack_file.stem)
 
             # Compute content hash from pack file
@@ -367,8 +408,16 @@ def _rebuild_manifest(pack_dir: Path) -> dict:
                 "rebuilt": True,
             }
             LOGGER.info(f"  Rebuilt entry: {slug} ({_count_rules(pack_data)} rules)")
-        except (json.JSONDecodeError, OSError) as e:
+        except (json.JSONDecodeError, OSError, TypeError, AttributeError, KeyError) as e:
+            # Broad but explicit: any malformed metadata or pack structure during
+            # recovery must be logged+skipped, never abort the whole manifest rebuild.
             LOGGER.warning(f"  Skipping invalid pack file {pack_file.name}: {e}")
+
+    # Validate the reconstructed manifest (Section 4.4)
+    from oracle.pack_validator import validate_manifest
+    merrors = validate_manifest(manifest)
+    if merrors:
+        LOGGER.warning(f"Rebuilt manifest has schema issues: {'; '.join(merrors[:3])}. Proceeding with best-effort manifest.")
 
     _save_manifest(manifest, pack_dir)
     LOGGER.info(f"Manifest rebuilt with {len(manifest['packs'])} pack(s)")
@@ -1695,6 +1744,20 @@ def generate_pack(
             detect_implicit=detect_implicit,
         )
 
+    # Ensure detection_override is recorded for *all* routes when --force-type
+    # was used (Section 5.1). The route-specific builders do not know about
+    # the CLI override; patch the emitted pack file before registration.
+    if force_type:
+        try:
+            p = json.loads(pack_path.read_text(encoding="utf-8"))
+            p.setdefault("oracle_metadata", {})
+            if not p["oracle_metadata"].get("detection_override"):
+                p["oracle_metadata"]["detection_override"] = force_type
+            _atomic_write_text(pack_path, json.dumps(p, indent=2, ensure_ascii=False))
+            LOGGER.info(f"Recorded detection_override={force_type} in pack metadata")
+        except Exception as exc:
+            LOGGER.warning(f"Could not record detection_override: {exc}")
+
     # Register in library
     if register:
         pack_name = register_pack(
@@ -2465,6 +2528,55 @@ def run_review(
         workflow=workflow,
     )
 
+    # Persist ReviewResult contract artifact (Section 7.3).
+    # The adapter reconstructs the normalized contract from oracle2's
+    # file outputs. We save it as review_result.json so that external
+    # consumers and audit tools have a stable, schema-documented form
+    # of the review outcome regardless of oracle2's internal session shape.
+    try:
+        from dataclasses import asdict
+        from oracle.oracle2_adapter import build_review_result
+
+        review_result = build_review_result(output_dir, compliance_context=compliance_context)
+        # Custom serializer: Path is not JSON serializable; convert to str.
+        def _to_jsonable(obj: Any) -> Any:
+            if isinstance(obj, Path):
+                return str(obj)
+            if isinstance(obj, list):
+                return [_to_jsonable(x) for x in obj]
+            if isinstance(obj, dict):
+                return {k: _to_jsonable(v) for k, v in obj.items()}
+            return obj
+
+        result_dict = asdict(review_result)
+        # Also surface the top-level consensus_type for consumers
+        result_dict["consensus_type"] = getattr(session, "consensus_type", "")
+        result_dict = _to_jsonable(result_dict)
+        (output_dir / "review_result.json").write_text(
+            json.dumps(result_dict, indent=2), encoding="utf-8"
+        )
+        LOGGER.info(f"ReviewResult contract persisted to {output_dir / 'review_result.json'}")
+    except Exception as exc:
+        # Hard failures (preflight criticals, converged-but-unreadable normalized per 7.3)
+        # must not be swallowed. Write an explicit failure artifact so the filename
+        # exists for audit and downstream can see the problem. Do not raise here:
+        # direct callers (tests, server) continue to get a session; CLI inspects
+        # the marker and reports failure instead of advertising a good result.
+        err_artifact = {
+            "error": str(exc),
+            "status": "failed",
+            "adapter_error": True,
+            "note": "ReviewResult reconstruction failed per Section 7.3 hard contract. Raw oracle2 artifacts may still be present."
+        }
+        try:
+            (output_dir / "review_result.json").write_text(
+                json.dumps(err_artifact, indent=2), encoding="utf-8"
+            )
+        except Exception:
+            pass  # best effort marker
+        LOGGER.error(f"Hard adapter failure building ReviewResult (Section 7.3 preflight/out-of-sync): {exc}")
+        # No raise: marker file + cmd-level check ensures CLI fails closed.
+
     return session
 
 
@@ -2715,15 +2827,38 @@ def format_findings_report(
     pack_names: list[str] | None = None,
     compliance_context: str | None = None,
     output_path: Path | None = None,
+    review_result: dict | Any | None = None,
 ) -> str:
     """Generate a formatted findings report from a completed oracle session.
 
-    Uses oracle2_adapter to reconstruct structured data from session files,
-    then formats into the Section 8 report structure.
+    Per Section 8: the report is generated from the ReviewResult contract
+    (MetricsSummary etc). When review_result (dict or ReviewResult dataclass)
+    is supplied, its metrics are used directly; otherwise fall back for
+    test compatibility with raw oracle2 session shapes.
     """
-    from oracle.oracle2 import compute_metrics
+    # Prefer the ReviewResult contract's MetricsSummary (Section 7.3/8).
+    # This supplies the full required fields (unresolved, duplicate, totals,
+    # medium/low via accepted_by_severity, etc) that oracle2.compute_metrics
+    # shape may omit.
+    rr_metrics: dict | Any | None = None
+    if review_result is not None:
+        if hasattr(review_result, "metrics"):
+            rr_metrics = review_result.metrics
+        elif isinstance(review_result, dict):
+            rr_metrics = review_result.get("metrics") or review_result
 
-    metrics = compute_metrics(session)
+    from oracle.oracle2 import compute_metrics
+    if rr_metrics is None:
+        metrics = compute_metrics(session)
+    else:
+        # normalize rr_metrics (dataclass or dict) to a dict for the rest of formatting
+        if hasattr(rr_metrics, "__dict__"):
+            metrics = {k: getattr(rr_metrics, k) for k in dir(rr_metrics) if not k.startswith("_")}
+            # also keep the nested accepted_by_severity as-is
+            if hasattr(rr_metrics, "accepted_by_severity"):
+                metrics["accepted_by_severity"] = rr_metrics.accepted_by_severity
+        else:
+            metrics = dict(rr_metrics) if isinstance(rr_metrics, dict) else {}
 
     lines = [
         "# ORACLE Review Report",
@@ -2817,26 +2952,65 @@ def format_findings_report(
             lines.append("> **Warning:** This review used unverified (draft) rule packs. Findings should be validated against source regulations.")
             lines.append("")
 
-    # --- Metrics Summary ---
-    # duplicate_rate is None when the workflow produces no drop signal
-    # (manual workflow) — print "n/a", never a fabricated 0.0% (AUDIT D3).
+    # --- Metrics Summary (Section 8) ---
+    # When ReviewResult/MetricsSummary is in use we render the full contract fields.
+    # accepted_by_severity may contain critical/high/medium/low/unknown.
+    acc_sev = metrics.get("accepted_by_severity", {}) or {}
+    if not isinstance(acc_sev, dict):
+        acc_sev = {}
+
+    # AUDIT D3: a metric the workflow never measured renders as "n/a", NEVER a
+    # fabricated 0 — an auditor reading "Accepted critical defects: 0" draws a
+    # false conclusion. Per-field fallback: contract shape first, then the
+    # legacy oracle2.compute_metrics keys, then n/a.
+    def _measured(*keys: str) -> int | None:
+        for k in keys:
+            v = metrics.get(k)
+            if v is not None:
+                return v
+        return None
+
+    def _fmt(v: int | None) -> str:
+        return "n/a (not measured in this workflow)" if v is None else str(v)
+
+    crit = acc_sev.get("critical") if acc_sev.get("critical") is not None else _measured("accepted_critical_count")
+    high = acc_sev.get("high") if acc_sev.get("high") is not None else _measured("accepted_high_count")
+    med = acc_sev.get("medium") if acc_sev.get("medium") is not None else _measured("accepted_medium_count")
+    low = acc_sev.get("low") if acc_sev.get("low") is not None else _measured("accepted_low_count")
+
+    total_acc = _measured("total_issues_accepted", "total_accepted_defects")
+    if total_acc is None and any(v is not None for v in (crit, high, med, low)):
+        total_acc = sum(v or 0 for v in (crit, high, med, low))
+    rej = _measured("rejected_count", "total_rejected_claims")
+    pref = _measured("preference_only_count", "total_preference_only")
+    unres = _measured("unresolved_count")
+    dups = _measured("duplicate_count")
+    raised = _measured("total_issues_raised")
+
+    # Rate and count are different facts — report each honestly, never a
+    # count masquerading as a rate.
     duplicate_rate = metrics.get("duplicate_rate")
-    duplicate_label = (
-        f"{duplicate_rate:.1%}"
-        if isinstance(duplicate_rate, (int, float))
-        else "n/a (not measured in this workflow)"
-    )
+    if isinstance(duplicate_rate, (int, float)):
+        dup_rate_label = f"{duplicate_rate:.1%}"
+    else:
+        dup_rate_label = "n/a (not measured in this workflow)"
+
     lines.extend([
         "## Metrics",
         "",
-        f"- Accepted critical defects: {metrics.get('accepted_critical_count', 0)}",
-        f"- Accepted high defects: {metrics.get('accepted_high_count', 0)}",
-        f"- Total accepted defects: {metrics.get('total_accepted_defects', 0)}",
-        f"- Total rejected claims: {metrics.get('total_rejected_claims', 0)}",
-        f"- Preference-only findings: {metrics.get('total_preference_only', 0)}",
-        f"- Duplicate rate: {duplicate_label}",
+        f"- Accepted critical defects: {_fmt(crit)}",
+        f"- Accepted high defects: {_fmt(high)}",
+        f"- Accepted medium defects: {_fmt(med)}",
+        f"- Accepted low defects: {_fmt(low)}",
+        f"- Total accepted defects: {_fmt(total_acc)}",
+        f"- Total rejected claims: {_fmt(rej)}",
+        f"- Preference-only findings: {_fmt(pref)}",
+        f"- Unresolved questions: {_fmt(unres)}",
+        f"- Duplicate count: {_fmt(dups)}",
+        f"- Total issues raised: {_fmt(raised)}",
+        f"- Duplicate rate: {dup_rate_label}",
         f"- Rounds to stability: {metrics.get('rounds_to_stability', 0)}",
-        f"- Converged: {metrics.get('converged', False)}",
+        f"- Converged: {bool(metrics.get('converged', getattr(session, 'converged', False)))}",
         "",
     ])
     continuity = metrics.get("issue_id_continuity")
@@ -2931,6 +3105,25 @@ def format_findings_report(
                     corroboration = _corroboration_note(sources)
                     if corroboration:
                         lines.append(f"**Corroboration:** {corroboration}")
+
+                # Pack citations (Section 7.3 / 8): best-effort from evidence text.
+                # Only when compliance_context is supplied (it is for auditable runs).
+                if compliance_context:
+                    from oracle.oracle2_adapter import extract_pack_citations
+                    # Prefer best_evidence (what adapter scans); fall back to
+                    # core_problem + recommended_fix so citations work even
+                    # on oracle2-native session objects.
+                    ev = issue.get("best_evidence") or ""
+                    if not ev:
+                        ev = (issue.get("core_problem", "") + " " + issue.get("recommended_fix", "")).strip()
+                    cites = extract_pack_citations(ev, compliance_context=compliance_context)
+                    if cites:
+                        cite_strs = []
+                        for c in cites:
+                            sec = f" §{c.section}" if getattr(c, "section", None) else ""
+                            auth = f" ({c.authority_label})" if getattr(c, "authority_label", None) else ""
+                            cite_strs.append(f"[{c.pack_id}:{c.rule_id}]{sec}{auth}")
+                        lines.append(f"**Pack Citations:** {', '.join(cite_strs)}")
                 lines.append("")
 
         # Coordinator decisions
@@ -3088,12 +3281,43 @@ def cmd_review(args: argparse.Namespace) -> None:
         print(f"Error: {e}")
         sys.exit(1)
 
+    # Post-run adapter contract check: if persistence wrote a failure marker
+    # (hard preflight or out-of-sync), report failure and exit non-zero rather
+    # than advertising review_result.json as a successful deliverable.
+    rr_check_path = output_dir / "review_result.json"
+    if rr_check_path.exists():
+        try:
+            _rr = json.loads(rr_check_path.read_text(encoding="utf-8"))
+            if _rr.get("adapter_error"):
+                print(f"Error: ReviewResult contract build failed: {_rr.get('error', 'unknown')}")
+                sys.exit(1)
+        except Exception:
+            pass
+
     # Generate findings report
     report_path = output_dir / "findings_report.md"
+    # Load the exact compliance_context used (for pack citation reconstruction)
+    cc_path = output_dir / "compliance_context.txt"
+    cc_for_report = cc_path.read_text(encoding="utf-8") if cc_path.exists() else None
+
+    # Load ReviewResult contract if present (Section 7.3/8) so report is generated
+    # from it, not solely the raw oracle2 session object.
+    rr_for_report: dict | None = None
+    rr_path = output_dir / "review_result.json"
+    if rr_path.exists():
+        try:
+            rr_data = json.loads(rr_path.read_text(encoding="utf-8"))
+            if not rr_data.get("adapter_error"):
+                rr_for_report = rr_data
+        except Exception:
+            rr_for_report = None
+
     format_findings_report(
         session, pack_dir,
         pack_names=args.packs,
+        compliance_context=cc_for_report,
         output_path=report_path,
+        review_result=rr_for_report,
     )
 
     from oracle.oracle2 import compute_metrics
@@ -3107,6 +3331,7 @@ def cmd_review(args: argparse.Namespace) -> None:
     print(f"  final_draft.md              — Canonical revised document")
     print(f"  compliance_context.txt      — Exact compliance text used")
     print(f"  pack_manifest_snapshot.json — Pack versions and hashes")
+    print(f"  review_result.json          — Structured ReviewResult contract (Section 7.3)")
     print(f"  session_summary.json        — Round-by-round stats")
     print(f"  metrics.json                — QC scoring rubric")
 

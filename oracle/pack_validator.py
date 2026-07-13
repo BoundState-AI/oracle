@@ -254,6 +254,52 @@ GENERIC_SCHEMA: dict[str, Any] = {
 
 
 # ---------------------------------------------------------------------------
+# Manifest Schema (oracle_packs/v1) — Section 4.4
+# Normative schema for the pack library index. Enables validation on load
+# and after rebuilds. The "rebuilt" flag is optional (only present on
+# recovered manifests).
+# ---------------------------------------------------------------------------
+MANIFEST_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "ORACLE Pack Library Manifest",
+    "type": "object",
+    "required": ["schema_version", "packs"],
+    "properties": {
+        "schema_version": {"type": "string", "const": "oracle_packs/v1"},
+        "description": {"type": "string"},
+        "packs": {
+            "type": "object",
+            "additionalProperties": {
+                "type": "object",
+                "required": ["slug", "file", "schema", "status"],
+                "properties": {
+                    "name": {"type": "string"},
+                    "slug": {"type": "string", "minLength": 1},
+                    "file": {"type": "string", "minLength": 1},
+                    "schema": {"type": "string", "enum": ["gpcm", "far", "generic"]},
+                    "standard_id": {"type": "string"},
+                    "description": {"type": "string"},
+                    "rule_count": {"type": "integer", "minimum": 0},
+                    "version": {"type": "string"},
+                    "status": {"type": "string", "enum": ["draft", "promoted"]},
+                    "extraction_status": {"type": "string", "enum": ["complete", "partial"]},
+                    "failed_page_ranges": {"type": "array"},
+                    "content_hash": {"type": "string"},
+                    "added_at": {"type": "string"},
+                    "promoted_at": {"type": ["string", "null"]},
+                    "promoted_by": {"type": ["string", "null"]},
+                    "source_document": {"type": "string"},
+                    "source_document_hash": {"type": ["string", "null"]},
+                    "detection_override": {"type": ["string", "null"]},
+                    "rebuilt": {"type": "boolean"},
+                },
+            },
+        },
+    },
+}
+
+
+# ---------------------------------------------------------------------------
 # Schema Dispatch
 # ---------------------------------------------------------------------------
 
@@ -480,3 +526,66 @@ def normalize_pack_structure(pack_data: dict[str, Any]) -> dict[str, Any]:
                 rule["rule_id"] = str(rule["rule_id"])
 
     return pack_data
+
+
+# ---------------------------------------------------------------------------
+# Manifest Validation (Section 4.4 / 13.5)
+# ---------------------------------------------------------------------------
+
+def validate_manifest(manifest: dict[str, Any]) -> list[str]:
+    """Validate a manifest dict against MANIFEST_SCHEMA.
+
+    Returns list of error strings (empty = valid). Uses jsonschema when
+    available, otherwise light structural checks.
+
+    This is the normative gate for manifest structure. Called on load and
+    after rebuild to ensure the index itself is well-formed.
+    """
+    errors: list[str] = []
+
+    # Basic shape
+    if not isinstance(manifest, dict):
+        errors.append("Manifest must be a JSON object")
+        return errors
+
+    sv = manifest.get("schema_version")
+    if sv != "oracle_packs/v1":
+        errors.append(
+            f"manifest schema_version must be 'oracle_packs/v1', got {sv!r}"
+        )
+
+    packs = manifest.get("packs")
+    if not isinstance(packs, dict):
+        errors.append("'packs' must be an object")
+        return errors
+
+    # jsonschema path when available (preferred for full coverage)
+    try:
+        import jsonschema
+    except ImportError:
+        LOGGER.debug("jsonschema not installed — using structural manifest validation")
+    else:
+        validator_cls = getattr(jsonschema, "Draft202012Validator", None)
+        if validator_cls is None:
+            validator_cls = jsonschema.validators.validator_for(MANIFEST_SCHEMA)
+        validator = validator_cls(MANIFEST_SCHEMA)
+        for error in sorted(validator.iter_errors(manifest), key=lambda e: list(e.path)):
+            path = " → ".join(str(p) for p in error.absolute_path) or "(root)"
+            errors.append(f"[{path}] {error.message}")
+        # Early return with full errors when jsonschema is present
+        return errors
+
+    # Fallback structural checks
+    for slug, entry in packs.items():
+        if not isinstance(entry, dict):
+            errors.append(f"packs[{slug!r}] must be an object")
+            continue
+        for req in ("slug", "file", "schema", "status"):
+            if req not in entry:
+                errors.append(f"packs[{slug!r}] missing required field: {req}")
+        if entry.get("status") not in ("draft", "promoted", None):
+            errors.append(f"packs[{slug!r}].status must be draft|promoted")
+        if entry.get("schema") not in ("gpcm", "far", "generic", None):
+            errors.append(f"packs[{slug!r}].schema must be gpcm|far|generic")
+
+    return errors

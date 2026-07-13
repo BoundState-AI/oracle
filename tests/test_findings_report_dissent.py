@@ -158,3 +158,39 @@ def test_report_without_dissent_has_no_dissent_section(tmp_path):
     report = format_findings_report(_session_with_rounds(rounds), pack_dir=tmp_path)
 
     assert "## Dissent Summary" not in report
+
+
+def test_findings_report_includes_pack_citations_when_context_supplied(tmp_path):
+    """When compliance_context is passed, pack citations (best-effort) appear in report.
+
+    Uses a synthetic issue whose best_evidence contains a [pack:rule] marker.
+    """
+    ctx = (
+        "Authority 1: Test (pack_id: test-pack)\n"
+        "[test-pack:RULE-001] §4.2 [SHALL]: The system shall be secure."
+    )
+    rounds = [
+        ReviewRound(
+            round_number=1,
+            normalized_issues={
+                "normalized_issues": [
+                    {
+                        "issue_id": "R1-ISSUE-042",
+                        "title": "Weak auth",
+                        "severity": "high",
+                        "best_evidence": "Per [test-pack:RULE-001] the control is inadequate.",
+                        "core_problem": "auth weak",
+                        "recommended_fix": "fix it",
+                        "source_reviewers": ["Fran"],
+                    }
+                ]
+            },
+            coordinator_decisions={"revision_decisions": []},
+            valid=True,
+        )
+    ]
+    sess = _session_with_rounds(rounds)
+    report = format_findings_report(sess, pack_dir=tmp_path, compliance_context=ctx)
+
+    assert "[test-pack:RULE-001]" in report
+    assert "Pack Citations:" in report

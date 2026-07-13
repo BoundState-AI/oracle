@@ -308,3 +308,125 @@ def test_citation_credibility_keeps_section_less_packs():
     ids = {(c.pack_id, c.rule_id) for c in citations}
     assert ("mil-pack", "R-001") in ids
     assert ("far-pack", "far-15-001") in ids
+
+
+# ---------------------------------------------------------------------------
+# ReviewResult persistence contract test (Section 7.3 + 7.4)
+# Verifies that run_review produces the review_result.json artifact.
+# ---------------------------------------------------------------------------
+
+def _write_minimal_converged_session(session_dir: Path) -> None:
+    """Write the minimal files a converged manual-workflow session needs
+    for the adapter preflight + reconstruction to succeed.
+    """
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "session_summary.json").write_text(
+        json.dumps({"session_id": "persist-test", "total_rounds": 1, "converged": True}),
+        encoding="utf-8",
+    )
+    (session_dir / "final_draft.md").write_text("# Final\n", encoding="utf-8")
+    (session_dir / "round1_beth_normalized.json").write_text(
+        json.dumps({
+            "normalized_issues": [{
+                "issue_id": "R1-ISSUE-001",
+                "title": "Test finding",
+                "severity": "high",
+                "core_problem": "Problem statement",
+                "recommended_fix": "Fix statement",
+                "best_evidence": "Evidence text referencing [test-pack:RULE-0001]",
+            }]
+        }),
+        encoding="utf-8",
+    )
+    (session_dir / "round1_beth_decisions.json").write_text(
+        json.dumps({"revision_decisions": [{
+            "issue_id": "R1-ISSUE-001",
+            "decision": "accepted_defect",
+            "reason": "Because.",
+        }]}),
+        encoding="utf-8",
+    )
+
+
+def test_run_review_persists_review_result_json(tmp_path, monkeypatch):
+    """run_review must write review_result.json using the adapter contract.
+
+    This makes the ReviewResult schema (Section 7.3) a first-class,
+    machine-readable deliverable alongside findings_report.md.
+    """
+    from pathlib import Path as _Path
+
+    from oracle import cli as oracle_cli
+
+    session_dir = tmp_path / "oracle_reviews" / "persist-test"
+    _write_minimal_converged_session(session_dir)
+
+    # Create a tiny stub module that run_review will import via importlib.
+    class _StubSession:
+        def __init__(self, sid: str, outdir: _Path):
+            self.session_id = sid
+            self.document_path = "doc.md"
+            self.rounds = []
+            self.converged = True
+            self.convergence_reason = ""
+            self.consensus_type = "full_agreement"
+
+    def _fake_run_review(**kwargs):
+        # Ensure the output dir the caller asked for contains the files
+        # the adapter will read. The caller already set output_dir.
+        out = _Path(kwargs["output_dir"])
+        if not (out / "session_summary.json").exists():
+            _write_minimal_converged_session(out)
+        return _StubSession(kwargs.get("document_path", "x"), out)
+
+    # Patch inside run_review's importlib step.
+    import importlib as _importlib
+    import sys as _sys
+    real_import = _importlib.import_module
+
+    def _fake_import(name: str):
+        if name == "oracle.oracle2":
+            mod = type(_sys)("_oracle2_stub")
+            mod.run_review = _fake_run_review
+            mod.ORACLE_ROSTER = {}
+            # Also provide compute_metrics used by cmd_review path
+            mod.compute_metrics = lambda s: {
+                "accepted_critical_count": 0,
+                "accepted_high_count": 1,
+                "total_accepted_defects": 1,
+                "total_rejected_claims": 0,
+                "total_preference_only": 0,
+                "duplicate_rate": None,
+                "rounds_to_stability": 0,
+                "converged": True,
+            }
+            return mod
+        return real_import(name)
+
+    monkeypatch.setattr(_importlib, "import_module", _fake_import)
+
+    # Exercise the public run_review entry point with no packs (simplest).
+    # It will write compliance_context (None case) + snapshot + call the
+    # persistence block that invokes build_review_result.
+    # Use a file under tmp_path (never the repo root) so a retry path cannot
+    # overwrite tracked files like README.md.
+    doc_path = tmp_path / "test_doc_for_persist.md"
+    doc_path.write_text("Test document for review persistence adapter contract.", encoding="utf-8")
+    session = oracle_cli.run_review(
+        document_path=doc_path,
+        pack_names=[],
+        pack_dir=tmp_path / "packs",
+        output_dir=session_dir,
+        max_rounds=1,
+    )
+
+    result_path = session_dir / "review_result.json"
+    assert result_path.exists(), "review_result.json must be written by run_review"
+
+    data = json.loads(result_path.read_text(encoding="utf-8"))
+    assert data["session_id"] == "persist-test"
+    assert data["converged"] is True
+    assert "metrics" in data
+    assert data["metrics"]["total_issues_accepted"] >= 0
+    # The adapter must have reconstructed at least the round we wrote
+    assert len(data.get("rounds", [])) >= 1

@@ -22,7 +22,12 @@ const API_KEY = process.env.ORACLE_API_KEY ?? "";
 
 // Fail loudly if the API key is not configured.  Without it, all proxied
 // requests go through unauthenticated, which is a security gap.
-if (!API_KEY && process.env.NODE_ENV === "production") {
+//
+// We skip the hard throw during `next build` / page data collection
+// (Next sets NODE_ENV=production even for local `npm run build`).
+// Real enforcement still happens on actual requests.
+const isBuildPhase = process.env.NEXT_PHASE?.includes("build") ?? false;
+if (!API_KEY && process.env.NODE_ENV === "production" && !isBuildPhase) {
   throw new Error(
     "ORACLE_API_KEY is not set.  The API proxy cannot function without it."
   );

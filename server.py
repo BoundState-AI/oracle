@@ -3,10 +3,13 @@ Module: server
 Purpose: FastAPI web server for ORACLE — serves the frontend API contract.
 
 Endpoints:
-  POST /oracle/analyze    — Upload a document, start review in background, return session_id
-  GET  /oracle/stream/:id — SSE stream of live oracle2 log messages + final result
-  POST /oracle/generate   — Generate polished output from a reviewed session
-  GET  /oracle/download   — Download generated .docx/.pptx
+  POST /oracle/analyze        — Upload a document, start review in background, return session_id
+  GET  /oracle/stream/:id     — SSE stream of live oracle2 log messages + final result
+  POST /oracle/pipeline/start — Paste spec + repo + prompted output dir; run full build pipeline (Ben/Atlas/Beth)
+  GET  /oracle/download/...   — Artifacts including PIPELINE_REPORT.md when job_type=pipeline
+
+The pipeline start endpoint requires the caller to prompt the user for a local
+save directory ("use this directory" pattern → <repo>/oracle_builds/<ts>).
 
 __safety_critical__: bool = True
 
@@ -23,9 +26,11 @@ import json
 import logging
 import os
 import queue
+import re
 import tempfile
 import threading
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -61,6 +66,21 @@ from hearth.utils.render import LEGAL_BANNER, render_report
 
 LOGGER = logging.getLogger("oracle.server")
 logging.basicConfig(level=logging.INFO)
+
+# Pipeline support (separable; run_pipeline is the core callable).
+# The web UI (and future server modes) can drive the same unattended build pipeline
+# that the CLI uses. Output dir prompting is done in the caller (UI + start endpoint).
+# NOTE: imports happen AFTER logger so warnings in degraded mode are safe.
+try:
+    import pipeline.oracle_build as pipeline_build  # type: ignore[import-not-found]
+except Exception as _pipeline_exc:  # noqa: BLE001
+    pipeline_build = None  # type: ignore[assignment]
+    LOGGER.warning("pipeline.oracle_build unavailable: %s (CLI remains fully functional)", _pipeline_exc)
+
+try:
+    import pipeline.oracle_review as _orv  # for guards (_git etc)  # type: ignore[import-not-found]
+except Exception:
+    _orv = None  # type: ignore[assignment]
 
 
 def _normalize_api_keys() -> None:
@@ -150,20 +170,58 @@ _sessions: dict[str, dict[str, Any]] = {}
 _chat_sessions: dict[str, dict[str, Any]] = {}
 
 
+# Every status a session can end in. Eviction, SSE replay, and recovery must
+# all use this one predicate — divergent hardcoded tuples caused sessions in
+# pipeline terminal states to evade TTL eviction and break late SSE connects.
+_TERMINAL_STATUSES = frozenset(
+    {"complete", "completed", "error", "approved", "rejected", "changes_required"}
+)
+
+
+def _is_terminal(status: str | None) -> bool:
+    """True when a session has reached a final state (success, gated, or error)."""
+    return status in _TERMINAL_STATUSES
+
+
+# ── Pipeline concurrency control ────────────────────────────────────────────
+# One unattended writer per repo, bounded writers per host. Two simultaneous
+# builds against one checkout interleave writes; unbounded builds exhaust the box.
+_PIPELINE_LOCK = threading.Lock()
+_ACTIVE_PIPELINE_REPOS: set[str] = set()
+_MAX_CONCURRENT_PIPELINES = int(os.environ.get("ORACLE_MAX_CONCURRENT_PIPELINES", "2"))
+
+
+def _claim_pipeline_repo(repo_key: str) -> str | None:
+    """Atomically claim a repo for a pipeline run. Returns an error string if denied."""
+    with _PIPELINE_LOCK:
+        if repo_key in _ACTIVE_PIPELINE_REPOS:
+            return "A pipeline is already running against this repository."
+        if len(_ACTIVE_PIPELINE_REPOS) >= _MAX_CONCURRENT_PIPELINES:
+            return f"Concurrent pipeline limit ({_MAX_CONCURRENT_PIPELINES}) reached — try again later."
+        _ACTIVE_PIPELINE_REPOS.add(repo_key)
+        return None
+
+
+def _release_pipeline_repo(repo: str) -> None:
+    """Release a repo claim (safe to call with unresolved or already-released paths)."""
+    with _PIPELINE_LOCK:
+        _ACTIVE_PIPELINE_REPOS.discard(str(Path(repo).resolve()))
+
+
 def _evict_stale_sessions() -> None:
-    """Remove completed/errored sessions older than TTL, keeping at most _MAX_SESSIONS."""
+    """Remove terminal sessions older than TTL, keeping at most _MAX_SESSIONS."""
     now = _time.time()
     stale = [
         sid for sid, s in _sessions.items()
-        if s.get("status") in ("completed", "error")
+        if _is_terminal(s.get("status"))
         and (now - s.get("created_at", now)) > _SESSION_TTL_SECONDS
     ]
     for sid in stale:
         _sessions.pop(sid, None)
-    # Hard cap: if still over limit, drop oldest completed sessions
+    # Hard cap: if still over limit, drop oldest terminal sessions
     if len(_sessions) > _MAX_SESSIONS:
         completed = sorted(
-            [(sid, s) for sid, s in _sessions.items() if s.get("status") in ("completed", "error")],
+            [(sid, s) for sid, s in _sessions.items() if _is_terminal(s.get("status"))],
             key=lambda x: x[1].get("created_at", 0),
         )
         for sid, _ in completed[:len(_sessions) - _MAX_SESSIONS]:
@@ -307,6 +365,15 @@ def _session_manifest(session: dict[str, Any]) -> dict[str, Any]:
         "pack_parts": session.get("pack_parts", {}),
         "generated_pack": session.get("generated_pack"),
         "pack_manifest_snapshot": session.get("pack_manifest_snapshot"),
+        # Pipeline (build) job fields
+        "repo": session.get("repo"),
+        "spec_excerpt": session.get("spec_excerpt"),
+        "fix_rounds": session.get("fix_rounds"),
+        "skip_build": session.get("skip_build"),
+        "allow_dirty": session.get("allow_dirty"),
+        "pipeline_report": session.get("pipeline_report"),
+        "gate_verdict": session.get("gate_verdict"),
+        "pipeline_artifacts": session.get("pipeline_artifacts", []),
     }
 
 
@@ -663,6 +730,156 @@ def _run_pack_generate_background(
         msg_queue.put(None)
 
 
+def _parse_gate_verdict(gate_text: str | None) -> str:
+    """Extract Beth's final verdict. Fail-closed to 'CHANGES REQUIRED'.
+
+    Delegates to the pipeline's canonical heading-first parser so the CLI and
+    server can never disagree; a free-text fallback is forbidden because prose
+    like "I cannot mark this APPROVED" must not parse as approval.
+    """
+    if not gate_text:
+        return "CHANGES REQUIRED"
+    if pipeline_build is not None:
+        return pipeline_build.parse_gate_verdict(gate_text)
+    m = re.search(r"##\s*Final Verdict\b.{0,400}?(APPROVED|CHANGES REQUIRED|REJECTED)",
+                  gate_text, re.IGNORECASE | re.DOTALL)
+    return m.group(1).upper() if m else "CHANGES REQUIRED"
+
+
+def _run_pipeline_background(
+    session_id: str,
+    spec_text: str,
+    repo: str,
+    output_dir: str,
+    fix_rounds: int,
+    skip_build: bool,
+    allow_dirty: bool,
+    msg_queue: queue.Queue[str | None],
+) -> None:
+    """Run the oracle build pipeline in background, streaming stage progress via queue.
+
+    Uses the progress callback in run_pipeline so stage transitions and
+    summaries appear live in the UI. Final artifacts (PIPELINE_REPORT.md etc)
+    are written to output_dir by the pipeline.
+    """
+    # No logging-handler plumbing here: run_pipeline logs to the parent
+    # "oracle.pipeline.build" logger, so a handler on a per-session child
+    # logger never receives records. The progress callback below is the one
+    # channel that actually works — everything routes through it.
+    try:
+        msg_queue.put("Preparing pipeline run...")
+        repo_path = Path(repo).resolve()
+        out_path = Path(output_dir).resolve()
+
+        # Replicate guard logic from CLI main() so UI gets clear errors
+        if not (repo_path / ".git").exists():
+            raise RuntimeError(f"{repo} is not a git repository (pipeline requires git for diffs)")
+
+        if not skip_build and not allow_dirty:
+            if _orv is None:
+                # Fail CLOSED: without oracle_review we cannot verify the tree
+                # is clean, so we must not launch an unattended writer.
+                raise RuntimeError(
+                    "pipeline.oracle_review is not importable — cannot verify clean "
+                    "working tree; refusing to start an unattended build."
+                )
+            status = _orv._git(repo_path, "status", "--porcelain").strip()
+            if status:
+                raise RuntimeError(
+                    "Working tree is not clean. Pre-existing changes would pollute the build diff. "
+                    "Commit/stash or check 'Allow dirty'."
+                )
+
+        out_path.mkdir(parents=True, exist_ok=True)
+        spec_path = out_path / "spec.md"
+        spec_path.write_text(spec_text, encoding="utf-8")
+        msg_queue.put(f"Spec saved → {spec_path.name}")
+
+        # Progress emitter: feeds the SSE queue AND the persisted session log.
+        def _progress(line: str) -> None:
+            if line:
+                msg_queue.put(line)
+                _append_session_log(session_id, line)
+
+        if pipeline_build is None:
+            raise RuntimeError("pipeline.oracle_build is not importable on this server")
+
+        msg_queue.put(f"Starting pipeline: repo={repo_path} out={out_path} fix_rounds={fix_rounds}")
+
+        pipeline_build.run_pipeline(
+            spec_path,
+            repo_path,
+            fix_rounds,
+            skip_build,
+            out_path,
+            progress=_progress,
+        )
+
+        # Post-run: capture key report for immediate UI display + list discoverable artifacts
+        report_text: str | None = None
+        report_file = out_path / "PIPELINE_REPORT.md"
+        if report_file.exists():
+            report_text = report_file.read_text(encoding="utf-8")
+
+        gate_verdict = _parse_gate_verdict(report_text)
+        # Map to UX-friendly terminal status (non-"complete" for non-approved)
+        if gate_verdict == "APPROVED":
+            terminal_status = "approved"
+        elif gate_verdict == "REJECTED":
+            terminal_status = "rejected"
+        else:
+            terminal_status = "changes_required"
+
+        artifacts: list[str] = []
+        for name in ("PIPELINE_REPORT.md", "build_log.md"):
+            if (out_path / name).exists():
+                artifacts.append(name)
+        for p in sorted(out_path.glob("atlas_review_round*.md")):
+            artifacts.append(p.name)
+        for p in sorted(out_path.glob("fix_log_round*.md")):
+            artifacts.append(p.name)
+        for p in sorted(out_path.glob("review_request_round*.md")):
+            artifacts.append(p.name)
+
+        # update(), never replace: replacing dropped msg_queue/created_at,
+        # breaking late SSE connects and making the session immortal to eviction.
+        _sessions.setdefault(session_id, {"session_id": session_id}).update({
+            "job_type": "pipeline",
+            "status": terminal_status,
+            "error": None,
+            "original_name": f"pipeline_{repo_path.name}",
+            "repo": str(repo_path),
+            "output_dir": str(out_path),
+            "spec_excerpt": (spec_text[:280] + "…") if len(spec_text) > 280 else spec_text,
+            "fix_rounds": fix_rounds,
+            "skip_build": skip_build,
+            "allow_dirty": allow_dirty,
+            "pipeline_report": report_text,
+            "gate_verdict": gate_verdict,
+            "pipeline_artifacts": artifacts,
+        })
+        _persist_session_state(_sessions[session_id])
+        msg_queue.put("PIPELINE COMPLETE — see PIPELINE_REPORT.md for Beth's gate verdict")
+
+    except Exception as e:
+        LOGGER.exception("oracle pipeline failed")
+        err_text = redact_secrets(str(e))
+        _sessions.setdefault(session_id, {"session_id": session_id}).update({
+            "job_type": "pipeline",
+            "status": "error",
+            "error": err_text,
+            "original_name": "pipeline",
+            "repo": repo,
+            "output_dir": output_dir,
+            "gate_verdict": "CHANGES REQUIRED",
+        })
+        _persist_session_state(_sessions[session_id])
+        msg_queue.put(f"ERROR: {err_text}")
+    finally:
+        _release_pipeline_repo(repo)
+        msg_queue.put(None)  # end of stream
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -749,6 +966,139 @@ async def analyze(
     }
 
 
+class PipelineStartRequest(BaseModel):
+    """Request body for starting an oracle build pipeline from pasted spec."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    spec: str = Field(..., min_length=20, description="Polished spec content (paste from oracle polish)")
+    repo: str = Field(..., description="Absolute path to target git repo on this server machine")
+    output_dir: str | None = Field(
+        default=None,
+        description="Where to write artifacts (PIPELINE_REPORT.md etc). If omitted or empty, server will default to <repo>/oracle_builds/<timestamp>",
+    )
+    fix_rounds: int = Field(1, ge=0, le=3)
+    skip_build: bool = False
+    allow_dirty: bool = False
+
+
+@oracle_router.post("/pipeline/start")
+async def pipeline_start(request: Request, body: PipelineStartRequest) -> dict[str, Any]:
+    """Start an unattended oracle build pipeline (Grok build → Codex reviews → Fable gate).
+
+    The caller (web UI) MUST prompt the user for the output location and
+    should offer a "Use this directory" affordance that resolves to
+    `<chosen-repo>/oracle_builds/<YYYYMMDD_HHMMSS>` on the server filesystem.
+    """
+
+    # SECURITY GATE 1: the pipeline endpoint is HTTP-triggered unattended agent
+    # execution. It must be an explicit, per-deployment opt-in — never on by default.
+    if os.environ.get("ORACLE_ENABLE_PIPELINE_UI", "").lower() not in ("1", "true", "yes"):
+        raise HTTPException(
+            status_code=403,
+            detail="Pipeline UI is disabled. Set ORACLE_ENABLE_PIPELINE_UI=1 on the server "
+                   "to enable (local/dev use only), or use the CLI.",
+        )
+
+    if pipeline_build is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Pipeline runner is not available on this server (missing import). Use CLI instead.",
+        )
+
+    _evict_stale_sessions()
+    session_id = uuid.uuid4().hex[:12]
+
+    # SECURITY GATE 2: validate the repo BEFORE any filesystem side effects
+    # (the old order created directories at arbitrary writable paths on bad input).
+    repo_path = Path(body.repo).resolve()
+    repo_root = os.environ.get("ORACLE_PIPELINE_REPO_ROOT")
+    if repo_root:
+        try:
+            if not repo_path.is_relative_to(Path(repo_root).resolve()):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Repo must live under the configured root: {repo_root}")
+        except HTTPException:
+            raise
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid repo path: {exc}") from exc
+    if not (repo_path / ".git").exists():
+        raise HTTPException(status_code=400, detail=f"Repo is not a git checkout: {body.repo}")
+
+    spec_text = body.spec.strip()
+    if len(spec_text) < 20:
+        raise HTTPException(status_code=400, detail="Spec content looks too short")
+
+    # SECURITY GATE 3: one writer per repo, bounded writers per host.
+    claim_error = _claim_pipeline_repo(str(repo_path))
+    if claim_error:
+        raise HTTPException(status_code=409, detail=claim_error)
+
+    # Output dir — "prompted where to save" in the UI, containment enforced here.
+    # Artifacts may ONLY land under <repo>/oracle_builds/ (not merely inside the
+    # repo: a free path like <repo>/src would contaminate later review diffs).
+    # Session id in the default name prevents two same-second runs sharing a dir.
+    builds_root = repo_path / "oracle_builds"
+    default_dir = builds_root / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{session_id}"
+    out_dir = str(default_dir)
+    if body.output_dir and str(body.output_dir).strip():
+        try:
+            candidate = Path(body.output_dir).resolve()
+            if candidate.is_relative_to(builds_root):
+                out_dir = str(candidate)
+        except (OSError, ValueError):
+            pass  # keep the safe default
+    builds_root.mkdir(parents=True, exist_ok=True)
+
+    msg_queue: queue.Queue[str | None] = queue.Queue()
+
+    _sessions[session_id] = {
+        "session_id": session_id,
+        "job_type": "pipeline",
+        "status": "processing",
+        "original_name": f"pipeline_{repo_path.name}",
+        "repo": str(repo_path),
+        "output_dir": out_dir,
+        "spec_excerpt": (spec_text[:280] + "…") if len(spec_text) > 280 else spec_text,
+        "fix_rounds": body.fix_rounds,
+        "skip_build": body.skip_build,
+        "allow_dirty": body.allow_dirty,
+        "log_messages": [],
+        "msg_queue": msg_queue,
+        "created_at": _time.time(),
+    }
+    _persist_session_state(_sessions[session_id])
+
+    thread = threading.Thread(
+        target=_run_pipeline_background,
+        args=(
+            session_id,
+            spec_text,
+            str(repo_path),
+            out_dir,
+            body.fix_rounds,
+            body.skip_build,
+            body.allow_dirty,
+            msg_queue,
+        ),
+        daemon=True,
+    )
+    try:
+        thread.start()
+    except RuntimeError:
+        _release_pipeline_repo(str(repo_path))  # don't leak the claim
+        raise
+
+    return {
+        "session_id": session_id,
+        "status": "processing",
+        "job_type": "pipeline",
+        "output_dir": out_dir,
+        "repo": str(repo_path),
+    }
+
+
 @oracle_router.get("/stream/{session_id}")
 async def stream(request: Request, session_id: str):
     """SSE stream of live oracle2 progress messages.
@@ -766,8 +1116,12 @@ async def stream(request: Request, session_id: str):
     msg_queue: queue.Queue[str | None] | None = session.get("msg_queue")
 
     async def event_generator():
-        # If already finished before client connected, send result immediately
-        if session.get("status") in ("complete", "ready_to_generate"):
+        # If already finished before client connected, send result immediately.
+        # Pipeline terminal states (approved/rejected/changes_required) must
+        # replay like "complete" — late connects were getting "No message queue".
+        if session.get("status") == "ready_to_generate" or (
+            _is_terminal(session.get("status")) and session.get("status") != "error"
+        ):
             yield _format_done_event(session)
             return
 
@@ -846,6 +1200,26 @@ def _build_session_payload(session: dict[str, Any]) -> dict[str, Any]:
         return {
             **base,
             "pack": session.get("generated_pack"),
+        }
+
+    if job_type == "pipeline":
+        # Pipeline build jobs surface report + per-artifact downloads
+        _out = session.get("output_dir")
+        report_path = Path(_out) / "PIPELINE_REPORT.md" if _out else None
+        report_on_disk = bool(report_path and report_path.exists())
+        artifacts = session.get("pipeline_artifacts", [])
+        gv = session.get("gate_verdict") or "CHANGES REQUIRED"
+        return {
+            **base,
+            "repo": session.get("repo"),
+            "fix_rounds": session.get("fix_rounds"),
+            "skip_build": session.get("skip_build"),
+            "allow_dirty": session.get("allow_dirty"),
+            "gate_verdict": gv,
+            "pipeline_report": session.get("pipeline_report") or ((report_path.read_text(encoding="utf-8") if report_path else None) if report_on_disk else None),
+            "pipeline_artifacts": artifacts,
+            "pipeline_report_url": f"/oracle/download/{session_id}/pipeline_report" if (report_on_disk or session.get("pipeline_report")) else None,
+            "build_log_url": f"/oracle/download/{session_id}/build_log" if _out and (Path(_out) / "build_log.md").exists() else None,
         }
 
     critique = session.get("critique")
@@ -1309,9 +1683,37 @@ async def download(request: Request, session_id: str, fmt: str):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    original_name = session["original_name"]
+    job_type = session.get("job_type", "review")
+    original_name = session.get("original_name", "artifact")
     base_name = Path(original_name).stem
     output_dir = Path(session["output_dir"])
+
+    # Pipeline artifacts (prompted save dir outputs)
+    # SECURITY: only serve known safe filenames recorded for this session,
+    # and double-check path containment to prevent traversal.
+    if job_type == "pipeline":
+        allowed = {"PIPELINE_REPORT.md", "build_log.md"}
+        # Include any artifacts the background runner recorded
+        allowed.update(session.get("pipeline_artifacts", []))
+
+        # Map common URL aliases
+        name_map = {
+            "pipeline_report": "PIPELINE_REPORT.md",
+            "report": "PIPELINE_REPORT.md",
+            "build_log": "build_log.md",
+        }
+        real_name = name_map.get(fmt, fmt)
+
+        if real_name not in allowed:
+            raise HTTPException(status_code=404, detail=f"Pipeline artifact not permitted: {fmt}")
+
+        candidate = (output_dir / real_name).resolve()
+        out_resolved = output_dir.resolve()
+        if not candidate.is_relative_to(out_resolved) or not candidate.exists():
+            raise HTTPException(status_code=404, detail="Artifact not found or outside allowed directory")
+
+        media = "application/json" if real_name.endswith(".json") else "text/plain; charset=utf-8"
+        return FileResponse(str(candidate), media_type=media, filename=real_name)
 
     if fmt == "report.md":
         report_path = output_dir / "findings_report.md"
