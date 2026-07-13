@@ -174,7 +174,7 @@ _chat_sessions: dict[str, dict[str, Any]] = {}
 # all use this one predicate — divergent hardcoded tuples caused sessions in
 # pipeline terminal states to evade TTL eviction and break late SSE connects.
 _TERMINAL_STATUSES = frozenset(
-    {"complete", "completed", "error", "approved", "rejected", "changes_required"}
+    {"complete", "completed", "error", "cancelled", "approved", "rejected", "changes_required"}
 )
 
 
@@ -607,15 +607,20 @@ def _run_review_background(
             )
             review_result = None
 
-        _sessions[session_id] = {
-            "session_id": session_id,
+        # A cancelled session stays cancelled: the user has already been told
+        # this run was stopped — a late-arriving result must not resurrect it.
+        if _sessions.get(session_id, {}).get("cancel_requested"):
+            LOGGER.info("review %s finished after cancellation — results discarded from session "
+                        "(artifacts remain on disk in %s)", session_id, output_dir)
+            return
+
+        _sessions.setdefault(session_id, {"session_id": session_id}).update({
             "job_type": "review",
             "mode": mode,
             "original_name": file_path.name,
             "file_path": str(file_path),
             "review_result": review_result,
             "output_dir": str(output_dir),
-            "log_messages": _sessions.get(session_id, {}).get("log_messages", []),
             "pack_names": pack_names,
             "pack_parts": pack_parts or {},
             "critique": findings_report,
@@ -624,7 +629,7 @@ def _run_review_background(
             "pack_manifest_snapshot": _pack_snapshot(output_dir),
             "status": "complete" if mode in ("polish", "rewrite") else "ready_to_generate",
             "error": None,
-        }
+        })
         _persist_session_state(_sessions[session_id])
 
         msg_queue.put("All oracles have reported — finalizing...")
@@ -635,20 +640,21 @@ def _run_review_background(
     # block still detaches handlers and closes the stream.
     except Exception as e:
         LOGGER.exception("oracle review failed")
+        if _sessions.get(session_id, {}).get("cancel_requested"):
+            LOGGER.info("review %s errored after cancellation — keeping cancelled status", session_id)
+            return
         error_text = redact_secrets(str(e))
-        _sessions[session_id] = {
-            "session_id": session_id,
+        _sessions.setdefault(session_id, {"session_id": session_id}).update({
             "job_type": "review",
             "mode": mode,
             "original_name": file_path.name,
             "file_path": str(file_path),
             "output_dir": str(output_dir),
-            "log_messages": _sessions.get(session_id, {}).get("log_messages", []),
             "pack_names": pack_names,
             "pack_parts": pack_parts or {},
             "status": "error",
             "error": error_text,
-        }
+        })
         _persist_session_state(_sessions[session_id])
         msg_queue.put(f"ERROR: {error_text}")
 
@@ -980,6 +986,36 @@ class PipelineStartRequest(BaseModel):
     fix_rounds: int = Field(1, ge=0, le=3)
     skip_build: bool = False
     allow_dirty: bool = False
+
+
+@oracle_router.post("/review/{session_id}/cancel")
+async def review_cancel(session_id: str) -> dict[str, Any]:
+    """Stop a running spec review: mark cancelled, close the stream, discard results.
+
+    Honest semantics: the review thread cannot be force-killed (in-process,
+    engine is a black box), so in-flight model calls wind down in the
+    background — but the session is released immediately, late results are
+    discarded, and artifacts already written remain on disk.
+    """
+    session = _sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if _is_terminal(session.get("status")):
+        return {"session_id": session_id, "status": session.get("status")}
+
+    session["cancel_requested"] = True
+    session["status"] = "cancelled"
+    session["error"] = None
+    _append_session_log(
+        session_id,
+        "Cancelled by user — results will be discarded; in-flight oracle calls wind down in the background.",
+    )
+    _persist_session_state(session)
+    q = session.get("msg_queue")
+    if q is not None:
+        q.put("⏹ Cancelled by user — stopping stream.")
+        q.put(None)
+    return {"session_id": session_id, "status": "cancelled"}
 
 
 @oracle_router.post("/pipeline/start")

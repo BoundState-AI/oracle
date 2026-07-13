@@ -97,6 +97,8 @@ export interface ReviewTabProps {
   /* Actions */
   onAnalyze: () => void;
   onStartOver: () => void;
+  /** Stop a running review: session is cancelled server-side and results discarded. */
+  onCancelAnalyze?: () => void;
 }
 
 /* ------------------------------------------------------------------ */
@@ -120,6 +122,7 @@ export function ReviewTab({
   onRefreshPacks,
   onAnalyze,
   onStartOver,
+  onCancelAnalyze,
 }: ReviewTabProps) {
   return (
     <div className="space-y-6">
@@ -241,7 +244,21 @@ export function ReviewTab({
         </>
       )}
 
-      {phase.step === "analyzing" && <StatusSpinner messages={phase.logMessages} />}
+      {phase.step === "analyzing" && (
+        <div className="space-y-3">
+          <StatusSpinner messages={phase.logMessages} />
+          {onCancelAnalyze && (
+            <div className="flex items-center gap-3">
+              <Button variant="destructive" size="sm" onClick={onCancelAnalyze}>
+                Stop review
+              </Button>
+              <span className="text-xs text-muted-foreground">
+                Cancels this session and discards results. In-flight oracle calls wind down in the background.
+              </span>
+            </div>
+          )}
+        </div>
+      )}
 
       {phase.step === "result" && (
         <div className="space-y-6">

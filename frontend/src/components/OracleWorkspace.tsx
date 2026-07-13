@@ -55,6 +55,8 @@ export function OracleWorkspace() {
 
   /* ---- SSE / polling cleanup ---- */
   const cleanupRef = useRef<(() => void) | null>(null);
+  /* Session id of the review currently running — target for "Stop review". */
+  const activeReviewSidRef = useRef<string | null>(null);
 
   const clearLiveJob = useCallback(() => {
     if (cleanupRef.current) {
@@ -62,6 +64,21 @@ export function OracleWorkspace() {
       cleanupRef.current = null;
     }
   }, []);
+
+  const handleCancelAnalyze = useCallback(async () => {
+    const sid = activeReviewSidRef.current;
+    clearLiveJob();
+    if (sid) {
+      try {
+        await apiPost(`/review/${sid}/cancel`, {});
+      } catch {
+        // Server unreachable — local stop still applies.
+      }
+    }
+    activeReviewSidRef.current = null;
+    toast.info("Review stopped — results discarded.");
+    setPhase({ step: "upload" });
+  }, [clearLiveJob]);
 
   /* ---- pack loading (shared across tabs) ---- */
 
@@ -178,6 +195,7 @@ export function OracleWorkspace() {
 
       const data = (await res.json()) as { session_id: string };
       const sessionId = data.session_id;
+      activeReviewSidRef.current = sessionId;
 
       const cleanup = connectSSE(
         sessionId,
@@ -348,6 +366,7 @@ export function OracleWorkspace() {
                 onRefreshPacks={() => void loadPacks()}
                 onAnalyze={handleAnalyze}
                 onStartOver={reset}
+                onCancelAnalyze={handleCancelAnalyze}
               />
             )}
 
