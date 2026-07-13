@@ -253,7 +253,7 @@ export function ReviewTab({
                 Stop review
               </Button>
               <span className="text-xs text-muted-foreground">
-                Cancels this session and discards results. In-flight oracle calls wind down in the background.
+                Stops the review at the current round boundary — remaining oracle calls are not made. Results are discarded; artifacts from completed rounds stay on disk.
               </span>
             </div>
           )}

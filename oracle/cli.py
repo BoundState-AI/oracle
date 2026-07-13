@@ -64,6 +64,7 @@ import time
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 from xml.etree import ElementTree as ET
 
@@ -183,8 +184,14 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "claude-opus-4-8": 200_000,
     "claude-opus-4-6": 200_000,
     "claude-sonnet-4-6": 200_000,
+    # gpt-5.6 tiers: conservative floor (same as 5.4) until the published
+    # window is confirmed — a low value only tightens the budget, never breaks it.
+    "gpt-5.6-sol": 128_000,
+    "gpt-5.6-terra": 128_000,
+    "gpt-5.6-luna": 128_000,
     "gpt-5.4": 128_000,
     "gpt-5.4-mini": 128_000,
+    "grok-4.5": 131_072,
     "grok-4.20": 131_072,
     "grok-4": 131_072,
     "gemini-2.5-pro": 1_048_576,
@@ -1975,11 +1982,13 @@ def _configured_review_models() -> list[str]:
     return [
         os.environ.get(var, default)
         for var, default in (
+            # Defaults must mirror oracle2's roster defaults exactly —
+            # this fallback feeds the token-budget floor calculation.
             ("ORACLE_BETH_MODEL", "claude-opus-4-8"),
             ("ORACLE_SONNET_MODEL", "claude-sonnet-4-6"),
-            ("ORACLE_FRAN_MODEL", "gpt-5.4"),
-            ("ORACLE_CODEX_MODEL", "gpt-5.4"),
-            ("ORACLE_GROK_MODEL", "grok-4.20"),
+            ("ORACLE_FRAN_MODEL", "gpt-5.6-terra"),
+            ("ORACLE_CODEX_MODEL", "gpt-5.6-terra"),
+            ("ORACLE_GROK_MODEL", "grok-4.5"),
             ("ORACLE_GEMINI_MODEL", "gemini-2.5-pro"),
         )
     ]
@@ -2292,6 +2301,7 @@ def run_review(
     output_dir: Path | None = None,
     force_text_only: bool = False,
     workflow: str = "manual",
+    cancel_check: Callable[[], bool] | None = None,
 ) -> Any:
     """Run oracle2 review against selected rule packs.
 
@@ -2526,6 +2536,7 @@ def run_review(
         output_dir=output_dir,
         compliance_context=compliance_context,
         workflow=workflow,
+        cancel_check=cancel_check,
     )
 
     # Persist ReviewResult contract artifact (Section 7.3).

@@ -252,7 +252,7 @@ def test_preflight_passes_when_models_respond_with_prose(monkeypatch):
 def test_preflight_names_the_failing_vendor_and_model(monkeypatch):
     def dispatch(config, user_message):
         if config.provider == "xai":
-            raise RuntimeError("404 model grok-4.20 does not exist")
+            raise RuntimeError("404 model grok-4.5 does not exist")
         return {"oracle_name": config.name, "error": "No JSON found", "raw": "pong"}
 
     for provider in ("anthropic", "openai", "xai", "gemini"):
@@ -262,7 +262,8 @@ def test_preflight_names_the_failing_vendor_and_model(monkeypatch):
 
     assert len(failures) == 1
     assert failures[0]["provider"] == "xai"
-    assert failures[0]["model"] == "grok-4.20"
+    # Default roster model — keep in sync with oracle2's ORACLE_GROK_MODEL default
+    assert failures[0]["model"] == "grok-4.5"
     assert "does not exist" in failures[0]["error"]
 
 

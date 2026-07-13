@@ -73,9 +73,12 @@ Multi-oracle review engine. Commands: `oracle review document.md --packs ...`,
 Env vars: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`,
 `GEMINI_API_KEY` (review oracles + extraction).
 
-ORACLE key rules: never modify `oracle2.py` (black box); all packs register
-as "draft" — human promotion required; non-TTY promotion fails closed
-(requires `--yes`); token budget fails hard if compliance context can't fit.
+ORACLE key rules: `oracle2.py` is modifiable as of 2026-07-13 (Joe lifted the
+black-box rule) but treat it as load-bearing — change surgically, keep the
+env-var model overrides working, and run `pytest tests/` before shipping.
+All packs register as "draft" — human promotion required; non-TTY promotion
+fails closed (requires `--yes`); token budget fails hard if compliance
+context can't fit.
 
 ## Testing
 

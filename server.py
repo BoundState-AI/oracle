@@ -575,6 +575,11 @@ def _run_review_background(
             max_rounds=max_rounds,
             output_dir=output_dir,
             force_text_only=False,
+            # Kill loop: polled at every round boundary — Stop halts all
+            # remaining oracle spend, not just the UI stream.
+            cancel_check=lambda: bool(
+                _sessions.get(session_id, {}).get("cancel_requested")
+            ),
         )
 
         msg_queue.put("Review complete — parsing results...")
@@ -990,12 +995,13 @@ class PipelineStartRequest(BaseModel):
 
 @oracle_router.post("/review/{session_id}/cancel")
 async def review_cancel(session_id: str) -> dict[str, Any]:
-    """Stop a running spec review: mark cancelled, close the stream, discard results.
+    """Stop a running spec review: kill loop + stream close + result discard.
 
-    Honest semantics: the review thread cannot be force-killed (in-process,
-    engine is a black box), so in-flight model calls wind down in the
-    background — but the session is released immediately, late results are
-    discarded, and artifacts already written remain on disk.
+    The cancel flag is polled by oracle2's round loop at every round boundary,
+    so all remaining oracle calls are skipped (real spend stop). Calls already
+    in flight within the current round complete; the session is released
+    immediately, late results are discarded, and artifacts from completed
+    rounds remain on disk.
     """
     session = _sessions.get(session_id)
     if not session:

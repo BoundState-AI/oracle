@@ -41,6 +41,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 from oracle.redact import redact_secrets
@@ -489,7 +490,7 @@ ORACLE_ROSTER: dict[str, OracleConfig] = {
         name="Fran",
         role="adversarial_logic",
         provider="openai",
-        model=os.environ.get("ORACLE_FRAN_MODEL", "gpt-5.4"),
+        model=os.environ.get("ORACLE_FRAN_MODEL", "gpt-5.6-terra"),
         system_prompt=FRAN_ADVERSARIAL_PROMPT,
         max_tokens=int(
             os.environ.get("ORACLE_FRAN_MAX_TOKENS", str(OPENAI_REVIEWER_MAX_TOKENS))
@@ -499,7 +500,7 @@ ORACLE_ROSTER: dict[str, OracleConfig] = {
         name="Codex",
         role="implementation_feasibility",
         provider="openai",
-        model=os.environ.get("ORACLE_CODEX_MODEL", "gpt-5.4"),
+        model=os.environ.get("ORACLE_CODEX_MODEL", "gpt-5.6-terra"),
         system_prompt=CODEX_FEASIBILITY_PROMPT,
         max_tokens=int(
             os.environ.get("ORACLE_CODEX_MAX_TOKENS", str(OPENAI_REVIEWER_MAX_TOKENS))
@@ -509,7 +510,7 @@ ORACLE_ROSTER: dict[str, OracleConfig] = {
         name="Grok",
         role="contrarian",
         provider="xai",
-        model=os.environ.get("ORACLE_GROK_MODEL", "grok-4.20"),
+        model=os.environ.get("ORACLE_GROK_MODEL", "grok-4.5"),
         system_prompt=GROK_CONTRARIAN_PROMPT,
     ),
     "gemini": OracleConfig(
@@ -2439,12 +2440,18 @@ def run_review(
     output_dir: Path | None = None,
     compliance_context: str | None = None,
     workflow: str = DEFAULT_WORKFLOW,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> OracleSession:
     """Run the full multi-oracle review loop.
 
     Default workflow is "manual": blind reviewers -> Beth directly.  The
     legacy "ledger" workflow keeps the older Sonnet-normalized issue ledger.
     Saves final_draft.md and session_summary.json on completion.
+
+    cancel_check: optional callable polled at each round boundary; returning
+    True stops the review before the next round's oracle calls are made.
+    The session finalizes normally (artifacts written) with consensus_type
+    "cancelled" — cancellation halts spend, it never destroys evidence.
     """
     workflow = workflow.strip().lower()
     if workflow not in VALID_WORKFLOWS:
@@ -2483,6 +2490,17 @@ def run_review(
 
     consecutive_invalid = 0
     for round_num in range(1, max_rounds + 1):
+        # Round boundary is the cancellation point: all of a round's oracle
+        # calls either happen or don't — no torn rounds, no lost evidence.
+        if cancel_check is not None and cancel_check():
+            session.converged = False
+            session.consensus_type = "cancelled"
+            session.convergence_reason = (
+                f"Cancelled by user before round {round_num} — "
+                f"{round_num - 1} round(s) completed; remaining rounds not run"
+            )
+            LOGGER.info(session.convergence_reason)
+            break
         LOGGER.info(f"\n{'='*60}\nRound {round_num}\n{'='*60}")
         if workflow == "manual":
             _, should_stop = _run_manual_round(
@@ -2689,9 +2707,9 @@ Environment variables:
 
   ORACLE_WORKFLOW     — manual | ledger (default: manual)
   ORACLE_BETH_MODEL   — Override Beth model  (default: claude-opus-4-8)
-  ORACLE_FRAN_MODEL   — Override Fran model  (default: gpt-5.4)
-  ORACLE_CODEX_MODEL  — Override Codex model (default: gpt-5.4)
-  ORACLE_GROK_MODEL   — Override Grok model  (default: grok-4.20)
+  ORACLE_FRAN_MODEL   — Override Fran model  (default: gpt-5.6-terra)
+  ORACLE_CODEX_MODEL  — Override Codex model (default: gpt-5.6-terra)
+  ORACLE_GROK_MODEL   — Override Grok model  (default: grok-4.5)
   ORACLE_GEMINI_MODEL — Override Gemini model (default: gemini-2.5-pro)
   ORACLE_SONNET_MODEL — Override Sonnet model (default: claude-sonnet-4-6)
 
