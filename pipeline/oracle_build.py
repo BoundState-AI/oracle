@@ -41,6 +41,7 @@ __safety_critical__: bool = False
 import argparse
 import fnmatch
 import io
+import json
 import logging
 import os
 import re
@@ -84,7 +85,11 @@ Rules:
 - Work only in this repository. Follow the existing code style and structure.
 - BoundState standards: Python type hints everywhere, Pydantic extra="forbid",
   no bare except, logging not print, docstrings on public classes/functions.
-- Write tests alongside the implementation where the spec implies testable behavior.
+- Write tests alongside the implementation where the spec implies testable
+  behavior. The pipeline measures DIFF COVERAGE — the fraction of lines you
+  add that your tests actually execute — and may fail the round below its
+  floor. Write real tests, never assertion-free padding.
+- Do not add dependencies without stating the justification in your build summary.
 - Do NOT git commit, push, or create branches — leave changes in the working tree.
 - If part of the spec is ambiguous, make the pragmatic call and note it.
 
@@ -116,6 +121,9 @@ Fix the failures:
 - Failing tests: fix the code. If the test itself is wrong against the spec,
   fix the test and say so explicitly. NEVER relax, skip, or delete a test just
   to make it pass, and never swallow errors to silence a failure.
+- Insufficient diff coverage: write real tests for the uncovered lines listed
+  in the report. Never inflate coverage by deleting code or writing
+  assertion-free tests.
 - Protected-path violations: revert every change to those paths (`git checkout
   -- <path>` for tracked files; delete new files you created there). Protected
   paths are outside this build's authority no matter what the spec seems to
@@ -131,10 +139,14 @@ Judge the final diff against the SPEC — not just against generic code quality:
 - Does the implementation actually satisfy the spec's requirements? List any gaps.
 - Were the reviewer's Critical/High findings genuinely fixed, or papered over?
 - Correctness: any remaining real bugs with concrete failure scenarios.
-- Deterministic check evidence (test run + protected-path scan) is included.
-  Failing checks are disqualifying — never APPROVED over red evidence. If test
-  evidence was skipped ("no tests collected/detected"), APPROVED requires the
-  spec to plainly have no testable behavior; say so explicitly if you rely on that.
+- Deterministic check evidence (test run, diff coverage, protected-path scan)
+  is included. Failing checks are disqualifying — never APPROVED over red
+  evidence. If test evidence was skipped ("no tests collected/detected"),
+  APPROVED requires the spec to plainly have no testable behavior; say so
+  explicitly if you rely on that.
+- The check report's "Platform floor" section says whether the repo ships CI
+  workflows and a test suite. A platform build missing either is a gap —
+  treat it as disqualifying unless the spec explicitly says otherwise.
 - BoundState standards: evidence-first behavior, deterministic refusal on missing
   evidence, type hints, no bare except, __safety_critical__ headers where applicable.
 
@@ -316,6 +328,134 @@ def protected_violations(repo: Path, patterns: list[str]) -> list[tuple[str, str
     return hits
 
 
+# ── Diff coverage (are the lines the build ADDED actually tested?) ─────────
+
+def _is_test_or_artifact(path: str) -> bool:
+    """Paths whose coverage is meaningless for the gate: tests themselves,
+    pipeline artifacts, bytecode."""
+    p = path.replace("\\", "/")
+    name = p.rsplit("/", 1)[-1]
+    return (p.startswith(("tests/", "oracle_builds/", "oracle_reviews/"))
+            or "/tests/" in p or "__pycache__" in p
+            or name.startswith("test_") or name == "conftest.py")
+
+
+def added_py_lines(repo: Path) -> dict[str, set[int]]:
+    """Line numbers added to each product .py file in the working tree.
+
+    Tracked changes come from `git diff -U0`; untracked files count in full.
+    Test files are excluded — the coverage gate asks whether *product* lines
+    are tested, not whether tests cover themselves.
+    """
+    added: dict[str, set[int]] = {}
+    current: str | None = None
+    for line in orv._git(repo, "diff", "HEAD", "-U0", "--", "*.py").splitlines():
+        if line.startswith("+++ b/"):
+            path = line[6:].strip()
+            current = None if _is_test_or_artifact(path) else path
+        elif line.startswith("@@") and current:
+            m = re.search(r"\+(\d+)(?:,(\d+))?", line)
+            if not m:
+                continue
+            start, count = int(m.group(1)), int(m.group(2) or "1")
+            if count:
+                added.setdefault(current, set()).update(range(start, start + count))
+    for raw in orv._git(repo, "ls-files", "--others", "--exclude-standard").splitlines():
+        path = raw.strip().replace("\\", "/")
+        if not path.endswith(".py") or _is_test_or_artifact(path):
+            continue
+        try:
+            n_lines = len((repo / path).read_text(encoding="utf-8", errors="replace").splitlines())
+        except OSError:
+            continue
+        if n_lines:
+            added.setdefault(path, set()).update(range(1, n_lines + 1))
+    return added
+
+
+def diff_coverage(repo: Path, added: dict[str, set[int]], cov_data: dict,
+                  max_gaps: int = 15) -> tuple[float, int, int, list[str]]:
+    """(percent, covered, measurable, gap descriptions) for the added lines.
+
+    Measurable = added lines coverage.py considers executable. A changed file
+    absent from the coverage report was never imported by any test — its
+    non-blank, non-comment added lines all count as uncovered (errs toward
+    demanding tests, which is the point of the gate).
+    """
+    files = {k.replace("\\", "/"): v for k, v in cov_data.get("files", {}).items()}
+    covered = measurable = 0
+    gaps: list[str] = []
+    for path, lines in sorted(added.items()):
+        entry = files.get(path)
+        if entry is not None:
+            executed = set(entry.get("executed_lines", []))
+            missing = set(entry.get("missing_lines", []))
+            file_measurable = lines & (executed | missing)
+            file_covered = lines & executed
+            file_missing = sorted(lines & missing)
+        else:
+            try:
+                src = (repo / path).read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                continue
+            file_missing = sorted(
+                n for n in lines
+                if 0 < n <= len(src) and src[n - 1].strip() and not src[n - 1].lstrip().startswith("#"))
+            file_measurable = set(file_missing)
+            file_covered = set()
+        measurable += len(file_measurable)
+        covered += len(file_covered)
+        if file_missing and len(gaps) < max_gaps:
+            note = "" if entry is not None else " (module never imported by any test)"
+            shown = ", ".join(str(n) for n in file_missing[:12])
+            more = f" …+{len(file_missing) - 12}" if len(file_missing) > 12 else ""
+            gaps.append(f"- `{path}`{note}: uncovered added lines {shown}{more}")
+    pct = 100.0 if measurable == 0 else 100.0 * covered / measurable
+    return pct, covered, measurable, gaps
+
+
+def run_coverage_check(repo: Path, out_dir: Path, round_num: int,
+                       floor: int) -> tuple[bool, list[str]]:
+    """Run pytest under coverage and gate on diff coverage of added lines.
+
+    Fails closed: with a floor set, missing pytest/pytest-cov or an absent
+    coverage report is a FAIL with instructions, never a silent skip.
+
+    Runs `<this interpreter> -m pytest` rather than the PATH pytest shim so
+    the plugin set is the pipeline's own environment — a PATH pytest from a
+    different install may lack pytest-cov even when the pipeline has it.
+    """
+    json_path = out_dir / f"coverage_round{round_num}.json"
+    argv = [sys.executable, "-m", "pytest"] + \
+        (["tests"] if (repo / "tests").is_dir() else []) + \
+        ["-q", "--cov=.", f"--cov-report=json:{json_path}"]
+    code, output = _run_check_cmd(argv, repo, CHECK_TIMEOUT_S)
+    if not json_path.is_file():
+        return False, [f"## Diff coverage — FAIL (no coverage report, exit {code})", "",
+                       "The coverage run produced no report. Ensure pytest-cov is "
+                       "installed in the target environment.", "",
+                       "```", _tail(output, 2000), "```", ""]
+    try:
+        cov_data = json.loads(json_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return False, [f"## Diff coverage — FAIL (unreadable coverage report: {exc})", ""]
+    added = added_py_lines(repo)
+    pct, covered, measurable, gaps = diff_coverage(repo, added, cov_data)
+    if measurable == 0:
+        return True, ["## Diff coverage — PASS (nothing to measure)", "",
+                      "No new executable product lines in this diff.", ""]
+    ok = pct >= floor
+    header = (f"## Diff coverage — {'PASS' if ok else 'FAIL'} "
+              f"({pct:.1f}% of {measurable} added executable lines; floor {floor}%)")
+    lines = [header, ""]
+    if gaps:
+        lines += gaps + [""]
+    if not ok:
+        lines += ["Write real tests for the uncovered lines above. Deleting code or "
+                  "adding assertion-free tests to move this number is a gate offense.", ""]
+    return ok, lines
+
+
 # ── Deterministic check stage ───────────────────────────────────────────────
 
 def resolve_check_cmd(repo: Path, check_cmd: str) -> tuple[list[str] | None, bool]:
@@ -372,8 +512,11 @@ def run_checks(
     check_argv: list[str] | None,
     check_auto: bool,
     protected: list[str],
+    *,
+    coverage_floor: int = 0,
 ) -> tuple[bool, str, Path]:
-    """Deterministic CHECK stage: protected-path scan + test run.
+    """Deterministic CHECK stage: protected-path scan + test run + optional
+    diff-coverage gate + platform-floor report.
 
     Returns (ok, report_markdown, report_path). Fails closed: a timed-out or
     erroring test command is a FAIL, never a skip. In auto mode a repo where
@@ -417,6 +560,19 @@ def run_checks(
             exit_desc = f"exit code {code}" if code is not None else f"TIMEOUT after {CHECK_TIMEOUT_S}s"
             lines += [f"## Tests — FAIL ({exit_desc})", "", f"Command: `{cmd_str}`", "",
                       "```", _tail(output, CHECK_OUTPUT_CAP), "```", ""]
+
+    if coverage_floor > 0:
+        cov_ok, cov_lines = run_coverage_check(repo, out_dir, round_num, coverage_floor)
+        ok = ok and cov_ok
+        lines += cov_lines
+
+    # Informational only — the gate judges it (a platform build without CI or
+    # tests is a gap), but it never reds a round by itself.
+    workflows_dir = repo / ".github" / "workflows"
+    has_ci = workflows_dir.is_dir() and any(workflows_dir.glob("*.y*ml"))
+    lines += ["## Platform floor — INFO", "",
+              f"- CI workflows (.github/workflows/): {'present' if has_ci else 'MISSING'}",
+              f"- tests/ directory: {'present' if (repo / 'tests').is_dir() else 'MISSING'}", ""]
 
     lines += [f"RESULT: {'PASS' if ok else 'FAIL'}"]
     report = "\n".join(lines)
@@ -568,6 +724,7 @@ def run_pipeline(
     *,
     progress: Callable[[str], None] | None = None,
     check_cmd: str = "auto",
+    coverage_floor: int = 0,
     agents: PipelineAgents | None = None,
 ) -> str:
     """Execute build → check → review → fix loop → Fable final gate.
@@ -598,7 +755,8 @@ def run_pipeline(
         LOGGER.info(msg)
 
     emit(f"Checks: {' '.join(check_argv) if check_argv else 'none'}"
-         f"{' (auto)' if check_auto else ''} | protected patterns: {len(protected)}")
+         f"{' (auto)' if check_auto else ''} | protected patterns: {len(protected)}"
+         f" | coverage floor: {coverage_floor if coverage_floor else 'off'}")
 
     # ── Stage 1: Build ──────────────────────────────────────────────────
     if skip_build:
@@ -625,7 +783,8 @@ def run_pipeline(
     for round_num in range(1, fix_rounds + 2):  # initial pass + one per fix round
         emit(f"═══ Stage 2: CHECK round {round_num} — tests + protected paths ═══")
         checks_ok, check_report, check_path = run_checks(
-            repo, out_dir, round_num, check_argv, check_auto, protected)
+            repo, out_dir, round_num, check_argv, check_auto, protected,
+            coverage_floor=coverage_floor)
         state.add(f"Round {round_num} — deterministic checks",
                   "PASS" if checks_ok else check_report)
         print(_banner(f"CHECKS — ROUND {round_num} → {'PASS' if checks_ok else 'FAIL'}",
@@ -711,6 +870,10 @@ def main() -> None:
     parser.add_argument("--check-cmd", default="auto",
                         help='Deterministic test command run before each review round '
                              '(default: auto — detect pytest; "none" disables)')
+    parser.add_argument("--coverage-floor", type=int, default=0,
+                        help="Minimum %% diff coverage: lines the build adds must be "
+                             "executed by tests (0 disables; 70-85 recommended for "
+                             "platform builds; requires pytest-cov in the target env)")
     parser.add_argument("--skip-build", action="store_true",
                         help="Skip the build stage; check+review+gate the existing working-tree changes")
     parser.add_argument("--allow-dirty", action="store_true",
@@ -749,13 +912,14 @@ def main() -> None:
     print(f"  Spec: {spec_path.name}")
     print(f"  Repo: {repo}")
     print(f"  Build: {'skipped' if args.skip_build else 'Ben (Grok Build)'}")
-    print(f"  Checks: {' '.join(check_argv) if check_argv else 'none detected/disabled'}")
+    print(f"  Checks: {' '.join(check_argv) if check_argv else 'none detected/disabled'}"
+          + (f" | diff coverage ≥{args.coverage_floor}%" if args.coverage_floor else ""))
     print(f"  Review: Atlas (Codex {ATLAS_PRESET}), {args.fix_rounds} fix round(s)")
     print("  Gate: Beth (Claude Fable, high effort)")
     print(f"{'═' * 60}\n")
 
     final_gate = run_pipeline(spec_path, repo, args.fix_rounds, args.skip_build, out_dir,
-                              check_cmd=args.check_cmd)
+                              check_cmd=args.check_cmd, coverage_floor=args.coverage_floor)
 
     status = "APPROVED" if final_gate == "APPROVED" else f"GATE {final_gate}"
     print(f"\n{'═' * 60}\n  PIPELINE COMPLETE — {status} — {out_dir / 'PIPELINE_REPORT.md'}\n{'═' * 60}\n")

@@ -197,6 +197,103 @@ def test_run_checks_skipped_tests_are_flagged_not_failed(repo: Path, tmp_path: P
     assert "Protected paths — SKIPPED" in report
 
 
+# ── Diff coverage gate ──────────────────────────────────────────────────────
+
+def _covered_repo(tmp_path: Path, *, tested: bool) -> Path:
+    """Repo with an empty initial commit and a working-tree product module;
+    `tested` controls whether a test actually exercises the new lines."""
+    repo = tmp_path / "cov_repo"
+    (repo / "tests").mkdir(parents=True)
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "test@boundstate.ai")
+    _git(repo, "config", "user.name", "test")
+    (repo / "README.md").write_text("seed\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "init")
+    (repo / "calc.py").write_text(
+        "def add(a: int, b: int) -> int:\n"
+        "    return a + b\n"
+        "\n"
+        "\n"
+        "def sub(a: int, b: int) -> int:\n"
+        "    return a - b\n", encoding="utf-8")
+    body = ("from calc import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n"
+            if tested else "def test_nothing():\n    assert True\n")
+    (repo / "tests" / "test_calc.py").write_text(body, encoding="utf-8")
+    return repo
+
+
+def test_added_py_lines_tracks_untracked_and_skips_tests(tmp_path: Path) -> None:
+    repo = _covered_repo(tmp_path, tested=True)
+    added = ob.added_py_lines(repo)
+    assert set(added) == {"calc.py"}  # test file excluded, README not .py
+    assert added["calc.py"] == set(range(1, 7))
+
+
+def test_is_test_or_artifact_classification() -> None:
+    assert ob._is_test_or_artifact("tests/test_x.py")
+    assert ob._is_test_or_artifact("pkg/tests/helper.py")
+    assert ob._is_test_or_artifact("pkg/conftest.py")
+    assert ob._is_test_or_artifact("oracle_builds/x/spec.py")
+    assert not ob._is_test_or_artifact("pkg/engine.py")
+    assert not ob._is_test_or_artifact("pkg/testing_utils.py")  # not a test_* name
+
+
+def test_run_coverage_check_fails_on_untested_module(tmp_path: Path) -> None:
+    repo = _covered_repo(tmp_path, tested=False)
+    out = tmp_path / "out"
+    out.mkdir()
+    ok, lines = ob.run_coverage_check(repo, out, 1, floor=80)
+    report = "\n".join(lines)
+    assert ok is False
+    assert "Diff coverage — FAIL" in report
+    assert "calc.py" in report
+    assert (out / "coverage_round1.json").is_file()
+
+
+def test_run_coverage_check_passes_partial_coverage_over_floor(tmp_path: Path) -> None:
+    # add() is tested, sub() is not: 2 of 4 executable added lines covered.
+    repo = _covered_repo(tmp_path, tested=True)
+    out = tmp_path / "out"
+    out.mkdir()
+    ok_low, lines_low = ob.run_coverage_check(repo, out, 1, floor=50)
+    assert ok_low is True, "\n".join(lines_low)
+    ok_high, lines_high = ob.run_coverage_check(repo, out, 2, floor=90)
+    assert ok_high is False
+    assert "uncovered added lines" in "\n".join(lines_high)
+
+
+def test_run_coverage_check_nothing_to_measure_passes(repo: Path, tmp_path: Path) -> None:
+    (repo / "notes.txt").write_text("docs only\n", encoding="utf-8")
+    out = tmp_path / "out"
+    out.mkdir()
+    ok, lines = ob.run_coverage_check(repo, out, 1, floor=80)
+    assert ok is True
+    assert "nothing to measure" in "\n".join(lines)
+
+
+def test_diff_coverage_counts_unimported_module_as_uncovered(tmp_path: Path) -> None:
+    repo = tmp_path / "r"
+    repo.mkdir()
+    (repo / "ghost.py").write_text("# comment\n\nx = 1\ny = 2\n", encoding="utf-8")
+    added = {"ghost.py": {1, 2, 3, 4}}
+    pct, covered, measurable, gaps = ob.diff_coverage(repo, added, {"files": {}})
+    assert (pct, covered, measurable) == (0.0, 0, 2)  # comment+blank excluded
+    assert "never imported" in gaps[0]
+
+
+def test_run_checks_includes_coverage_and_platform_floor(tmp_path: Path) -> None:
+    repo = _covered_repo(tmp_path, tested=False)
+    out = tmp_path / "out"
+    out.mkdir()
+    ok, report, _ = ob.run_checks(repo, out, 1, None, True, [], coverage_floor=80)
+    assert ok is False  # tests pass (placeholder) but coverage reds the round
+    assert "Diff coverage — FAIL" in report
+    assert "## Platform floor — INFO" in report
+    assert "CI workflows (.github/workflows/): MISSING" in report
+    assert "tests/ directory: present" in report
+
+
 # ── Verdict clamp ───────────────────────────────────────────────────────────
 
 APPROVED_GATE = "## Final Verdict\nAPPROVED\n\nShip it.\n"

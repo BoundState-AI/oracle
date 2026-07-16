@@ -7,7 +7,8 @@ manual oracle workflow for **code**. The spec-review sibling lives at
 | Tool | What it does |
 |---|---|
 | `oracle_review.py` | Parallel adversarial code review of a diff: Atlas (Codex `gpt-5.6-sol` medium / `--atlas terra-high`), Ben (Grok Build `-p`), Beth (Claude Fable). Beth synthesizes `MERGED_REVIEW.md` with SHIP / FIX FIRST / BLOCK. |
-| `oracle_build.py`  | Full pipeline: polished spec → Ben (Grok Build, auto-approved) implements → deterministic CHECK (tests + protected paths) → Atlas (Codex terra-high) reviews → Ben fixes (`--fix-rounds`) → Beth (Fable, high effort) final gate: APPROVED / CHANGES REQUIRED / REJECTED → `PIPELINE_REPORT.md`. Red checks can never gate APPROVED. |
+| `oracle_build.py`  | Full pipeline: polished spec → Ben (Grok Build, auto-approved) implements → deterministic CHECK (tests + diff coverage + protected paths) → Atlas (Codex terra-high) reviews → Ben fixes (`--fix-rounds`) → Beth (Fable, high effort) final gate: APPROVED / CHANGES REQUIRED / REJECTED → `PIPELINE_REPORT.md`. Red checks can never gate APPROVED. |
+| `oracle_scaffold.py` | Pours the platform floor into a target repo before the first build: CI workflow with a 70% coverage floor, day-zero test, self-protecting `.oracle_protected` (the builder cannot edit CI or the protection file), `AGENTS.md` stub, `.gitignore`, minimal `pyproject.toml`. Idempotent; never overwrites existing files. |
 
 ## Deterministic layer (`oracle_build.py`)
 
@@ -22,10 +23,25 @@ Every round starts with a CHECK stage before any reviewer tokens are spent
   failing checks is clamped to CHANGES REQUIRED even if Beth says APPROVED.
   With auto-detection, pytest exit 5 (no tests collected) is a warning, not a
   failure; an explicit `--check-cmd` must exit 0.
+- **Diff coverage** — `--coverage-floor N` (0 = off; 70–85 recommended for
+  platform builds) measures the fraction of *added* executable product lines
+  that the test run actually executes, via `pytest --cov` in the pipeline's
+  interpreter (requires pytest-cov). New modules never imported by any test
+  count as 0% covered. Legacy repo coverage never blocks a build — only the
+  lines the build adds are gated — and coverage can't be inflated by deleting
+  code or writing assertion-free tests (both are named gate offenses in the
+  fix prompts). Uncovered line numbers are listed in the check report so Ben
+  knows exactly what to test.
 - **Protected paths** — globs from the spec's `## Never touch` section plus a
   `.oracle_protected` file at the target repo root (one glob per line, `#`
   comments). Any touched path matching a pattern fails the round with a named
   violation; Ben is instructed to revert, and the next round re-checks.
+- **Platform floor** — every check report notes whether the target repo has
+  CI workflows and a `tests/` directory (informational; Beth is instructed to
+  treat their absence on a platform build as disqualifying). Run
+  `oracle_scaffold.py` on new platforms so the floor exists before Ben's
+  first line — generated platforms ship with CI/CD by construction, not by
+  prompt.
 - **`PIPELINE_STATE.md`** — a round-by-round record (build summary, check
   results, Atlas verdicts, Ben's fix/dismissal summaries) written into the
   artifact dir as the run progresses. It is appended to every review request —
