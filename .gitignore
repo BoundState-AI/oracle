@@ -40,3 +40,4 @@ Thumbs.db
 hearth_audit/
 .pytest_cache/
 oracle_server.log
+.coverage
