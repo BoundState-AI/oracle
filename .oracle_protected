@@ -1,0 +1,9 @@
+# Paths the oracle build pipeline must never modify (one glob per line).
+# Read by pipeline/oracle_build.py's CHECK stage; a spec's "## Never touch"
+# section adds task-specific patterns on top of these repo defaults.
+# Inline comments after " #" are stripped.
+
+hearth/packs/jurisdiction/* # signed rule packs — edits require deliberate re-signing
+tests/golden/fixtures/* # golden fixtures — regenerate only deliberately (HEARTH_UPDATE_GOLDEN=1)
+tests/hearth/golden/* # Grey Rock + scan goldens — same rule
+docs/HEARTH_spec_v0.3.md # ratified spec — changes go through spec review, not builds

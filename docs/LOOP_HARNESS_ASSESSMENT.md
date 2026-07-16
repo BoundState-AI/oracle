@@ -198,11 +198,15 @@ deliberately bounded, and nothing about our workload is periodic.
 
 ## 6. Recommended order of work
 
+> **Update 2026-07-16:** items 1–3 shipped in `pipeline/oracle_build.py`
+> (tests in `tests/test_pipeline_build.py`; repo defaults in
+> `.oracle_protected`; usage in `pipeline/README.md`).
+
 | # | Change | Where | Size |
 |---|---|---|---|
-| 1 | CHECK stage: run tests + feed failures back to Ben, test evidence into the gate, fail closed on red | `pipeline/oracle_build.py` | ~80 lines |
-| 2 | `PIPELINE_STATE.md` carried across fix rounds | `pipeline/oracle_build.py` | ~40 lines |
-| 3 | Protected-paths diff check (spec `## Never touch` + per-repo defaults) | `pipeline/oracle_build.py` (CHECK stage) | ~40 lines |
+| 1 | ✅ CHECK stage: run tests + feed failures back to Ben, test evidence into the gate, fail closed on red | `pipeline/oracle_build.py` | ~80 lines |
+| 2 | ✅ `PIPELINE_STATE.md` carried across fix rounds | `pipeline/oracle_build.py` | ~40 lines |
+| 3 | ✅ Protected-paths diff check (spec `## Never touch` + per-repo defaults) | `pipeline/oracle_build.py` (CHECK stage) | ~40 lines |
 | 4 | Spec contract sections emitted by spec review, warned-on by build | spec-review prompt + `oracle_build.py` | small |
 | 5 | `AGENTS.md` read-first line in `BUILD_PROMPT` + missing-file warning | `pipeline/oracle_build.py` | trivial |
 | 6 | `oracle ship` orchestrator with human approval gate | new thin CLI | later |

@@ -7,7 +7,30 @@ manual oracle workflow for **code**. The spec-review sibling lives at
 | Tool | What it does |
 |---|---|
 | `oracle_review.py` | Parallel adversarial code review of a diff: Atlas (Codex `gpt-5.6-sol` medium / `--atlas terra-high`), Ben (Grok Build `-p`), Beth (Claude Fable). Beth synthesizes `MERGED_REVIEW.md` with SHIP / FIX FIRST / BLOCK. |
-| `oracle_build.py`  | Full pipeline: polished spec → Ben (Grok Build, auto-approved) implements → Atlas (Codex terra-high) reviews → Ben fixes (`--fix-rounds`) → Beth (Fable, high effort) final gate: APPROVED / CHANGES REQUIRED / REJECTED → `PIPELINE_REPORT.md`. |
+| `oracle_build.py`  | Full pipeline: polished spec → Ben (Grok Build, auto-approved) implements → deterministic CHECK (tests + protected paths) → Atlas (Codex terra-high) reviews → Ben fixes (`--fix-rounds`) → Beth (Fable, high effort) final gate: APPROVED / CHANGES REQUIRED / REJECTED → `PIPELINE_REPORT.md`. Red checks can never gate APPROVED. |
+
+## Deterministic layer (`oracle_build.py`)
+
+Every round starts with a CHECK stage before any reviewer tokens are spent
+(see `docs/LOOP_HARNESS_ASSESSMENT.md` §3 for the rationale):
+
+- **Tests** — `--check-cmd` runs before each review round (default `auto`:
+  `pytest tests -q` when a `tests/` dir exists, plain `pytest -q` when only a
+  pytest config is present, skipped-with-warning when neither; `none`
+  disables). Failures skip Atlas and go straight back to Ben as a fix round;
+  the final check report is fed to Beth as gate evidence, and a gate over
+  failing checks is clamped to CHANGES REQUIRED even if Beth says APPROVED.
+  With auto-detection, pytest exit 5 (no tests collected) is a warning, not a
+  failure; an explicit `--check-cmd` must exit 0.
+- **Protected paths** — globs from the spec's `## Never touch` section plus a
+  `.oracle_protected` file at the target repo root (one glob per line, `#`
+  comments). Any touched path matching a pattern fails the round with a named
+  violation; Ben is instructed to revert, and the next round re-checks.
+- **`PIPELINE_STATE.md`** — a round-by-round record (build summary, check
+  results, Atlas verdicts, Ben's fix/dismissal summaries) written into the
+  artifact dir as the run progresses. It is appended to every review request —
+  Atlas must rebut a stated dismissal reason instead of re-raising the same
+  finding each round — and to the gate input.
 
 ## Usage
 
