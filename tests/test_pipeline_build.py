@@ -248,3 +248,178 @@ def test_pipeline_state_persists_and_caps_entries(tmp_path: Path) -> None:
 def test_pipeline_state_empty_render() -> None:
     state = ob.PipelineState(Path("unused.md"))
     assert state.render() == "(no rounds recorded yet)"
+
+
+# ── run_pipeline orchestration (fake agents via the PipelineAgents seam) ────
+
+PASS_CMD = f"{sys.executable} -c pass"
+PYTEST_CMD = f"{sys.executable} -m pytest tests -q"
+APPROVED = "## Final Verdict\nAPPROVED\n\nShip it.\n"
+
+
+def make_agents(
+    verdicts: list[str],
+    gate_output: str = APPROVED,
+    on_fix=None,
+) -> tuple[ob.PipelineAgents, dict]:
+    """Deterministic stand-ins for grok/codex/Anthropic. `on_fix` runs on every
+    fix prompt so a fake fix can genuinely repair the repo between rounds."""
+    calls: dict = {"build": [], "review": [], "gate": []}
+    verdict_iter = iter(verdicts)
+
+    def build(prompt: str, _repo: Path, _timeout: int) -> str:
+        calls["build"].append(prompt)
+        if on_fix is not None and "Implement the specification" not in prompt:
+            on_fix(prompt)
+        return "fake build/fix summary"
+
+    def review(_spec: Path, _repo: Path, out_dir: Path, round_num: int,
+               *, state_md: str = "") -> tuple[str, Path]:
+        calls["review"].append({"round": round_num, "state_md": state_md})
+        text = f"1. nothing real\n\nVERDICT: {next(verdict_iter)}"
+        path = out_dir / f"atlas_review_round{round_num}.md"
+        path.write_text(text, encoding="utf-8")
+        return text, path
+
+    def gate(_system: str, user_prompt: str, timeout=None) -> str:
+        calls["gate"].append(user_prompt)
+        return gate_output
+
+    return ob.PipelineAgents(build=build, review=review, gate=gate), calls
+
+
+@pytest.fixture
+def build_repo(tmp_path: Path) -> Path:
+    """Repo with a committed passing test and a tracked file to modify."""
+    repo = tmp_path / "build_repo"
+    (repo / "tests").mkdir(parents=True)
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "test@boundstate.ai")
+    _git(repo, "config", "user.name", "test")
+    (repo / "app.py").write_text("x = 1\n", encoding="utf-8")
+    (repo / "tests" / "test_app.py").write_text("def test_ok():\n    assert True\n",
+                                                encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "init")
+    (repo / "app.py").write_text("x = 2\n", encoding="utf-8")  # non-empty diff for the gate
+    return repo
+
+
+def _spec(tmp_path: Path) -> Path:
+    spec = tmp_path / "spec.md"
+    spec.write_text("# Goal\nChange x.\n", encoding="utf-8")
+    return spec
+
+
+def test_run_pipeline_happy_path(build_repo: Path, tmp_path: Path) -> None:
+    agents, calls = make_agents(verdicts=["SHIP"])
+    out = tmp_path / "out"
+    verdict = ob.run_pipeline(_spec(tmp_path), build_repo, 1, False, out,
+                              check_cmd=PASS_CMD, agents=agents)
+    assert verdict == "APPROVED"
+    assert len(calls["build"]) == 1  # BUILD only, no fixes
+    assert "Implement the specification" in calls["build"][0]
+    assert [c["round"] for c in calls["review"]] == [1]
+    assert len(calls["gate"]) == 1
+    gate_prompt = calls["gate"][0]
+    assert "## Deterministic Check Evidence" in gate_prompt
+    assert "### Atlas Review — Round 1" in gate_prompt
+    report = (out / "PIPELINE_REPORT.md").read_text(encoding="utf-8")
+    assert "**Checks:** PASS" in report and "**Final Gate:** APPROVED" in report
+    assert (out / "build_log.md").is_file()
+    state = (out / "PIPELINE_STATE.md").read_text(encoding="utf-8")
+    assert "Build — Ben's summary" in state
+
+
+def test_run_pipeline_red_check_routes_to_fix_and_skips_review(
+        build_repo: Path, tmp_path: Path) -> None:
+    test_file = build_repo / "tests" / "test_app.py"
+    test_file.write_text("def test_ok():\n    assert False\n", encoding="utf-8")
+
+    def fix(prompt: str) -> None:
+        assert "deterministic checks" in prompt  # CHECK_FIX_PROMPT, not FIX_PROMPT
+        test_file.write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+
+    agents, calls = make_agents(verdicts=["SHIP"], on_fix=fix)
+    out = tmp_path / "out"
+    verdict = ob.run_pipeline(_spec(tmp_path), build_repo, 1, True, out,
+                              check_cmd=PYTEST_CMD, agents=agents)
+    assert verdict == "APPROVED"
+    assert len(calls["build"]) == 1  # exactly one fix pass, no build (skip_build)
+    assert [c["round"] for c in calls["review"]] == [2]  # round 1 never reached Atlas
+    assert (out / "fix_log_round1.md").is_file()
+    assert "FAIL" in (out / "check_round1.md").read_text(encoding="utf-8")
+    assert "RESULT: PASS" in (out / "check_round2.md").read_text(encoding="utf-8")
+
+
+def test_run_pipeline_exhausted_red_checks_clamps_gate(
+        build_repo: Path, tmp_path: Path) -> None:
+    (build_repo / "tests" / "test_app.py").write_text(
+        "def test_ok():\n    assert False\n", encoding="utf-8")
+    agents, calls = make_agents(verdicts=[], gate_output=APPROVED)
+    out = tmp_path / "out"
+    verdict = ob.run_pipeline(_spec(tmp_path), build_repo, 0, True, out,
+                              check_cmd=PYTEST_CMD, agents=agents)
+    assert verdict == "CHANGES REQUIRED"  # Beth said APPROVED; evidence wins
+    assert calls["review"] == []          # no reviewer tokens on red code
+    assert len(calls["gate"]) == 1        # gate still ran, for the report
+    report = (out / "PIPELINE_REPORT.md").read_text(encoding="utf-8")
+    assert "clamped from APPROVED" in report
+    assert "**Atlas rounds:** 0" in report
+    assert ob.parse_gate_verdict(report) == "CHANGES REQUIRED"
+
+
+def test_run_pipeline_review_fix_carries_state_forward(
+        build_repo: Path, tmp_path: Path) -> None:
+    agents, calls = make_agents(verdicts=["FIX FIRST", "SHIP"])
+    out = tmp_path / "out"
+    verdict = ob.run_pipeline(_spec(tmp_path), build_repo, 1, True, out,
+                              check_cmd=PASS_CMD, agents=agents)
+    assert verdict == "APPROVED"
+    assert [c["round"] for c in calls["review"]] == [1, 2]
+    round2_state = calls["review"][1]["state_md"]
+    assert "Round 1 — Atlas verdict" in round2_state
+    assert "Ben fix summary (review findings)" in round2_state
+    assert "code reviewer (Atlas)" in calls["build"][0]  # FIX_PROMPT variant used
+    gate_prompt = calls["gate"][0]
+    assert "### Atlas Review — Round 1" in gate_prompt
+    assert "### Atlas Review — Round 2" in gate_prompt
+
+
+def test_run_pipeline_oversized_diff_refuses_gate(build_repo: Path, tmp_path: Path) -> None:
+    (build_repo / "app.py").write_text("x" * 250_001, encoding="utf-8")
+    agents, calls = make_agents(verdicts=["SHIP"])
+    out = tmp_path / "out"
+    verdict = ob.run_pipeline(_spec(tmp_path), build_repo, 1, True, out,
+                              check_cmd=PASS_CMD, agents=agents)
+    assert verdict == "CHANGES REQUIRED"
+    assert calls["gate"] == []  # Beth never sees a truncated diff
+    report = (out / "PIPELINE_REPORT.md").read_text(encoding="utf-8")
+    assert "[GATE INPUT ERROR]" in report
+
+
+def test_default_agents_wires_real_runners() -> None:
+    agents = ob.default_agents()
+    assert agents.build is ob.run_grok
+    assert agents.review is ob.run_atlas_review
+
+
+# ── Real stage runners fail loudly when their CLI is absent ─────────────────
+
+@pytest.mark.skipif(shutil.which("grok") is not None, reason="grok CLI installed")
+def test_run_grok_missing_cli_raises(repo: Path) -> None:
+    with pytest.raises(RuntimeError, match="grok CLI not found"):
+        ob.run_grok("prompt", repo, timeout=5)
+
+
+@pytest.mark.skipif(shutil.which("codex") is not None, reason="codex CLI installed")
+def test_run_atlas_review_writes_request_with_state_before_failing(
+        build_repo: Path, tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    out.mkdir()
+    with pytest.raises(RuntimeError, match="codex CLI not found"):
+        ob.run_atlas_review(_spec(tmp_path), build_repo, out, 3, state_md="PRIOR-MARKER")
+    request = (out / "review_request_round3.md").read_text(encoding="utf-8")
+    assert "## Prior Rounds (pipeline state)" in request
+    assert "PRIOR-MARKER" in request
+    assert "## Diff Under Review" in request

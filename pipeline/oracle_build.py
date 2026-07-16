@@ -48,6 +48,7 @@ import shlex
 import subprocess
 import sys
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -485,6 +486,25 @@ def run_atlas_review(
     return review, review_path
 
 
+@dataclass(frozen=True)
+class PipelineAgents:
+    """Injectable stage runners — the dependency seam for orchestration tests.
+
+    Production uses default_agents() (real grok/codex/Anthropic calls); tests
+    substitute deterministic fakes so run_pipeline's control flow is testable
+    without any agent CLI or API key (repo standard: DI over monkeypatching).
+    Signatures match run_grok / run_atlas_review / orv._call_anthropic.
+    """
+    build: Callable[[str, Path, int], str]
+    review: Callable[..., tuple[str, Path]]
+    gate: Callable[..., str]
+
+
+def default_agents() -> PipelineAgents:
+    """The real production ensemble: Ben (grok), Atlas (codex), Beth (Anthropic)."""
+    return PipelineAgents(build=run_grok, review=run_atlas_review, gate=orv._call_anthropic)
+
+
 def run_fix_round(
     prompt: str,
     repo: Path,
@@ -493,10 +513,11 @@ def run_fix_round(
     reason: str,
     state: PipelineState,
     emit: Callable[[str], None],
+    build: Callable[[str, Path, int], str],
 ) -> None:
     """One Ben fix pass; logs the fix and records his summary in the state file."""
     emit(f"═══ Stage 4: FIX round {round_num} — Ben addresses {reason} ═══")
-    fix_log = run_grok(prompt, repo, BUILD_TIMEOUT_S)
+    fix_log = build(prompt, repo, BUILD_TIMEOUT_S)
     (out_dir / f"fix_log_round{round_num}.md").write_text(
         f"# Fix Log — Round {round_num} ({reason})\n\n{fix_log}\n", encoding="utf-8")
     state.add(f"Round {round_num} — Ben fix summary ({reason})", fix_log)
@@ -547,6 +568,7 @@ def run_pipeline(
     *,
     progress: Callable[[str], None] | None = None,
     check_cmd: str = "auto",
+    agents: PipelineAgents | None = None,
 ) -> str:
     """Execute build → check → review → fix loop → Fable final gate.
 
@@ -556,8 +578,10 @@ def run_pipeline(
     reviewer tokens, and the gate can never return APPROVED over failing checks.
 
     If `progress` is provided (for web UI), stage headers and key summaries
-    are also emitted to it. CLI behavior is unchanged.
+    are also emitted to it. CLI behavior is unchanged. `agents` overrides the
+    stage runners (tests only — production always uses default_agents()).
     """
+    agents = agents or default_agents()
     out_dir.mkdir(parents=True, exist_ok=True)
     spec_text = spec_path.read_text(encoding="utf-8")
     check_argv, check_auto = resolve_check_cmd(repo, check_cmd)
@@ -582,8 +606,8 @@ def run_pipeline(
         state.add("Build", "Skipped (--skip-build) — reviewing existing working-tree changes.")
     else:
         emit("═══ Stage 1: BUILD — Ben (Grok Build) implements the spec ═══")
-        build_log = run_grok(BUILD_PROMPT.format(spec_path=spec_path.resolve()),
-                             repo, BUILD_TIMEOUT_S)
+        build_log = agents.build(BUILD_PROMPT.format(spec_path=spec_path.resolve()),
+                                 repo, BUILD_TIMEOUT_S)
         (out_dir / "build_log.md").write_text(f"# Build Log (Grok)\n\n{build_log}\n",
                                               encoding="utf-8")
         state.add("Build — Ben's summary", build_log)
@@ -617,12 +641,12 @@ def run_pipeline(
             run_fix_round(
                 CHECK_FIX_PROMPT.format(check_path=check_path.resolve(),
                                         spec_path=spec_path.resolve()),
-                repo, out_dir, round_num, "failing checks", state, emit)
+                repo, out_dir, round_num, "failing checks", state, emit, agents.build)
             continue
 
         emit(f"═══ Stage 3: REVIEW round {round_num} — Atlas (Codex {ATLAS_PRESET}) ═══")
-        review, review_path = run_atlas_review(spec_path, repo, out_dir, round_num,
-                                               state_md=state.render())
+        review, review_path = agents.review(spec_path, repo, out_dir, round_num,
+                                            state_md=state.render())
         reviews.append(f"### Atlas Review — Round {round_num}\n{review}")
         verdict = parse_verdict(review)
         state.add(f"Round {round_num} — Atlas verdict", verdict)
@@ -638,7 +662,7 @@ def run_pipeline(
         run_fix_round(
             FIX_PROMPT.format(review_path=review_path.resolve(),
                               spec_path=spec_path.resolve()),
-            repo, out_dir, round_num, "review findings", state, emit)
+            repo, out_dir, round_num, "review findings", state, emit, agents.build)
 
     # ── Stage 5: Fable final gate ───────────────────────────────────────
     emit("═══ Stage 5: FINAL GATE — Beth (Claude Fable, high effort) ═══")
@@ -657,7 +681,7 @@ def run_pipeline(
 
     review_history = ("\n\n".join(reviews) if reviews
                       else "[no Atlas review completed — deterministic checks never passed]")
-    gate = orv._call_anthropic(
+    gate = agents.gate(
         GATE_SYSTEM,
         f"## The Spec\n\n{spec_text}\n\n"
         f"## The Final Diff\n\n{final_diff}\n\n"
