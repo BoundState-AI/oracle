@@ -1,5 +1,18 @@
 # NASA-STD-6030 Cold Spray Tailoring Assessment — PROVISIONAL
 
+> **SUPERSEDED IN PART (2026-07-28).** A complete manual Oracle run
+> (NASA-STD-6030 + NASA-STD-6033, expert-reviewed by Fran) now exists and
+> takes precedence over this draft wherever they differ. Corrected final
+> counts: CW 85 / MI 6 / EX 7 / NA 17 (see `oracle_eval_cs6030.json`
+> fixture). Known corrections to THIS document from the labeled cases:
+> AMR-1 is **EX** (the named NASA approval chain is not exercised under the
+> prime-contractor route), not AS-IS; AMR-21 and AMR-82 are **OPEN** scope
+> decisions that must not carry proposed codes; the AMR-84 "voluntarily
+> apply the intent" note is withdrawn (voluntary_expansion failure mode —
+> internal practice stays disclosed, never contractual); reuse requirements
+> (AMR-39/66) are **MI with a zero-limit control**, not scope-based N/A.
+> This document remains useful as rationale narrative only.
+
 > **PROVISIONAL — NOT A COMPLIANCE DETERMINATION.** Every disposition below
 > is a draft engineering position generated from the ORACLE
 > `nasa_std_6030_rulepack` (115 AMRs extracted from the approved 2021-04-21
