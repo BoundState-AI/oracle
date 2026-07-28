@@ -1,5 +1,12 @@
 # Oracle Disposition Module: Functional Specification
 
+> **SUPERSEDED by v0.4.0** — the ORACLE convergence run (session
+> 20260728-191953, 2 rounds, consensus BLOCKED → human review, 25 accepted
+> defects) produced a revised spec incorporating both review rounds. The
+> authoritative post-run version and full run record live in
+> `docs/oracle_runs/20260728-191953_disposition_spec/`. This 0.2.0 file is
+> retained as revision history only.
+
 **Module:** `boundstate/core/oracle/` *(final home + name: open question 6, §14 — collides with the ORACLE adversarial review engine in the oracle repo)*
 **Purpose:** Disposition an uploaded supplier document against a levied standard, requirement by requirement, with traceable provenance
 **Version:** 0.2.0 (draft — Beth revision, awaiting ORACLE convergence run)

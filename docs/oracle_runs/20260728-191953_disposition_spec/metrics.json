@@ -1,0 +1,24 @@
+{
+  "accepted_critical_count": 4,
+  "accepted_high_count": 13,
+  "total_accepted_defects": 25,
+  "total_rejected_claims": 1,
+  "total_preference_only": 1,
+  "novel_issue_count": 22,
+  "duplicate_rate": null,
+  "unsupported_claim_rate": null,
+  "rounds_to_stability": 2,
+  "valid_rounds": 2,
+  "converged": false,
+  "consensus_type": "blocked",
+  "dangling_decision_ids": [
+    "BETH-R1-ISSUE-014",
+    "BETH-R1-ISSUE-015",
+    "BETH-R2-ISSUE-007",
+    "BETH-R2-ISSUE-009",
+    "BETH-R2-ISSUE-012",
+    "BETH-R2-ISSUE-013",
+    "BETH-R2-ISSUE-014"
+  ],
+  "issue_id_continuity": 0.0
+}
