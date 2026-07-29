@@ -132,9 +132,14 @@ def test_run_ben_skips_when_cli_missing(tmp_path: Path) -> None:
 
 # ── Anthropic leg degrades cleanly without a key ────────────────────────────
 
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="win32 registry fallback supplies the user-level setx key "
+                           "regardless of env — and a failing assert would print it")
 def test_call_anthropic_skips_without_key(monkeypatch: pytest.MonkeyPatch) -> None:
     # env-var isolation only — no code objects are patched
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    # never assert on the raw return value: on failure pytest would print the
+    # live key into the terminal (this happened; the key had to be rotated)
     assert orv._anthropic_api_key() is None
     out = orv._call_anthropic("system", "user", timeout=5)
     assert out == "[SKIPPED] ANTHROPIC_API_KEY not set"
