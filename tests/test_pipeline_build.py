@@ -551,9 +551,14 @@ def test_run_pipeline_env_failure_halts_without_fix_or_gate(
         build_repo: Path, tmp_path: Path) -> None:
     agents, calls = make_agents(verdicts=["SHIP"])
     out = tmp_path / "out"
+    # Probe lives in a script file: a quoted -c payload survives Windows
+    # shlex (posix=False) WITH its quotes and executes as a no-op string
+    # literal — exit 0, a false PASS. Observed live on the first Windows run.
+    (build_repo / "fail_env_probe.py").write_text(
+        "import definitely_not_a_real_module_xyz\n", encoding="utf-8")
     verdict = ob.run_pipeline(
         _spec(tmp_path), build_repo, 2, True, out,
-        check_cmd=f"{sys.executable} -c \"import definitely_not_a_real_module_xyz\"",
+        check_cmd=f"{sys.executable} fail_env_probe.py",
         agents=agents)
     assert verdict == "CHANGES REQUIRED"
     assert calls["build"] == []   # no fix round spent on the operator's environment

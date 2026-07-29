@@ -514,6 +514,15 @@ def resolve_check_cmd(repo: Path, check_cmd: str) -> tuple[list[str] | None, boo
             return None, True
         return base + args, True
     argv = shlex.split(choice, posix=(os.name != "nt"))
+    if os.name == "nt":
+        # WHY: non-posix shlex preserves surrounding quotes inside tokens, so a
+        # quoted payload like -c "import x" reaches Python as the string
+        # literal '"import x"' — which executes as a no-op and exits 0. A
+        # false PASS from quoting semantics, observed live on the first
+        # Windows run. Strip symmetric outer double quotes so quoted args
+        # mean the same thing on both platforms.
+        argv = [t[1:-1] if len(t) >= 2 and t[0] == '"' and t[-1] == '"' else t
+                for t in argv]
     base = orv._resolve_cmd(argv[0])
     if not base:
         raise RuntimeError(f"--check-cmd not found on PATH: {argv[0]}")
