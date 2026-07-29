@@ -41,3 +41,4 @@ hearth_audit/
 .pytest_cache/
 oracle_server.log
 .coverage
+tests/.tmp/
