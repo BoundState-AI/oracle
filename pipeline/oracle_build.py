@@ -129,6 +129,12 @@ Fix the failures:
 - Insufficient diff coverage: write real tests for the uncovered lines listed
   in the report. Never inflate coverage by deleting code or writing
   assertion-free tests.
+- Files you did not create during this build are NEVER yours to delete,
+  move, or modify — including pre-existing untracked files that pollute the
+  diff or the coverage denominator. Deleting untracked files destroys data
+  that git cannot restore. If pre-existing material outside the slice scope
+  is causing the failure, STOP and report it in your summary as operator
+  action required.
 - Protected-path violations: revert every change to those paths (`git checkout
   -- <path>` for tracked files; delete new files you created there). Protected
   paths are outside this build's authority no matter what the spec seems to
