@@ -92,26 +92,82 @@ def test_dangling_decision_ids_surface_in_metrics_and_report(tmp_path):
     assert "R1-ISSUE-999" in report
 
 
-def test_issue_id_continuity_measures_referee_reuse():
-    def _round(number: int, ids: list[str]) -> ReviewRound:
-        return ReviewRound(
-            round_number=number,
-            normalized_issues={"normalized_issues": [
-                {"issue_id": i, "title": i, "severity": "medium"} for i in ids
-            ]},
-            coordinator_decisions={"revision_decisions": []},
-            valid=True,
-        )
+def _round_with_issues(number: int, issues: list[dict]) -> ReviewRound:
+    return ReviewRound(
+        round_number=number,
+        normalized_issues={"normalized_issues": issues},
+        coordinator_decisions={"revision_decisions": []},
+        valid=True,
+    )
 
-    # Round 2 keeps 1 of its 2 IDs from round 1 -> continuity 0.5
+
+def test_issue_id_continuity_counts_only_non_novel_issues():
+    """FIX-2: a genuinely novel later-round issue must not drag continuity
+    down — the old ID-set-overlap definition read 0% for every renumbering
+    referee and therefore alerted on nothing."""
     session = _session([
-        _round(1, ["R1-ISSUE-001", "R1-ISSUE-002"]),
-        _round(2, ["R1-ISSUE-001", "R2-ISSUE-003"]),
+        _round_with_issues(1, [
+            {"issue_id": "R1-ISSUE-001", "title": "a", "severity": "medium"},
+            {"issue_id": "R1-ISSUE-002", "title": "b", "severity": "medium"},
+        ]),
+        _round_with_issues(2, [
+            # Reused ID -> non-novel, parent trivially resolved
+            {"issue_id": "R1-ISSUE-001", "title": "a", "severity": "medium"},
+            # No reuse, no recurrence claim -> novel, excluded from the metric
+            {"issue_id": "R2-ISSUE-003", "title": "c", "severity": "medium"},
+        ]),
     ])
 
-    metrics = compute_metrics(session)
+    assert compute_metrics(session)["issue_id_continuity"] == 1.0
 
-    assert metrics["issue_id_continuity"] == 0.5
+
+def test_issue_id_continuity_resolves_recurrence_links():
+    """A renumbered issue linked via recurrence_of counts as continuous;
+    a claimed parent that resolves to nothing counts against the metric."""
+    session = _session([
+        _round_with_issues(1, [
+            {"issue_id": "R1-ISSUE-003", "title": "a", "severity": "high"},
+        ]),
+        _round_with_issues(2, [
+            {"issue_id": "R2-ISSUE-001", "title": "a again", "severity": "high",
+             "recurrence_of": "R1-ISSUE-003"},
+            {"issue_id": "R2-ISSUE-002", "title": "ghost", "severity": "medium",
+             "recurrence_of": "R1-ISSUE-999"},
+        ]),
+    ])
+
+    assert compute_metrics(session)["issue_id_continuity"] == 0.5
+
+
+def test_issue_id_continuity_is_none_when_all_later_issues_are_novel():
+    session = _session([
+        _round_with_issues(1, [
+            {"issue_id": "R1-ISSUE-001", "title": "a", "severity": "medium"},
+        ]),
+        _round_with_issues(2, [
+            {"issue_id": "R2-ISSUE-001", "title": "b", "severity": "medium"},
+        ]),
+    ])
+
+    assert compute_metrics(session)["issue_id_continuity"] is None
+
+
+def test_novel_issue_count_uses_lineage_roots():
+    """Two sightings of one issue (linked by lineage_id) are one issue."""
+    session = _session([
+        _round_with_issues(1, [
+            {"issue_id": "R1-ISSUE-001", "title": "a", "severity": "high",
+             "lineage_id": "R1-ISSUE-001"},
+        ]),
+        _round_with_issues(2, [
+            {"issue_id": "R2-ISSUE-001", "title": "a again", "severity": "high",
+             "recurrence_of": "R1-ISSUE-001", "lineage_id": "R1-ISSUE-001"},
+            {"issue_id": "R2-ISSUE-002", "title": "new", "severity": "medium",
+             "lineage_id": "R2-ISSUE-002"},
+        ]),
+    ])
+
+    assert compute_metrics(session)["novel_issue_count"] == 2
 
 
 def test_issue_id_continuity_is_none_when_unmeasurable():

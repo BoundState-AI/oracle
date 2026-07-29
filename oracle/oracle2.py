@@ -128,6 +128,9 @@ When synthesizing reviews:
 - Do not accept conflicting changes without resolving the underlying principle.
 - If two reviewers disagree, identify the governing tradeoff and decide.
 - Reference findings by their issue_id (e.g. ISSUE-001), not by title.
+- Every issue_id in revision_decisions MUST be an issue_id that appears in
+  the normalized issue ledger you were given. Never invent or renumber IDs;
+  a decision on an ID outside the ledger cannot be traced to any finding.
 
 Markdown formatting rules for the revised_draft (these are enforced
 downstream when the draft is rendered to .docx/.pptx):
@@ -181,6 +184,8 @@ Your job:
 - Identify serious, non-duplicative issues from the blind reviews.
 - Bundle related feedback into a small number of themes.
 - Reject weak, speculative, stylistic, preference-only, or low-risk nitpicks.
+  List each rejected/merged reviewer finding in dropped_findings with a
+  reason — never silently discard a finding.
 - Preserve the spec's core intent unless a reviewer found a real blocker.
 - Revise the spec only where the change improves correctness, clarity,
   feasibility, compliance, product fit, or implementation readiness.
@@ -197,6 +202,15 @@ Recommendation values:
 - LOCK: spec is good enough to proceed.
 - ONE_MORE_ROUND: one more blind review is likely to improve material quality.
 - HUMAN_REVIEW: judgment, domain authority, or product direction is needed.
+
+ID discipline (both directions, enforced by the harness):
+- Every issue_id in revision_decisions MUST have a matching entry in
+  serious_issues. If you decide on a finding, it goes in serious_issues
+  with a severity — a decision without a listed issue is untraceable.
+- On rounds after the first, set recurrence_of on each serious issue to
+  the prior-round issue_id it recurs from (or mutates from), or null if
+  the issue is genuinely new this round. Reuse the prior issue_id itself
+  whenever the issue is the same.
 
 Markdown formatting rules for the revised_draft:
 - Tables MUST use GitHub-flavored pipe-table syntax with a delimiter row.
@@ -224,7 +238,15 @@ Output JSON only:
       "summary": "...",
       "resolution": "...",
       "confidence": 0.0,
-      "speculative": false
+      "speculative": false,
+      "recurrence_of": "prior-round issue_id, or null if genuinely new"
+    }
+  ],
+  "dropped_findings": [
+    {
+      "oracle": "...",
+      "title": "...",
+      "reason": "duplicate|unsupported|style_only|too_vague|low_risk"
     }
   ],
   "feedback_themes": ["..."],
@@ -359,6 +381,10 @@ Tasks:
 6. Produce a normalized issue ledger for the coordinator.
 7. If an issue was seen in prior rounds, REUSE the same issue_id so Beth
    and the convergence checker can track continuity across rounds.
+8. On rounds after the first, set "recurrence_of" on EVERY issue: the
+   prior-round issue_id it recurs from or is a mutation of, or null if
+   the issue is genuinely new this round. Reviewers are blind across
+   rounds — you are the only party that can resolve this linkage.
 
 Rules:
 - Do not invent new issues unless a cross-review contradiction reveals one.
@@ -387,7 +413,8 @@ Output JSON:
       "conflict_flag": false,
       "weak_signal": false,
       "confidence": 0.0,
-      "speculative": false
+      "speculative": false,
+      "recurrence_of": "prior-round issue_id, or null if genuinely new"
     }
   ],
   "dropped_findings": [
@@ -1986,10 +2013,19 @@ def _check_convergence(session: OracleSession) -> tuple[bool, bool, str, str]:
     if len(high) > 1:
         return False, False, "", f"{len(high)} high findings remain"
 
-    # 3. Issue set stability (by issue_id, not count)
-    current_ids = {i.get("issue_id") for i in issues if i.get("issue_id")}
+    # 3. Issue set stability (by lineage, not count). lineage_id falls back
+    # to issue_id for pre-FIX-2 rounds; using lineage keeps a renumbered-
+    # but-linked issue (R1-ISSUE-003 → R2-ISSUE-001 via recurrence_of) from
+    # reading as churn.
+    current_ids = {
+        i.get("lineage_id") or i.get("issue_id") for i in issues
+        if i.get("lineage_id") or i.get("issue_id")
+    }
     prev_issues = previous.normalized_issues.get("normalized_issues", [])
-    prev_ids = {i.get("issue_id") for i in prev_issues if i.get("issue_id")}
+    prev_ids = {
+        i.get("lineage_id") or i.get("issue_id") for i in prev_issues
+        if i.get("lineage_id") or i.get("issue_id")
+    }
     if current_ids and prev_ids:
         overlap = len(current_ids & prev_ids) / max(len(current_ids | prev_ids), 1)
         if overlap < 0.8:
@@ -2034,6 +2070,93 @@ def _check_convergence(session: OracleSession) -> tuple[bool, bool, str, str]:
         return True, True, consensus_type, f"Converged with notes — {' | '.join(residue)}"
 
     return True, True, "full_agreement", f"Converged: 0 high, issue overlap {overlap:.0%}"
+
+
+def _reconcile_decision_ids(review_round: ReviewRound) -> list[str]:
+    """FIX-1 hard gate: every coordinator decision must join to a normalized issue.
+
+    WHY: the coordinator and the normalizer can end up reading different
+    issue sets (run 20260729-153932: 10 accepted/decided IDs had no
+    normalized record, so those defects had no severity, source, or
+    corroboration and silently dropped out of every metric). Rather than
+    emitting metrics past the subset violation, the harness reconstructs
+    a minimal issue record from the decision itself and marks it
+    "reconstructed" — the report and audit trail then show exactly which
+    records lack normalizer provenance instead of hiding them.
+
+    Returns the reconstructed issue_ids (empty when the invariant held).
+    """
+    issues = review_round.normalized_issues.setdefault("normalized_issues", [])
+    known = {
+        i.get("issue_id")
+        for i in issues
+        if isinstance(i, dict) and i.get("issue_id")
+    }
+    reconstructed: list[str] = []
+    for d in review_round.coordinator_decisions.get("revision_decisions", []):
+        if not isinstance(d, dict):
+            continue
+        iid = d.get("issue_id")
+        if not iid or iid in known:
+            continue
+        issues.append({
+            "issue_id": iid,
+            "title": str(
+                d.get("title") or d.get("reason") or "Reconstructed from coordinator decision"
+            )[:160],
+            # WHY "unknown": inventing a severity here would fabricate the
+            # exact counts this gate exists to protect. "unknown" surfaces
+            # in its own metrics bucket (same policy as oracle2_adapter,
+            # AUDIT F1).
+            "severity": d.get("severity") or "unknown",
+            "reconstructed": True,
+            "reconstruction_source": "coordinator_decision",
+        })
+        known.add(iid)
+        reconstructed.append(iid)
+    if reconstructed:
+        review_round.normalized_issues["reconstructed_issue_ids"] = reconstructed
+        LOGGER.warning(
+            f"Round {review_round.round_number}: {len(reconstructed)} coordinator "
+            f"decision(s) referenced issue IDs missing from the normalized set — "
+            f"reconstructed minimal records for: {', '.join(reconstructed)}"
+        )
+    return reconstructed
+
+
+def _assign_issue_lineage(prior_rounds: list[ReviewRound], review_round: ReviewRound) -> None:
+    """FIX-2: attach a stable lineage_id to every normalized issue.
+
+    lineage_id is the issue_id an issue was FIRST detected under, carried
+    forward by (a) direct issue_id reuse or (b) a resolved
+    recurrence_of / mutation_of link emitted by the normalizer. WHY
+    harness-side: reviewers are blind across rounds and the referee's
+    voluntary ID reuse measured 0% in practice — "R1 fix for ISSUE-003
+    failed → R2-ISSUE-001" lived only in prose. A claimed parent that
+    resolves to nothing is recorded as lineage_unresolved_parent, never
+    silently treated as novel.
+    """
+    lineage: dict[str, str] = {}
+    for r in prior_rounds:
+        if not r.valid:
+            continue
+        for issue in r.normalized_issues.get("normalized_issues", []):
+            iid = issue.get("issue_id") if isinstance(issue, dict) else None
+            if iid:
+                lineage[iid] = issue.get("lineage_id") or iid
+    for issue in review_round.normalized_issues.get("normalized_issues", []):
+        if not isinstance(issue, dict) or not issue.get("issue_id"):
+            continue
+        iid = issue["issue_id"]
+        parent = issue.get("recurrence_of") or issue.get("mutation_of")
+        if iid in lineage:
+            issue["lineage_id"] = lineage[iid]
+        elif parent and parent in lineage:
+            issue["lineage_id"] = lineage[parent]
+        else:
+            issue["lineage_id"] = iid
+            if parent:
+                issue["lineage_unresolved_parent"] = parent
 
 
 def _run_manual_round(
@@ -2103,6 +2226,16 @@ def _run_manual_round(
         "role": "manual_normalizer",
         "normalized_issues": serious_issues if isinstance(serious_issues, list) else [],
     }
+    # FIX-3: carry Beth's drop signal so duplicate/unsupported rates are
+    # measured in the manual workflow instead of permanently n/a. Only set
+    # when actually emitted — absence must stay "not measured", never 0.0.
+    dropped_findings = beth_response.get("dropped_findings")
+    if isinstance(dropped_findings, list):
+        review_round.normalized_issues["dropped_findings"] = dropped_findings
+    # FIX-1/FIX-2: enforce decision-ID ⊆ issue-ID before anything downstream
+    # consumes the round, then resolve cross-round lineage.
+    _reconcile_decision_ids(review_round)
+    _assign_issue_lineage(session.rounds, review_round)
 
     _apply_revised_draft(session, review_round, beth_response)
     review_round.valid = True
@@ -2253,6 +2386,18 @@ def _run_round(
     review_round.telemetry["Beth"] = beth_response.pop("_telemetry", None) or {}
     _write_round_telemetry(output_dir, round_num, review_round)
     review_round.coordinator_decisions = beth_response
+
+    # FIX-1/FIX-2: enforce decision-ID ⊆ issue-ID, resolve cross-round
+    # lineage, and re-persist the normalized file so the on-disk record
+    # (what oracle2_adapter reads) matches what the metrics were computed
+    # from. The pre-Beth write above is kept as a crash artifact; this
+    # write supersedes it.
+    _reconcile_decision_ids(review_round)
+    _assign_issue_lineage(session.rounds, review_round)
+    (output_dir / f"round{round_num}_sonnet_normalized.json").write_text(
+        encoding="utf-8",
+        data=json.dumps(review_round.normalized_issues, indent=2),
+    )
 
     _apply_revised_draft(session, review_round, beth_response)
     review_round.valid = True
@@ -2584,19 +2729,169 @@ def run_review(
 # Scoring / QC metrics
 # ---------------------------------------------------------------------------
 
+def _issue_source_names(issue: dict) -> list[str]:
+    """Source-oracle attribution for a normalized issue, both workflow shapes."""
+    sources: list[str] = []
+    for merged in issue.get("merged_from", []) or []:
+        if isinstance(merged, dict) and merged.get("oracle") and merged["oracle"] not in sources:
+            sources.append(merged["oracle"])
+    for reviewer in issue.get("source_reviewers", []) or []:
+        if isinstance(reviewer, str) and reviewer and reviewer not in sources:
+            sources.append(reviewer)
+    return sources
+
+
+def _accepted_severity_counts(
+    accepted_ids: set[str], issue_severity: dict[str, str]
+) -> dict[str, int]:
+    """FIX-3: count every severity class the pipeline actually uses.
+
+    Medium/low were dropped from metrics while the report body demonstrably
+    contained accepted [MEDIUM] findings — 9 of 24 accepted defects had no
+    severity bucket. "unknown" holds accepted defects whose issue record is
+    reconstructed or carries no severity: a data problem to count, never a
+    severity to invent (same policy as oracle2_adapter, AUDIT F1).
+    """
+    counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "unknown": 0}
+    for iid in accepted_ids:
+        sev = issue_severity.get(iid, "unknown")
+        counts[sev if sev in counts else "unknown"] += 1
+    return counts
+
+
+def _continuity_metrics(session: OracleSession) -> tuple[float | None, int]:
+    """FIX-2: (issue_id_continuity, novel_issue_count) from lineage data.
+
+    Continuity = fraction of NON-NOVEL later-round issues whose parent
+    resolves: an issue is non-novel when it reuses a prior issue_id or
+    claims recurrence_of/mutation_of; its parent resolves when that link
+    lands on an ID actually seen in a prior valid round. Genuinely novel
+    issues no longer drag the metric to a permanent 0% — the old
+    definition (plain ID-set overlap) alerted on nothing because it read
+    0% for every renumbering referee regardless of real linkage.
+
+    novel_issue_count = distinct lineage roots — issues, not re-sightings.
+    """
+    samples: list[float] = []
+    seen_ids: set[str] = set()
+    lineage_roots: set[str] = set()
+    first = True
+    for r in session.rounds:
+        if not r.valid:
+            continue
+        issues = [
+            i for i in r.normalized_issues.get("normalized_issues", [])
+            if isinstance(i, dict) and i.get("issue_id")
+        ]
+        if not first and issues:
+            non_novel = resolved = 0
+            for issue in issues:
+                parent = issue.get("recurrence_of") or issue.get("mutation_of")
+                if issue["issue_id"] in seen_ids:
+                    non_novel += 1
+                    resolved += 1
+                elif parent:
+                    non_novel += 1
+                    resolved += 1 if parent in seen_ids else 0
+            if non_novel:
+                samples.append(resolved / non_novel)
+        for issue in issues:
+            seen_ids.add(issue["issue_id"])
+            lineage_roots.add(issue.get("lineage_id") or issue["issue_id"])
+        first = False
+    continuity = sum(samples) / len(samples) if samples else None
+    return continuity, len(lineage_roots)
+
+
+def _coordinator_telemetry(
+    all_decisions: list[dict], issues_by_id: dict[str, dict]
+) -> dict:
+    """FIX-4: per-run coordinator acceptance telemetry.
+
+    A coordinator that accepts everything is a failure pattern only
+    visible across runs — these per-run rates are persisted in
+    metrics.json so rolling aggregation is possible, and the per-run
+    alerts catch the two cases that never need history: blanket
+    acceptance and single-reviewer criticals accepted uncorroborated.
+    """
+    provider_by_oracle = {cfg.name: cfg.provider for cfg in ORACLE_ROSTER.values()}
+    decided = [d for d in all_decisions if isinstance(d, dict) and d.get("issue_id")]
+    total = len(decided)
+
+    def _count(decision: str) -> int:
+        return sum(1 for d in decided if d.get("decision") == decision)
+
+    accepted_n = _count("accepted_defect")
+    per_reviewer: dict[str, dict] = {}
+    cross_vendor_accepted = single_source_accepted = 0
+    severe_pool = severe_downgraded = 0
+    single_source_criticals: list[str] = []
+    for d in decided:
+        issue = issues_by_id.get(d["issue_id"])
+        if issue is None:
+            continue
+        is_accept = d.get("decision") == "accepted_defect"
+        sources = _issue_source_names(issue)
+        if issue.get("severity") in ("critical", "high"):
+            severe_pool += 1
+            if d.get("decision") in ("rejected_claim", "preference_only"):
+                severe_downgraded += 1
+        for s in sources:
+            stats = per_reviewer.setdefault(s, {"decided": 0, "accepted": 0})
+            stats["decided"] += 1
+            stats["accepted"] += 1 if is_accept else 0
+        if is_accept and sources:
+            if len({provider_by_oracle.get(s, "unknown") for s in sources}) >= 2:
+                cross_vendor_accepted += 1
+            if len(sources) == 1:
+                single_source_accepted += 1
+                if issue.get("severity") == "critical":
+                    single_source_criticals.append(d["issue_id"])
+    for stats in per_reviewer.values():
+        stats["acceptance_rate"] = stats["accepted"] / stats["decided"]
+
+    alerts: list[str] = []
+    # WHY >= 5: one or two decisions all accepted is normal judgment; a
+    # full-slate 100% is the compliant-coordinator signature worth flagging.
+    if total >= 5 and accepted_n == total:
+        alerts.append("coordinator accepted 100% of decided findings this run")
+    if single_source_criticals:
+        alerts.append(
+            "critical defect(s) accepted on a single reviewer's finding with "
+            f"no corroboration: {', '.join(sorted(single_source_criticals))}"
+        )
+
+    return {
+        "decided_count": total,
+        "acceptance_rate": accepted_n / total if total else None,
+        "rejection_rate": _count("rejected_claim") / total if total else None,
+        "preference_only_rate": _count("preference_only") / total if total else None,
+        "severe_downgrade_rate": severe_downgraded / severe_pool if severe_pool else None,
+        "per_reviewer_acceptance": per_reviewer,
+        "accepted_cross_vendor_count": cross_vendor_accepted,
+        "accepted_single_source_count": single_source_accepted,
+        "alerts": alerts,
+    }
+
+
 def compute_metrics(session: OracleSession) -> dict:
     """Compute the QC scoring rubric for a completed review.
 
     Joins Beth's decisions to Sonnet's normalized issues by issue_id,
     not by fuzzy title matching.
     """
-    # Build issue_id → severity lookup from Sonnet's normalized issues
+    # Build issue_id → issue/severity lookups from the normalized ledgers
     issue_severity: dict[str, str] = {}
+    issues_by_id: dict[str, dict] = {}
+    reconstructed_count = 0
     for r in session.rounds:
         for issue in r.normalized_issues.get("normalized_issues", []):
             iid = issue.get("issue_id", "")
             if iid:
                 issue_severity[iid] = issue.get("severity", "low")
+                issues_by_id[iid] = issue
+            if issue.get("reconstructed"):
+                reconstructed_count += 1
 
     # Classify Beth's decisions by joining on issue_id
     all_decisions = []
@@ -2607,16 +2902,11 @@ def compute_metrics(session: OracleSession) -> dict:
     rejected = [d for d in all_decisions if d.get("decision") == "rejected_claim"]
     preference = [d for d in all_decisions if d.get("decision") == "preference_only"]
 
-    # Count accepted by severity via issue_id join
+    # Count accepted by severity via issue_id join (FIX-3: all classes)
     accepted_ids = {d.get("issue_id") for d in accepted if d.get("issue_id")}
-    critical_accepted = sum(
-        1 for iid in accepted_ids if issue_severity.get(iid) == "critical"
-    )
-    high_accepted = sum(
-        1 for iid in accepted_ids if issue_severity.get(iid) == "high"
-    )
+    sev_counts = _accepted_severity_counts(accepted_ids, issue_severity)
 
-    # Dropped findings from Sonnet
+    # Dropped findings from the normalizer (Sonnet, or Beth in manual mode)
     dropped = []
     for r in session.rounds:
         dropped.extend(r.normalized_issues.get("dropped_findings", []))
@@ -2644,37 +2934,33 @@ def compute_metrics(session: OracleSession) -> dict:
 
     # WHY dangling-ID tracking (AUDIT A7): Beth references findings by
     # issue_id; an ID with no matching normalized issue silently drops
-    # out of every severity count. Surfacing them makes referee/
-    # coordinator ID discipline auditable instead of assumed.
+    # out of every severity count. _reconcile_decision_ids repairs this
+    # in-pipeline, so a non-empty list here means an unreconciled
+    # (legacy/corrupt) session.
     dangling_decision_ids = sorted({
         d.get("issue_id") for d in all_decisions
         if d.get("issue_id") and d.get("issue_id") not in issue_severity
     })
 
-    # WHY continuity (AUDIT A7): the ledger convergence gate depends on
-    # the referee voluntarily reusing issue_ids across rounds. This
-    # measures how much reuse actually happened; None = not measurable
-    # (fewer than two valid rounds with IDs).
-    continuity_samples: list[float] = []
-    valid_with_ids = [
-        {i.get("issue_id") for i in r.normalized_issues.get("normalized_issues", []) if i.get("issue_id")}
-        for r in session.rounds if r.valid
-    ]
-    for prev_ids, curr_ids in zip(valid_with_ids, valid_with_ids[1:]):
-        if prev_ids and curr_ids:
-            continuity_samples.append(len(curr_ids & prev_ids) / len(curr_ids))
-    issue_id_continuity = (
-        sum(continuity_samples) / len(continuity_samples)
-        if continuity_samples else None
-    )
+    issue_id_continuity, novel_issue_count = _continuity_metrics(session)
+
+    # FIX-1 hard gate: never emit severity-class counts past a subset
+    # violation — with decisions untraceable to issues, every bucket is
+    # understated by an unknowable amount. None renders as n/a; the
+    # decision totals themselves (counted from decisions alone) stay.
+    metrics_integrity = "id_subset_violation" if dangling_decision_ids else "ok"
+    severity_metrics: dict[str, int | None] = {
+        f"accepted_{k}_count": (None if dangling_decision_ids else v)
+        for k, v in sev_counts.items()
+    }
 
     return {
-        "accepted_critical_count": critical_accepted,
-        "accepted_high_count": high_accepted,
+        **severity_metrics,
         "total_accepted_defects": len(accepted),
         "total_rejected_claims": len(rejected),
         "total_preference_only": len(preference),
-        "novel_issue_count": len(issue_severity),
+        "novel_issue_count": novel_issue_count,
+        "reconstructed_issue_count": reconstructed_count,
         "duplicate_rate": (
             duplicate_count / max(total_findings, 1) if has_drop_signal else None
         ),
@@ -2686,7 +2972,9 @@ def compute_metrics(session: OracleSession) -> dict:
         "converged": session.converged,
         "consensus_type": session.consensus_type,
         "dangling_decision_ids": dangling_decision_ids,
+        "metrics_integrity": metrics_integrity,
         "issue_id_continuity": issue_id_continuity,
+        "coordinator_telemetry": _coordinator_telemetry(all_decisions, issues_by_id),
     }
 
 

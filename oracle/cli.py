@@ -2804,6 +2804,47 @@ def _format_referee_drops(session: Any) -> list[str]:
     return lines
 
 
+def _format_coordinator_telemetry(metrics: dict) -> list[str]:
+    """Render per-run coordinator acceptance telemetry (FIX-4).
+
+    WHY: a coordinator that accepts everything is a failure pattern only
+    visible across runs — the per-run rates make it loggable, and the
+    alerts flag the two cases that need no history (blanket acceptance,
+    single-reviewer criticals accepted without corroboration).
+    """
+    tel = metrics.get("coordinator_telemetry") or {}
+    if not isinstance(tel, dict) or not tel.get("decided_count"):
+        return []
+
+    def _pct(v: Any) -> str:
+        return f"{v:.0%}" if isinstance(v, (int, float)) else "n/a"
+
+    lines = [
+        "### Coordinator Telemetry",
+        "",
+        f"- Decisions: {tel['decided_count']} — acceptance {_pct(tel.get('acceptance_rate'))}, "
+        f"rejection {_pct(tel.get('rejection_rate'))}, "
+        f"preference-only {_pct(tel.get('preference_only_rate'))}",
+        f"- Critical/high downgrade rate: {_pct(tel.get('severe_downgrade_rate'))}",
+        f"- Accepted with cross-vendor corroboration: "
+        f"{tel.get('accepted_cross_vendor_count', 0)}; "
+        f"accepted on a single reviewer: {tel.get('accepted_single_source_count', 0)}",
+    ]
+    per = tel.get("per_reviewer_acceptance") or {}
+    if per:
+        parts = [
+            f"{name} {_pct(stats.get('acceptance_rate'))} "
+            f"({stats.get('accepted', 0)}/{stats.get('decided', 0)})"
+            for name, stats in sorted(per.items())
+        ]
+        lines.append(f"- Per-reviewer acceptance: {', '.join(parts)}")
+    lines.append("")
+    for alert in tel.get("alerts") or []:
+        lines.append(f"> **Coordinator alert:** {alert}")
+        lines.append("")
+    return lines
+
+
 def _format_drift_section(session: Any) -> list[str]:
     """Render abandoned-finding drift events (AUDIT A5).
 
@@ -2986,10 +3027,23 @@ def format_findings_report(
     def _fmt(v: int | None) -> str:
         return "n/a (not measured in this workflow)" if v is None else str(v)
 
+    # FIX-1: severity buckets are SUPPRESSED (not merely unmeasured) when
+    # coordinator decisions reference IDs outside the normalized set — the
+    # counts would be understated by an unknowable amount.
+    suppressed = metrics.get("metrics_integrity") == "id_subset_violation"
+
+    def _fmt_sev(v: int | None) -> str:
+        if v is not None:
+            return str(v)
+        if suppressed:
+            return "n/a (suppressed — see Data Integrity Warnings)"
+        return "n/a (not measured in this workflow)"
+
     crit = acc_sev.get("critical") if acc_sev.get("critical") is not None else _measured("accepted_critical_count")
     high = acc_sev.get("high") if acc_sev.get("high") is not None else _measured("accepted_high_count")
     med = acc_sev.get("medium") if acc_sev.get("medium") is not None else _measured("accepted_medium_count")
     low = acc_sev.get("low") if acc_sev.get("low") is not None else _measured("accepted_low_count")
+    unk = acc_sev.get("unknown") if acc_sev.get("unknown") is not None else _measured("accepted_unknown_count")
 
     total_acc = _measured("total_issues_accepted", "total_accepted_defects")
     if total_acc is None and any(v is not None for v in (crit, high, med, low)):
@@ -3002,26 +3056,31 @@ def format_findings_report(
 
     # Rate and count are different facts — report each honestly, never a
     # count masquerading as a rate.
-    duplicate_rate = metrics.get("duplicate_rate")
-    if isinstance(duplicate_rate, (int, float)):
-        dup_rate_label = f"{duplicate_rate:.1%}"
-    else:
-        dup_rate_label = "n/a (not measured in this workflow)"
+    def _rate_label(v: Any) -> str:
+        return f"{v:.1%}" if isinstance(v, (int, float)) else "n/a (not measured in this workflow)"
 
     lines.extend([
         "## Metrics",
         "",
-        f"- Accepted critical defects: {_fmt(crit)}",
-        f"- Accepted high defects: {_fmt(high)}",
-        f"- Accepted medium defects: {_fmt(med)}",
-        f"- Accepted low defects: {_fmt(low)}",
+        f"- Accepted critical defects: {_fmt_sev(crit)}",
+        f"- Accepted high defects: {_fmt_sev(high)}",
+        f"- Accepted medium defects: {_fmt_sev(med)}",
+        f"- Accepted low defects: {_fmt_sev(low)}",
+    ])
+    # Unknown-severity acceptances are a data-quality fact (reconstructed
+    # or unattributed issue records) — render only when the bucket is live
+    # so clean runs aren't padded with a permanent zero row.
+    if suppressed or (isinstance(unk, int) and unk > 0):
+        lines.append(f"- Accepted defects with unknown severity: {_fmt_sev(unk)}")
+    lines.extend([
         f"- Total accepted defects: {_fmt(total_acc)}",
         f"- Total rejected claims: {_fmt(rej)}",
         f"- Preference-only findings: {_fmt(pref)}",
         f"- Unresolved questions: {_fmt(unres)}",
         f"- Duplicate count: {_fmt(dups)}",
         f"- Total issues raised: {_fmt(raised)}",
-        f"- Duplicate rate: {dup_rate_label}",
+        f"- Duplicate rate: {_rate_label(metrics.get('duplicate_rate'))}",
+        f"- Unsupported claim rate: {_rate_label(metrics.get('unsupported_claim_rate'))}",
         f"- Rounds to stability: {metrics.get('rounds_to_stability', 0)}",
         f"- Converged: {bool(metrics.get('converged', getattr(session, 'converged', False)))}",
         "",
@@ -3031,18 +3090,37 @@ def format_findings_report(
         lines.append(f"- Issue-ID continuity across rounds: {continuity:.0%}")
         lines.append("")
 
-    # Data-integrity warnings (AUDIT A7): a coordinator decision whose
-    # issue_id matches no normalized issue drops out of severity counts.
+    lines.extend(_format_coordinator_telemetry(metrics))
+
+    # Data-integrity warnings (AUDIT A7 / FIX-1): a coordinator decision
+    # whose issue_id matches no normalized issue drops out of severity
+    # counts; a reconstructed record is one the harness had to repair.
     dangling = metrics.get("dangling_decision_ids") or []
-    if dangling:
+    reconstructed_ids: list[str] = []
+    for r in getattr(session, "rounds", []) or []:
+        norm = getattr(r, "normalized_issues", None) or {}
+        if isinstance(norm, dict):
+            reconstructed_ids.extend(norm.get("reconstructed_issue_ids", []) or [])
+    if dangling or reconstructed_ids:
         lines.append("## Data Integrity Warnings")
         lines.append("")
-        lines.append(
-            f"> {len(dangling)} coordinator decision(s) reference issue IDs "
-            f"with no matching normalized issue: {', '.join(dangling)}. "
-            f"Severity counts above may be incomplete for these decisions."
-        )
-        lines.append("")
+        if dangling:
+            lines.append(
+                f"> {len(dangling)} coordinator decision(s) reference issue IDs "
+                f"with no matching normalized issue: {', '.join(dangling)}. "
+                f"Severity counts above are suppressed — they cannot be "
+                f"verified past this violation."
+            )
+            lines.append("")
+        if reconstructed_ids:
+            unique_ids = sorted(set(reconstructed_ids))
+            lines.append(
+                f"> {len(unique_ids)} issue record(s) were reconstructed by the "
+                f"harness from coordinator decisions whose IDs were missing from "
+                f"the normalizer output: {', '.join(unique_ids)}. Reconstructed "
+                f"records carry severity 'unknown' and no reviewer attribution."
+            )
+            lines.append("")
 
     # --- Reviewer verdicts + Dissent Summary (AUDIT A3 + A1) — before
     # per-round detail so dissent is impossible to miss in a skim read ---
@@ -3103,6 +3181,10 @@ def format_findings_report(
                 heading = f"### [{sev}] {title} ({iid})"
                 if issue.get("speculative"):
                     heading = f"### [{sev}] [SPECULATIVE] {title} ({iid})"
+                if issue.get("reconstructed"):
+                    # FIX-1: a record the harness rebuilt from a coordinator
+                    # decision — no normalizer provenance behind it.
+                    heading = f"### [{sev}] [RECONSTRUCTED] {title} ({iid})"
                 lines.append(heading)
                 confidence = issue.get("confidence")
                 if isinstance(confidence, (int, float)):
