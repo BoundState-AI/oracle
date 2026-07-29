@@ -501,6 +501,78 @@ def test_default_agents_wires_real_runners() -> None:
     assert agents.review is ob.run_atlas_review
 
 
+# ── Ben model pin ───────────────────────────────────────────────────────────
+
+def test_grok_argv_appends_model_only_when_pinned() -> None:
+    base = ["grok"]
+    unpinned = ob._grok_argv(base, "do it", None)
+    assert "--model" not in unpinned
+    pinned = ob._grok_argv(base, "do it", "grok-4.5")
+    assert pinned[-2:] == ["--model", "grok-4.5"]
+    assert pinned[:len(unpinned)] == unpinned  # pin is purely additive
+
+
+def test_resolve_ben_model_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(ob.BEN_MODEL_ENV, raising=False)
+    assert ob.resolve_ben_model(None) is None
+    monkeypatch.setenv(ob.BEN_MODEL_ENV, "grok-4.5")
+    assert ob.resolve_ben_model(None) == "grok-4.5"
+    assert ob.resolve_ben_model("grok-5") == "grok-5"  # explicit flag beats env
+
+
+def test_default_agents_binds_pinned_model_for_build_and_fix() -> None:
+    agents = ob.default_agents(ben_model="grok-4.5")
+    assert agents.build is not ob.run_grok
+    assert agents.build.func is ob.run_grok
+    assert agents.build.keywords == {"model": "grok-4.5"}
+
+
+def test_env_failure_classifier() -> None:
+    assert ob._looks_like_env_failure(
+        'RuntimeError: Form data requires "python-multipart" to be installed.')
+    assert ob._looks_like_env_failure("ModuleNotFoundError: No module named 'fastapi'")
+    assert ob._looks_like_env_failure("'pytest' is not recognized as an internal or external command")
+    # a missing REPO module is Ben's defect, not the environment's
+    assert not ob._looks_like_env_failure("No module named 'oracle.disposition.modles'")
+    assert not ob._looks_like_env_failure("AssertionError: assert 1 == 2")
+
+
+def test_run_checks_marks_environment_failure(repo: Path, tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    out.mkdir()
+    ok, report, _ = ob.run_checks(
+        repo, out, 1, _py_cmd("import definitely_not_a_real_module_xyz"), False, [])
+    assert ok is False
+    assert ob.ENV_FAIL_MARKER in report
+    assert "ENVIRONMENT" in report
+
+
+def test_run_pipeline_env_failure_halts_without_fix_or_gate(
+        build_repo: Path, tmp_path: Path) -> None:
+    agents, calls = make_agents(verdicts=["SHIP"])
+    out = tmp_path / "out"
+    verdict = ob.run_pipeline(
+        _spec(tmp_path), build_repo, 2, True, out,
+        check_cmd=f"{sys.executable} -c \"import definitely_not_a_real_module_xyz\"",
+        agents=agents)
+    assert verdict == "CHANGES REQUIRED"
+    assert calls["build"] == []   # no fix round spent on the operator's environment
+    assert calls["review"] == []  # no reviewer tokens either
+    assert calls["gate"] == []    # gate skipped — nothing for Beth to judge
+    report = (out / "PIPELINE_REPORT.md").read_text(encoding="utf-8")
+    assert "[ENVIRONMENT FAILURE]" in report
+    assert ob.parse_gate_verdict(report) == "CHANGES REQUIRED"
+
+
+def test_toolchain_line_names_all_three_legs() -> None:
+    line = ob.toolchain_line("grok-4.5")
+    assert "grok-4.5" in line
+    assert "gpt-5.6-terra" in line and "high" in line
+    assert "claude-fable-5" in line
+    unpinned = ob.toolchain_line(None)
+    assert "UNPINNED" in unpinned
+
+
 # ── Real stage runners fail loudly when their CLI is absent ─────────────────
 
 @pytest.mark.skipif(shutil.which("grok") is not None, reason="grok CLI installed")

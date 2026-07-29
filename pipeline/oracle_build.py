@@ -40,6 +40,7 @@ __safety_critical__: bool = False
 
 import argparse
 import fnmatch
+import functools
 import io
 import json
 import logging
@@ -76,6 +77,10 @@ CHECK_OUTPUT_CAP = 8000   # chars of test output kept (tail — pytest prints fa
 STATE_ENTRY_CAP = 6000    # chars per PIPELINE_STATE.md entry (bounds context growth)
 ATLAS_PRESET = "terra-high"
 PROTECTED_FILE = ".oracle_protected"
+# Ben's model pin: --ben-model flag > ORACLE_BEN_MODEL env > grok CLI default.
+# Atlas and Beth are already pinned (ATLAS_PRESETS, orv.BETH_MODEL); without
+# this, Ben silently runs on whatever the local grok config says.
+BEN_MODEL_ENV = "ORACLE_BEN_MODEL"
 
 BUILD_PROMPT = """You are Ben, BoundState's implementation engineer (Grok Build).
 
@@ -458,6 +463,32 @@ def run_coverage_check(repo: Path, out_dir: Path, round_num: int,
 
 # ── Deterministic check stage ───────────────────────────────────────────────
 
+# Appears in a check report when the failure is the OPERATOR'S environment
+# (missing packages, broken tooling), not the build's code. run_pipeline halts
+# to the operator on this marker instead of spending Ben fix rounds — a
+# builder "fixing" the environment mutates the machine or deletes files at
+# worst, and burns tokens at best.
+ENV_FAIL_MARKER = "RESULT: FAIL (ENVIRONMENT)"
+
+# Top-level packages of this repo: a missing module from OUTSIDE this set is
+# an environment problem; a missing module INSIDE it is a build defect (e.g.
+# Ben typo'd an import) and must still route to Ben.
+_REPO_TOP_LEVELS = ("oracle", "hearth", "pipeline", "sentinel", "eval", "tests", "server")
+
+
+def _looks_like_env_failure(output: str) -> bool:
+    """Classify check-command output as environment failure vs code failure."""
+    if 'requires "' in output and "to be installed" in output:
+        return True  # fastapi-style "Form data requires "python-multipart"..."
+    if "is not recognized as an internal or external command" in output \
+            or "command not found" in output:
+        return True
+    for name in re.findall(r"No module named '([^']+)'", output):
+        if name.split(".")[0] not in _REPO_TOP_LEVELS:
+            return True
+    return False
+
+
 def resolve_check_cmd(repo: Path, check_cmd: str) -> tuple[list[str] | None, bool]:
     """Resolve --check-cmd into an argv. Returns (argv | None, auto_mode).
 
@@ -526,6 +557,7 @@ def run_checks(
     """
     lines: list[str] = [f"# Deterministic Checks — Round {round_num}", ""]
     ok = True
+    environment_failure = False
 
     violations = protected_violations(repo, protected)
     if violations:
@@ -557,14 +589,20 @@ def run_checks(
                       "The gate must justify shipping without test evidence.", ""]
         else:
             ok = False
+            env_note = " — ENVIRONMENT: missing packages or broken tooling; operator action required" \
+                if _looks_like_env_failure(output) else ""
             exit_desc = f"exit code {code}" if code is not None else f"TIMEOUT after {CHECK_TIMEOUT_S}s"
-            lines += [f"## Tests — FAIL ({exit_desc})", "", f"Command: `{cmd_str}`", "",
+            lines += [f"## Tests — FAIL ({exit_desc}{env_note})", "", f"Command: `{cmd_str}`", "",
                       "```", _tail(output, CHECK_OUTPUT_CAP), "```", ""]
+            if env_note:
+                environment_failure = True
 
     if coverage_floor > 0:
         cov_ok, cov_lines = run_coverage_check(repo, out_dir, round_num, coverage_floor)
         ok = ok and cov_ok
         lines += cov_lines
+        if not cov_ok and _looks_like_env_failure("\n".join(cov_lines)):
+            environment_failure = True
 
     # Informational only — the gate judges it (a platform build without CI or
     # tests is a gap), but it never reds a round by itself.
@@ -574,7 +612,12 @@ def run_checks(
               f"- CI workflows (.github/workflows/): {'present' if has_ci else 'MISSING'}",
               f"- tests/ directory: {'present' if (repo / 'tests').is_dir() else 'MISSING'}", ""]
 
-    lines += [f"RESULT: {'PASS' if ok else 'FAIL'}"]
+    if ok:
+        lines += ["RESULT: PASS"]
+    elif environment_failure:
+        lines += [ENV_FAIL_MARKER]
+    else:
+        lines += ["RESULT: FAIL"]
     report = "\n".join(lines)
     path = out_dir / f"check_round{round_num}.md"
     path.write_text(report + "\n", encoding="utf-8")
@@ -583,15 +626,43 @@ def run_checks(
 
 # ── Stage runners ───────────────────────────────────────────────────────────
 
-def run_grok(prompt: str, repo: Path, timeout: int) -> str:
+def resolve_ben_model(cli_value: str | None) -> str | None:
+    """Ben's model pin: explicit flag wins, then ORACLE_BEN_MODEL, then None
+    (grok CLI default — the historical behavior)."""
+    return cli_value or os.environ.get(BEN_MODEL_ENV) or None
+
+
+def _grok_argv(base: list[str], prompt: str, model: str | None) -> list[str]:
+    """Argv for a Ben pass. The model pin is appended only when configured;
+    verify the flag name against your grok CLI (`grok --help`) if it rejects
+    --model."""
+    argv = base + ["-p", prompt, "--output-format", "plain", "--always-approve",
+                   "--max-turns", "200"]
+    if model:
+        argv += ["--model", model]
+    return argv
+
+
+def run_grok(prompt: str, repo: Path, timeout: int, model: str | None = None) -> str:
     """Run a Grok Build pass with write access to the repo (auto-approved tools)."""
     base = orv._resolve_cmd("grok")
     if not base:
         raise RuntimeError("grok CLI not found on PATH")
-    return orv._run_cli(
-        base + ["-p", prompt, "--output-format", "plain", "--always-approve",
-                "--max-turns", "200"],
-        cwd=repo, timeout=timeout)
+    return orv._run_cli(_grok_argv(base, prompt, model), cwd=repo, timeout=timeout)
+
+
+def toolchain_line(ben_model: str | None) -> str:
+    """Provenance line recording who the three legs are for this run —
+    the same model-identity-per-run rule the disposition spec (§16) demands
+    of evaluation runs, applied to our own builds."""
+    base = orv._resolve_cmd("grok")
+    grok_version = "not on PATH"
+    if base:
+        probe = orv._run_cli(base + ["--version"], cwd=Path.cwd(), timeout=30)
+        grok_version = probe.splitlines()[0][:120] if probe and not probe.startswith("[ERROR]") else "version probe failed"
+    atlas_model, atlas_effort = orv.ATLAS_PRESETS[ATLAS_PRESET]
+    return (f"Ben: grok ({grok_version}), model: {ben_model or 'CLI default — UNPINNED'} | "
+            f"Atlas: codex {atlas_model} @ {atlas_effort} | Beth: {orv.BETH_MODEL}")
 
 
 def run_atlas_review(
@@ -656,9 +727,11 @@ class PipelineAgents:
     gate: Callable[..., str]
 
 
-def default_agents() -> PipelineAgents:
-    """The real production ensemble: Ben (grok), Atlas (codex), Beth (Anthropic)."""
-    return PipelineAgents(build=run_grok, review=run_atlas_review, gate=orv._call_anthropic)
+def default_agents(ben_model: str | None = None) -> PipelineAgents:
+    """The real production ensemble: Ben (grok), Atlas (codex), Beth (Anthropic).
+    With a model pin, Ben's runner is bound to it for build AND fix passes."""
+    build = run_grok if ben_model is None else functools.partial(run_grok, model=ben_model)
+    return PipelineAgents(build=build, review=run_atlas_review, gate=orv._call_anthropic)
 
 
 def run_fix_round(
@@ -725,6 +798,7 @@ def run_pipeline(
     progress: Callable[[str], None] | None = None,
     check_cmd: str = "auto",
     coverage_floor: int = 0,
+    ben_model: str | None = None,
     agents: PipelineAgents | None = None,
 ) -> str:
     """Execute build → check → review → fix loop → Fable final gate.
@@ -738,12 +812,14 @@ def run_pipeline(
     are also emitted to it. CLI behavior is unchanged. `agents` overrides the
     stage runners (tests only — production always uses default_agents()).
     """
-    agents = agents or default_agents()
+    ben_model = resolve_ben_model(ben_model)
+    agents = agents or default_agents(ben_model=ben_model)
     out_dir.mkdir(parents=True, exist_ok=True)
     spec_text = spec_path.read_text(encoding="utf-8")
     check_argv, check_auto = resolve_check_cmd(repo, check_cmd)
     protected = load_protected_patterns(repo, spec_text)
     state = PipelineState(out_dir / "PIPELINE_STATE.md")
+    state.add("Toolchain", toolchain_line(ben_model))
 
     def emit(msg: str) -> None:
         if progress:
@@ -792,6 +868,22 @@ def run_pipeline(
         emit(f"CHECKS ROUND {round_num} → {'PASS' if checks_ok else 'FAIL'} (see {check_path.name})")
 
         if not checks_ok:
+            if ENV_FAIL_MARKER in check_report:
+                # Environment failures are the operator's, not the build's:
+                # routing them to Ben burns tokens at best and mutates the
+                # machine or deletes untracked files at worst. Halt fail-closed.
+                gate = ("[ENVIRONMENT FAILURE] Deterministic checks failed for environment "
+                        "reasons outside the build's authority (missing packages or broken "
+                        "tooling).\n\n## Final Verdict\nCHANGES REQUIRED\n\n"
+                        f"Fix the environment (see {check_path.name}) and re-run the pipeline. "
+                        "No fix rounds were spent and no reviewer was invoked.")
+                report = _pipeline_report(spec_path, repo, reviews, verdict, False,
+                                          "CHANGES REQUIRED", gate)
+                (out_dir / "PIPELINE_REPORT.md").write_text(report, encoding="utf-8")
+                print(_banner("PIPELINE HALT — ENVIRONMENT FAILURE (operator action required)",
+                              gate, "═"))
+                emit("PIPELINE HALTED — environment failure; fix the environment and re-run")
+                return "CHANGES REQUIRED"
             if round_num > fix_rounds:
                 emit("Fix rounds exhausted with failing checks — proceeding to gate")
                 break
@@ -874,6 +966,10 @@ def main() -> None:
                         help="Minimum %% diff coverage: lines the build adds must be "
                              "executed by tests (0 disables; 70-85 recommended for "
                              "platform builds; requires pytest-cov in the target env)")
+    parser.add_argument("--ben-model", default=None,
+                        help=f"Pin Ben's grok model for build+fix passes (falls back to "
+                             f"{BEN_MODEL_ENV} env, then the grok CLI's own default). "
+                             f"Recorded in PIPELINE_STATE.md either way.")
     parser.add_argument("--skip-build", action="store_true",
                         help="Skip the build stage; check+review+gate the existing working-tree changes")
     parser.add_argument("--allow-dirty", action="store_true",
@@ -911,7 +1007,9 @@ def main() -> None:
     print("  ORACLE BUILD PIPELINE")
     print(f"  Spec: {spec_path.name}")
     print(f"  Repo: {repo}")
-    print(f"  Build: {'skipped' if args.skip_build else 'Ben (Grok Build)'}")
+    resolved_ben = resolve_ben_model(args.ben_model)
+    print(f"  Build: {'skipped' if args.skip_build else 'Ben (Grok Build)'}"
+          + (f" [model: {resolved_ben}]" if resolved_ben else " [model: CLI default — unpinned]"))
     print(f"  Checks: {' '.join(check_argv) if check_argv else 'none detected/disabled'}"
           + (f" | diff coverage ≥{args.coverage_floor}%" if args.coverage_floor else ""))
     print(f"  Review: Atlas (Codex {ATLAS_PRESET}), {args.fix_rounds} fix round(s)")
@@ -919,7 +1017,8 @@ def main() -> None:
     print(f"{'═' * 60}\n")
 
     final_gate = run_pipeline(spec_path, repo, args.fix_rounds, args.skip_build, out_dir,
-                              check_cmd=args.check_cmd, coverage_floor=args.coverage_floor)
+                              check_cmd=args.check_cmd, coverage_floor=args.coverage_floor,
+                              ben_model=args.ben_model)
 
     status = "APPROVED" if final_gate == "APPROVED" else f"GATE {final_gate}"
     print(f"\n{'═' * 60}\n  PIPELINE COMPLETE — {status} — {out_dir / 'PIPELINE_REPORT.md'}\n{'═' * 60}\n")

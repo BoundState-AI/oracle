@@ -76,6 +76,16 @@ Artifacts land in `<target repo>/oracle_reviews/` and `<target repo>/oracle_buil
 Grok Build runs with `--always-approve` in `oracle_build.py` (authorized by Joe
 2026-07-13): unattended writes bounded to uncommitted changes in the target repo.
 
+**Model pins:** Atlas is pinned by preset (`gpt-5.6-terra @ high` for builds),
+Beth is pinned (`claude-fable-5`). Ben is pinned via `--ben-model` /
+`ORACLE_BEN_MODEL` (unset = the grok CLI's own default). Every run records the
+three legs' identities in `PIPELINE_STATE.md` ("Toolchain"), so the report
+always says who built and who judged — an unpinned Ben is recorded as UNPINNED
+rather than silently unknown. Note the spec-review engine (`oracle2`) is a
+separate model roster: Fran/Codex are OpenAI (`gpt-5.6-terra`), Grok is
+`grok-4.5`, and coordinator Beth defaults to `claude-opus-4-8` unless
+`ORACLE_BETH_MODEL` overrides it.
+
 ## Web UI (local dev server)
 
 When running `python server.py` + the Next frontend, the **Pipeline** tab in the
