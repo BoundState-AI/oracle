@@ -35,6 +35,7 @@ LOGGER = logging.getLogger("oracle.disposition.packs")
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
 SEED_6033 = DATA_DIR / "nasa_std_6033_seed.json"
+CURATED_6030 = DATA_DIR / "nasa_std_6030_curated.json"
 
 
 def load_pack(
@@ -54,7 +55,10 @@ def load_rdw_default_packs(
     repin: bool = True,
 ) -> tuple[list[RequirementRecord], dict[str, str]]:
     """
-    Phase 0: load 6030 builtin + curated 6033 seed (+ optional extras).
+    Phase 0 / Stage 0: load 6030 (curated preferred) + curated 6033 seed.
+
+    When nasa_std_6030_curated.json is present under disposition/data/, it is
+    preferred over the builtin pack (builtin stays untouched as fallback).
 
     Returns (merged records, {pack_id: content_hash}).
     """
@@ -62,7 +66,11 @@ def load_rdw_default_packs(
     all_recs: list[RequirementRecord] = []
     seen: set[str] = set()
 
-    paths: list[Path] = [Path(BUILTIN_NASA_6030)]
+    # Stage 0: curated 6030 supersedes builtin when present
+    pack_6030 = CURATED_6030 if CURATED_6030.is_file() else Path(BUILTIN_NASA_6030)
+    if CURATED_6030.is_file():
+        LOGGER.info("Using curated 6030 pack at %s", CURATED_6030)
+    paths: list[Path] = [pack_6030]
     if include_6033 and SEED_6033.is_file():
         paths.append(SEED_6033)
     for p in extra_paths or []:

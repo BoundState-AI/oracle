@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
 Module: oracle.disposition.walk
-Purpose: TTY-interactive disposition interview CLI (Stage D).
+Purpose: TTY-interactive disposition interview CLI (Stage C shell).
 
 Fails closed when stdin is not a TTY (unless io injection is provided for tests).
-No LLM calls. Deterministic question priority and allowed-state computation.
+Optional --advisor uses DeterministicAdvisor (tests) or LiveAdvisor (opt-in).
+Deterministic question priority and allowed-state computation.
 
 Safety Critical: advisory-only per D-1
 __safety_critical__: bool = False
@@ -371,6 +372,9 @@ def _present_unit(
     rec: RequirementRecord,
     session: DispositionSession,
     io: IOBundle,
+    *,
+    advisor: Optional[object] = None,
+    actor_name: str = "operator",
 ) -> None:
     assert session.state is not None
     unit = session.state.units[rec.requirement_id]
@@ -378,11 +382,34 @@ def _present_unit(
     io.write("=" * 72)
     io.write(f"UNIT {rec.requirement_id}")
     io.write("-" * 72)
+    # §14.1: verbatim text + locator FIRST
     io.write("VERBATIM REQUIREMENT TEXT:")
     io.write(rec.shall_text)
     loc = rec.locator
     page = f" page {loc.page}" if loc.page else ""
     io.write(f"LOCATOR: {loc.standard} {loc.revision} §{loc.section}{page}")
+    if advisor is not None:
+        from oracle.disposition.advisor import build_context
+
+        ctx = build_context(
+            unit,
+            rec,
+            session.state.facts,
+            has_evidence=session.has_qualifying_meet_evidence(unit),
+        )
+        try:
+            exp = advisor.explain(ctx)  # type: ignore[attr-defined]
+            session.record_advisor_output(
+                "explain",
+                exp.model_dump(mode="json"),
+                actor_name=actor_name,
+                unit_id=rec.requirement_id,
+            )
+            io.write("INTERPRETATION (*interpretation* — not the requirement text):")
+            io.write(exp.interpretation)
+            io.write(f"  [band={exp.band.value} basis={exp.basis}]")
+        except Exception as e:
+            io.write(f"Advisor explain unavailable: {e}")
     if rec.actor_candidate:
         io.write(
             f"Actor candidate (machine-extracted, unconfirmed): "
@@ -408,9 +435,34 @@ def _present_unit(
     else:
         io.write("  - (no deterministic blockers; axes may already allow Meet)")
     try:
-        io.write(f"Current export label: {unit.export_label().value}")
+        contract = unit.export_label().value
+        io.write(f"Contract export label: {contract}")
     except Exception as e:
-        io.write(f"Current export label: <unmapped: {e}>")
+        io.write(f"Contract export label: <unmapped: {e}>")
+    # Stage A readiness view
+    try:
+        from oracle.disposition.readiness import map_readiness
+        from oracle.disposition.actions import migrate_string_action
+
+        acts = session.actions_for_unit(rec.requirement_id)
+        if not acts and unit.open_actions:
+            acts = [
+                migrate_string_action(t, unit_id=rec.requirement_id, index=i)
+                for i, t in enumerate(unit.open_actions)
+            ]
+        rr = map_readiness(
+            unit,
+            acts,
+            has_qualifying_evidence=session.has_qualifying_meet_evidence(unit),
+        )
+        io.write(f"Readiness label: {rr.label.value} ({'; '.join(rr.reasons)})")
+    except Exception as e:
+        io.write(f"Readiness label: <unavailable: {e}>")
+    io.write(
+        f"Live axes: app={unit.applicability} actor={unit.obligated_actor} "
+        f"org={unit.organization_responsibility} impl={unit.implementation_state} "
+        f"appr={unit.approval_state}"
+    )
 
 
 def _progress_screen(session: DispositionSession, io: IOBundle) -> None:
@@ -435,6 +487,85 @@ def _progress_screen(session: DispositionSession, io: IOBundle) -> None:
     io.write(f"Open actions: {open_n}")
 
 
+def _advisor_proposal_step(
+    session: DispositionSession,
+    rec: RequirementRecord,
+    io: IOBundle,
+    advisor: object,
+    actor_name: str,
+) -> None:
+    """Render propose + optional suggest_closure; accept = election."""
+    from oracle.disposition.advisor import build_context
+
+    assert session.state is not None
+    unit = session.state.units[rec.requirement_id]
+    ctx = build_context(
+        unit,
+        rec,
+        session.state.facts,
+        has_evidence=session.has_qualifying_meet_evidence(unit),
+    )
+    prop = advisor.propose(ctx)  # type: ignore[attr-defined]
+    session.record_advisor_output(
+        "propose",
+        prop.model_dump(mode="json"),
+        actor_name=actor_name,
+        unit_id=rec.requirement_id,
+    )
+    io.write(
+        f"Advisor proposal: band={prop.band.value} basis={prop.basis}"
+    )
+    if prop.proposed_axes is None:
+        io.write("  (no axis proposal — §8 LOW or insufficient pattern)")
+        for q in prop.questions:
+            io.write(f"  Question: {q}")
+        return
+    io.write(f"  proposed_label={prop.proposed_label}")
+    for k, v in prop.proposed_axes.items():
+        io.write(f"  {k}={v}")
+    ans = io.ask("Accept proposal? [y=attest election / edit=skip axes / skip=TBD]: ")
+    if ans.lower() in ("y", "yes"):
+        try:
+            session.set_axes(
+                rec.requirement_id,
+                actor_name=actor_name,
+                election=True,
+                **prop.proposed_axes,
+            )
+            io.write("Proposal elected.")
+        except SessionError as e:
+            io.write(f"Election refused (deterministic gate): {e}")
+    elif ans.lower() in ("skip", "s"):
+        session.set_axes(
+            rec.requirement_id,
+            actor_name=actor_name,
+            enforce_decision=False,
+            applicability="tbd",
+            applicability_tbd_reason=TBDReason.CUSTOMER_INPUT_MISSING,
+        )
+        io.write("Skipped proposal → TBD(customer_input_missing).")
+    # suggest_closure for Not-Met paths
+    unit2 = session.state.units[rec.requirement_id]
+    if unit2.implementation_state in ("not_met", "partial", "tbd"):
+        clos = advisor.suggest_closure(ctx)  # type: ignore[attr-defined]
+        session.record_advisor_output(
+            "suggest_closure",
+            clos.model_dump(mode="json"),
+            actor_name=actor_name,
+            unit_id=rec.requirement_id,
+        )
+        io.write("Closure suggestions (*proposed* — not committed):")
+        for a in clos.actions:
+            io.write(
+                f"  {a.action_id}: {a.title} owner={a.owner} "
+                f"exit={a.exit_criteria}"
+            )
+            conf = io.ask(f"Record action {a.action_id}? [y/n]: ")
+            if conf.lower() in ("y", "yes"):
+                session.record_action(a, actor_name=actor_name)
+                io.write(f"  recorded {a.action_id}")
+
+
 def run_walk(
     *,
     session_dir: Path | str,
@@ -444,15 +575,29 @@ def run_walk(
     repin: bool = False,
     io: Optional[IOBundle] = None,
     max_units: Optional[int] = None,
+    advisor: bool = False,
+    live_advisor: bool = False,
 ) -> DispositionSession:
     """
     Interactive walkthrough. `io` may inject scripted stdin for tests.
+
+    advisor=True enables DeterministicAdvisor (or LiveAdvisor if live_advisor).
     """
     io = io or IOBundle()
     if not _is_tty(io):
         raise SystemExit(
             "oracle disposition walk requires a TTY (fails closed non-TTY). "
             "Use injected IO in tests."
+        )
+
+    adv = None
+    if advisor:
+        from oracle.disposition.advisor import get_advisor
+
+        adv = get_advisor(live=live_advisor)
+        io.write(
+            f"Advisor enabled: {getattr(adv, 'model_id', type(adv).__name__)} "
+            "(outputs proposed-only until you attest)"
         )
 
     session = DispositionSession(session_dir)
@@ -478,7 +623,14 @@ def run_walk(
     for rec in ordered:
         if max_units is not None and done >= max_units:
             break
-        _present_unit(rec, session, io)
+        _present_unit(
+            rec, session, io, advisor=adv, actor_name=actor_name
+        )
+        if adv is not None:
+            try:
+                _advisor_proposal_step(session, rec, io, adv, actor_name)
+            except Exception as e:
+                io.write(f"Advisor proposal step skipped: {e}")
         while True:
             qkey, prompt = _highest_value_question(rec, session)
             if qkey == "done":
@@ -528,6 +680,10 @@ def run_walk(
                 break
 
             ans = io.ask(prompt)
+            # Stage A: retain raw answer before mapping
+            session.record_answer(
+                rec.requirement_id, qkey, ans, actor_name=actor_name
+            )
             if ans.lower() in ("quit", "q", "exit"):
                 # quit mid-unit → TBD with reason (never silence)
                 session.set_axes(
@@ -561,13 +717,20 @@ def run_walk(
     _progress_screen(session, io)
 
     if export_dir:
-        # F2: route through export_all so the evidence registry is resolved
-        # and a missing registry is stamped into Meta — never a silent skip.
+        # F2 + Stage E: dual products when available
         try:
-            paths = export_all(session, records, export_dir)
+            from oracle.disposition.export import export_dual_products
+
+            paths = export_dual_products(session, records, export_dir)
         except ExportError as e:
             io.write(f"Export refused: {e}")
             return session
+        except Exception:
+            try:
+                paths = export_all(session, records, export_dir)
+            except ExportError as e:
+                io.write(f"Export refused: {e}")
+                return session
         meta = stamp_meta(session)
         session.record_export(
             {**meta, "paths": {k: str(v) for k, v in paths.items()}}, actor_name
@@ -587,4 +750,6 @@ def cmd_disposition_walk(args) -> None:
         export_dir=getattr(args, "export_dir", None),
         repin=bool(getattr(args, "repin", False)),
         max_units=getattr(args, "max_units", None),
+        advisor=bool(getattr(args, "advisor", False)),
+        live_advisor=bool(getattr(args, "live_advisor", False)),
     )

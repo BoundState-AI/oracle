@@ -3591,6 +3591,31 @@ def _cmd_disposition_export(args: argparse.Namespace) -> None:
     print(json.dumps({k: str(v) for k, v in paths.items()}, indent=2))
 
 
+def _cmd_disposition_library_export(args: argparse.Namespace) -> None:
+    from oracle.disposition.library import export_library
+    from oracle.disposition.session import DispositionSession
+
+    s = DispositionSession(args.session_dir)
+    s.resume(actor_name=args.actor, repin=False)
+    path = export_library(s, args.out_json)
+    print(json.dumps({"library": str(path)}, indent=2))
+
+
+def _cmd_disposition_library_import(args: argparse.Namespace) -> None:
+    from pathlib import Path
+
+    from oracle.disposition.library import import_library
+    from oracle.disposition.session import DispositionSession
+
+    s = DispositionSession(args.session_dir)
+    if not (Path(args.session_dir) / "session.json").exists():
+        s.open(actor_name=args.actor, repin=True)
+    else:
+        s.resume(actor_name=args.actor, repin=False)
+    counts = import_library(s, args.library_json, actor_name=args.actor)
+    print(json.dumps(counts, indent=2))
+
+
 def _cmd_disposition_audit(args: argparse.Namespace) -> None:
     from pathlib import Path
 
@@ -3794,6 +3819,16 @@ Examples:
         default=None,
         help="Optional cap on units walked (for smoke runs)",
     )
+    p_walk.add_argument(
+        "--advisor",
+        action="store_true",
+        help="Enable advisor panes (DeterministicAdvisor; keyless by default)",
+    )
+    p_walk.add_argument(
+        "--live-advisor",
+        action="store_true",
+        help="Use LiveAdvisor (requires ANTHROPIC_API_KEY / RDW_ADVISOR_MODEL)",
+    )
     p_walk.set_defaults(func=_cmd_disposition_walk)
 
     p_golden = disp_sub.add_parser(
@@ -3831,6 +3866,34 @@ Examples:
     p_audit.add_argument("--unit", type=str, required=True)
     p_audit.add_argument("--actor", type=str, default="auditor")
     p_audit.set_defaults(func=_cmd_disposition_audit)
+
+    # Stage D — context library
+    p_lib = disp_sub.add_parser(
+        "library",
+        help="Cross-project context library export/import",
+    )
+    lib_sub = p_lib.add_subparsers(dest="library_command")
+
+    def _lib_help(_args: argparse.Namespace) -> None:
+        p_lib.print_help()
+
+    p_lib.set_defaults(func=_lib_help)
+
+    p_lib_export = lib_sub.add_parser(
+        "export", help="Export scrubbed learning bundle from a session"
+    )
+    p_lib_export.add_argument("session_dir", type=str)
+    p_lib_export.add_argument("out_json", type=str)
+    p_lib_export.add_argument("--actor", type=str, default="operator")
+    p_lib_export.set_defaults(func=_cmd_disposition_library_export)
+
+    p_lib_import = lib_sub.add_parser(
+        "import", help="Import library as assumption facts into a session"
+    )
+    p_lib_import.add_argument("session_dir", type=str)
+    p_lib_import.add_argument("library_json", type=str)
+    p_lib_import.add_argument("--actor", type=str, default="operator")
+    p_lib_import.set_defaults(func=_cmd_disposition_library_import)
 
     args = parser.parse_args()
 

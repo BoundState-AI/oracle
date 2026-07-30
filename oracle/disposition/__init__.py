@@ -73,6 +73,10 @@ from oracle.disposition.review import (  # noqa: F401
 from oracle.disposition.audit import build_lineage  # noqa: F401
 from oracle.disposition.integrations import LocalEvidenceConnector  # noqa: F401
 from oracle.disposition.golden import run_golden_session  # noqa: F401
+from oracle.disposition.actions import ActionRecord  # noqa: F401
+from oracle.disposition.readiness import map_readiness, ReadinessLabel  # noqa: F401
+from oracle.disposition.advisor import DeterministicAdvisor, get_advisor  # noqa: F401
+from oracle.disposition.library import export_library, import_library  # noqa: F401
 
 # S1a deliverables (persistence, audit, release authority)
 from oracle.disposition.identity import (  # noqa: F401

@@ -209,8 +209,15 @@ class UnitAxesState(BaseModel):
     comment: Optional[str] = None
     comment_status: Literal["proposed", "accepted", "edited"] = "proposed"
     evidence_refs: tuple[EvidenceRef, ...] = ()
-    open_actions: tuple[str, ...] = ()
+    open_actions: tuple[str, ...] = ()  # legacy strings; prefer SessionState.actions
     actor_name: Optional[str] = None
+    # Stage A — Not Yet Due marker (justification required when True)
+    not_yet_due: bool = False
+    not_yet_due_justification: Optional[str] = None
+    # Stage A — Exception closure fields
+    exception_basis: Optional[str] = None
+    permanent_relief_basis: Optional[str] = None
+    closure_path_action_id: Optional[str] = None
 
     @field_validator("scope_citation", mode="before")
     @classmethod
@@ -269,6 +276,10 @@ class SessionState(BaseModel):
     exports: list[dict[str, Any]] = Field(default_factory=list)
     needs_rereview: list[str] = Field(default_factory=list)  # durable via event replay
     rereview_diffs: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    # Stage A
+    actions: dict[str, Any] = Field(default_factory=dict)  # action_id -> ActionRecord
+    raw_answers: list[dict[str, Any]] = Field(default_factory=list)
+    advisor_outputs: list[dict[str, Any]] = Field(default_factory=list)
     schema_version: str = SESSION_SCHEMA
 
 
@@ -543,10 +554,15 @@ class DispositionSession:
 
         store = self.evidence_store()
         if store is None:
-            LOGGER.warning(
-                "Meet evidence refs are unverified (no evidence registry at %s/evidence)",
-                self.root,
-            )
+            # Warn once per session root (avoid export-row spam)
+            flag = "_warned_unverified_evidence"
+            if not getattr(self, flag, False):
+                LOGGER.warning(
+                    "Meet evidence refs are unverified "
+                    "(no evidence registry at %s/evidence)",
+                    self.root,
+                )
+                setattr(self, flag, True)
             return bool(unit.evidence_refs)
         if not store.unit_has_qualifying_meet_evidence(unit.unit_id):
             return False
@@ -634,6 +650,30 @@ class DispositionSession:
                     )
             elif et == "paired_answer":
                 state.paired_answers[p["question_key"]] = p["answer"]
+            elif et == "answer_recorded":
+                state.raw_answers.append(
+                    {
+                        "unit_id": p.get("unit_id"),
+                        "question_key": p.get("question_key"),
+                        "raw": p.get("raw"),
+                        "actor": p.get("actor") or ev.actor,
+                        "timestamp": ev.timestamp,
+                    }
+                )
+            elif et == "action_recorded":
+                from oracle.disposition.actions import ActionRecord
+
+                act = ActionRecord.model_validate(p["action"])
+                state.actions[act.action_id] = act
+                if act.supersedes and act.supersedes in state.actions:
+                    prior = state.actions[act.supersedes]
+                    state.actions[act.supersedes] = prior.model_copy(
+                        update={"status": "superseded"}
+                    )
+            elif et == "advisor_output":
+                state.advisor_outputs.append(
+                    {k: v for k, v in p.items() if k not in ("event_type", "_schema")}
+                )
             elif et == "context_updated":
                 state.context = ProjectContext.model_validate(p["context"])
             elif et == "export_produced":
@@ -822,6 +862,12 @@ class DispositionSession:
                     f"Comment fails §13.2 prohibited-language check: {hits}"
                 )
 
+        # Stage A: not_yet_due requires justification
+        if unit.not_yet_due and not (unit.not_yet_due_justification or "").strip():
+            raise SessionError(
+                "not_yet_due requires not_yet_due_justification"
+            )
+
         # Validate axis mapping
         try:
             label = unit.export_label()
@@ -856,6 +902,21 @@ class DispositionSession:
                 raise SessionError(
                     "Election refused: Meet requires qualifying evidence (hard gate)"
                 )
+            # Stage A: Exception closure gates
+            if label.value == "Exception":
+                if not (unit.exception_basis or "").strip():
+                    raise SessionError(
+                        "Election refused: Exception requires exception_basis"
+                    )
+                has_closure = bool(
+                    (unit.closure_path_action_id or "").strip()
+                    or (unit.permanent_relief_basis or "").strip()
+                )
+                if not has_closure:
+                    raise SessionError(
+                        "Election refused: Exception requires closure_path_action_id "
+                        "or permanent_relief_basis"
+                    )
 
         # Re-open path: re-election on rejected/superseded returns to proposed
         if election and unit.review_state in ("rejected", "superseded"):
@@ -1015,6 +1076,104 @@ class DispositionSession:
             new = cur.model_copy(update={"evidence_refs": cur.evidence_refs + (ref,)})
             self.state.units[unit_id] = new
             return new
+
+    def record_answer(
+        self,
+        unit_id: str,
+        question_key: str,
+        raw: str,
+        *,
+        actor_name: str,
+    ) -> None:
+        """Stage A: store every interview answer verbatim before axis mapping."""
+        if self.state is None:
+            raise SessionError("Session not open")
+        with self._exclusive_lock():
+            self.eventlog.append(
+                actor=actor_name,
+                unit_id=unit_id,
+                payload={
+                    "event_type": "answer_recorded",
+                    "unit_id": unit_id,
+                    "question_key": question_key,
+                    "raw": raw,
+                    "actor": actor_name,
+                },
+            )
+            self.state.raw_answers.append(
+                {
+                    "unit_id": unit_id,
+                    "question_key": question_key,
+                    "raw": raw,
+                    "actor": actor_name,
+                    "timestamp": _utcnow(),
+                }
+            )
+
+    def record_action(
+        self,
+        action: Any,
+        *,
+        actor_name: str,
+    ) -> Any:
+        """Stage A: append ActionRecord (supersedes prior by action_id chain)."""
+        from oracle.disposition.actions import ActionRecord
+
+        if self.state is None:
+            raise SessionError("Session not open")
+        if not isinstance(action, ActionRecord):
+            action = ActionRecord.model_validate(action)
+        with self._exclusive_lock():
+            self.eventlog.append(
+                actor=actor_name,
+                unit_id=action.affected_unit_ids[0] if action.affected_unit_ids else None,
+                payload={
+                    "event_type": "action_recorded",
+                    "action": action.model_dump(mode="json"),
+                },
+            )
+            if action.supersedes and action.supersedes in self.state.actions:
+                prior = self.state.actions[action.supersedes]
+                self.state.actions[action.supersedes] = prior.model_copy(
+                    update={"status": "superseded"}
+                )
+            self.state.actions[action.action_id] = action
+        return action
+
+    def actions_for_unit(self, unit_id: str) -> list[Any]:
+        if self.state is None:
+            return []
+        return [
+            a
+            for a in self.state.actions.values()
+            if unit_id in a.affected_unit_ids or not a.affected_unit_ids
+        ]
+
+    def record_advisor_output(
+        self,
+        kind: str,
+        payload: dict[str, Any],
+        *,
+        actor_name: str,
+        unit_id: Optional[str] = None,
+    ) -> None:
+        """Stage B: log advisor output as proposed-only event."""
+        if self.state is None:
+            raise SessionError("Session not open")
+        with self._exclusive_lock():
+            body = {
+                "event_type": "advisor_output",
+                "kind": kind,
+                **payload,
+            }
+            self.eventlog.append(
+                actor=actor_name,
+                unit_id=unit_id,
+                payload=body,
+            )
+            self.state.advisor_outputs.append(
+                {k: v for k, v in body.items() if k != "event_type"}
+            )
 
     def record_export(self, meta: dict[str, Any], actor_name: str) -> None:
         if self.state is None:

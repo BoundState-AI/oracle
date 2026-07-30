@@ -616,3 +616,168 @@ def export_all(
         ),
     }
     return paths
+
+
+def export_appendix_a(
+    session: DispositionSession,
+    records: dict[str, RequirementRecord],
+    path: Path | str,
+    *,
+    enforce_decision: bool = True,
+) -> Path:
+    """
+    Stage E external product: Appendix-A-format compliance matrix.
+
+    Columns: Section / Description / Requirement / Applicable / Comments
+    (contract-label view). Counts computed at render. D-1 banner.
+    """
+    if session.state is None:
+        raise ExportError("Session not open")
+    # Reuse matrix rows for refusal discipline, then reshape
+    rows = build_matrix_rows(
+        session, records, enforce_decision=enforce_decision
+    )
+    counts = count_by_export_label(rows)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    st = session.state
+    buf = io.StringIO()
+    buf.write(f"# {ADVISORY_BANNER}\n")
+    buf.write(
+        f"# Appendix A format | session_id={st.session_id} "
+        f"pack_hash={st.pack_hash} rdw={SPEC_VERSIONS['rdw_spec']}\n"
+    )
+    buf.write(f"# counts={counts}\n")
+    # advisor stamps if any
+    if st.advisor_outputs:
+        models = sorted(
+            {
+                str(o.get("model_id") or o.get("model") or "")
+                for o in st.advisor_outputs
+                if o.get("model_id") or o.get("model")
+            }
+        )
+        if models:
+            buf.write(f"# advisor_models={models}\n")
+    writer = csv.writer(buf)
+    writer.writerow(
+        ["Section", "Description", "Requirement", "Applicable", "Comments"]
+    )
+    for r in rows:
+        rec = records.get(r.unit_id)
+        section = rec.locator.section if rec else ""
+        desc = (rec.shall_text[:120] + "…") if rec and len(rec.shall_text) > 120 else (
+            rec.shall_text if rec else ""
+        )
+        applicable = {
+            "Meet": "Yes",
+            "Meets Intent": "Yes (MI)",
+            "Exception": "Yes (EX)",
+            "N/A": "No",
+            "TBD": "TBD",
+            "Open/Not Met": "Yes (Open)",
+        }.get(r.export_label, r.export_label)
+        writer.writerow(
+            [
+                section,
+                desc,
+                r.unit_id,
+                applicable,
+                r.comment or r.export_label,
+            ]
+        )
+    path.write_text(buf.getvalue(), encoding="utf-8")
+    LOGGER.info("Wrote Appendix-A matrix to %s (%d rows)", path, len(rows))
+    return path
+
+
+def export_readiness_roadmap(
+    session: DispositionSession,
+    records: dict[str, RequirementRecord],
+    path: Path | str,
+) -> Path:
+    """
+    Stage E internal product: gap-closure / readiness roadmap by work_package.
+
+    Every non-Met row with ActionRecords; readiness counts; action ids.
+    """
+    if session.state is None:
+        raise ExportError("Session not open")
+    from oracle.disposition.readiness import map_readiness, readiness_counts
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    st = session.state
+    results = []
+    lines: list[str] = []
+    lines.append(f"# {ADVISORY_BANNER}")
+    lines.append(
+        f"# Readiness roadmap | session_id={st.session_id} pack_hash={st.pack_hash}"
+    )
+    by_wp: dict[str, list[str]] = {}
+    for uid, unit in sorted(st.units.items()):
+        acts = session.actions_for_unit(uid)
+        # migrate legacy strings
+        from oracle.disposition.actions import migrate_string_action
+
+        if not acts and unit.open_actions:
+            acts = [
+                migrate_string_action(t, unit_id=uid, index=i)
+                for i, t in enumerate(unit.open_actions)
+            ]
+        has_ev = session.has_qualifying_meet_evidence(unit)
+        rr = map_readiness(unit, acts, has_qualifying_evidence=has_ev)
+        results.append(rr)
+        if rr.label.value == "Met":
+            continue
+        wp = "unassigned"
+        for a in acts:
+            if a.work_package:
+                wp = a.work_package
+                break
+        block = [
+            f"## {uid} — {rr.label.value}",
+            f"reasons: {'; '.join(rr.reasons)}",
+        ]
+        try:
+            block.append(f"contract_label: {unit.export_label().value}")
+        except Exception:
+            block.append("contract_label: <unmapped>")
+        for a in acts:
+            block.append(
+                f"  ACTION {a.action_id}: {a.title} | owner={a.owner} | "
+                f"deliverable={a.deliverable} | exit={a.exit_criteria} | "
+                f"due={a.due_or_trigger} | wp={a.work_package}"
+            )
+        by_wp.setdefault(wp, []).append("\n".join(block))
+
+    counts = readiness_counts(results)
+    lines.append(f"# readiness_counts={counts}")
+    for wp, blocks in sorted(by_wp.items()):
+        lines.append(f"\n# === work_package: {wp} ===")
+        lines.extend(blocks)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    LOGGER.info("Wrote readiness roadmap to %s", path)
+    return path
+
+
+def export_dual_products(
+    session: DispositionSession,
+    records: dict[str, RequirementRecord],
+    out_dir: Path | str,
+    *,
+    enforce_decision: bool = True,
+) -> dict[str, Path]:
+    """Stage E: supplier matrix suite + Appendix-A + readiness roadmap."""
+    out = Path(out_dir)
+    paths = export_all(
+        session, records, out, enforce_decision=enforce_decision
+    )
+    paths["appendix_a"] = export_appendix_a(
+        session, records, out / "appendix_a_matrix.csv",
+        enforce_decision=enforce_decision,
+    )
+    paths["roadmap"] = export_readiness_roadmap(
+        session, records, out / "readiness_roadmap.md"
+    )
+    return paths

@@ -341,6 +341,53 @@ the source PDF with human review (FR-003) is a prerequisite for the
 assistant slice. The pack is protected from builds — re-extraction is a
 deliberate curation task, not a build task.
 
+---
+
+## Assistant-slice review — uncommitted build on `6ddf073` (Beth, 2026-07-30)
+
+**Verified by execution:** Stage 0 pack (115 complete, zero dangling `[`,
+AMR-2 whole, pages + rationale, source_hash matches the pinned PDF, loader
+prefers curated, builtin untouched); Stage A (EX closure gate refuses
+without basis and elects with basis+closure; `not_yet_due` requires
+justification and maps to Not Yet Due; raw answers and ActionRecords
+replay including supersession); Stage B (LOW proposes nothing; blocked
+labels never proposed; context/output hashes present; rationale-grounded
+explain; §13.2 + grader scrub refusals); Stage D (blocklist export
+refusal; imports land as unconfirmed assumptions); Stage E (supplier
+suite + `appendix_a_matrix.csv` + `readiness_roadmap.md`, banner, stamps,
+computed counts, phantom-skip note); Stage C (`walk --advisor` survives a
+scripted interview, verbatim-first, labeled interpretation, band +
+readiness shown). Full suite **553 passed / 4 skipped independently
+confirmed** (monolithic).
+
+**Findings (fix round requested before commit):**
+
+1. **AF1 (medium-high) — curated-pack fidelity: cross-line dehyphenation.**
+   Sentence-level sweep vs the PDF: 11 records deviate — compound terms
+   lost internal hyphens at line breaks: `NASASTD-5019` (amr-15),
+   `NASA-STD5009` (amr-20), `insitu` (amr-21), `postbuild` (amr-30),
+   `postAM` (amr-70), plus join artifacts in amr-10/12/13/24/65/80.
+   And **amr-9 + amr-13 embed the `[Rationale:` block inside
+   `shall_text`** (field-separation violation). Repair the 11 + de-dup
+   the 2, add the sentence-sweep as a Stage 0 test, then operator review.
+2. **AF2 (medium) — readiness "plan-quality" floor not enforced:** an
+   ownerless/exit-less open action still yields Not Met with Plan
+   (readiness.py fallback branch). Spec floor: owner + exit_criteria.
+   Probe: not_met + ownerless action → "Not Met with Plan" (want TBD
+   Verify).
+3. **AF3 (medium) — advisor LOW gating over-broad:** any
+   assumed-classification fact (which the seed context creates by
+   default) marks EVERY unit LOW, making the AMR-14 Open/Not Met proposal
+   path unreachable in real sessions. Scope the LOW check to
+   unit-relevant facts (graph edges), not a global fact-blob scan.
+4. **AF4 (low):** LiveAdvisor default model id is outdated
+   (`claude-sonnet-4-20250514`); bump to a current-generation default
+   (env override already exists).
+5. **AF5 (low, design note):** imported paired answers suppress the
+   paired question in a new session without setting axes — no false
+   closure (units stay TBD and get individual questions), but the
+   ask-once-apply-to-all machinery doesn't fire on import.
+
 *Prepared by Beth from Atlas's reviews of 2026-07-30 and Beth's reviews of
-`ea6cd88`, `2bc0276`, `2ab4e81`, and fix round 2 (probe-verified).
-Advisory-only per D-1.*
+`ea6cd88`, `2bc0276`, `2ab4e81`, fix round 2, and the assistant slice
+(probe-verified). Advisory-only per D-1.*

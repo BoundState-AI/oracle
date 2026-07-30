@@ -64,6 +64,10 @@ class RequirementRecord(BaseModel):
     keywords: tuple[str, ...] = ()
     authority_dependent: bool = False
     source_tag: Optional[str] = None
+    # Stage 0: curated pack rationale / guidance for advisor grounding
+    rationale: str = ""
+    notes: str = ""
+    source_hash: Optional[str] = None  # PDF source pin when curated
 
 
 class DependencyEdge(BaseModel):
@@ -228,6 +232,19 @@ def load_requirement_records(
         if isinstance(kws, str):
             kws = [kws]
 
+        rationale = str(
+            req.get("rationale") or req.get("justification") or ""
+        ).strip()
+        notes = str(req.get("notes") or req.get("context") or "").strip()
+        # Prefer explicit page; also accept source_coordinates.page
+        if page_i is None:
+            sc = req.get("source_coordinates") or {}
+            if isinstance(sc, dict) and sc.get("page") is not None:
+                try:
+                    page_i = int(sc["page"])
+                except (TypeError, ValueError):
+                    page_i = None
+
         records.append(
             RequirementRecord(
                 requirement_id=rid,
@@ -245,6 +262,9 @@ def load_requirement_records(
                 keywords=tuple(str(k) for k in kws),
                 authority_dependent=_authority_dependent(req),
                 source_tag=req.get("source_tag"),
+                rationale=rationale,
+                notes=notes,
+                source_hash=data.get("source_hash"),
             )
         )
 

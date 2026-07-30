@@ -92,9 +92,14 @@ def test_scripted_walk_three_amrs_skip_and_blockers(tmp_path):
         )
 
     u14 = session.state.units.get("AMR-14")
-    if u14 and u14.applicability == "yes" and u14.implementation_state == "not_met":
-        if u14.approval_state == "not_required":
-            assert u14.export_label().value == "Open/Not Met"
+    if (
+        u14
+        and u14.applicability == "yes"
+        and u14.implementation_state == "not_met"
+        and u14.approval_state == "not_required"
+        and u14.organization_responsibility not in ("tbd", None)
+    ):
+        assert u14.export_label().value == "Open/Not Met"
 
     # Resume works
     s2 = DispositionSession(tmp_path / "walk1")
