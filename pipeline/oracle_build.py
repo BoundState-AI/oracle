@@ -202,14 +202,46 @@ def parse_gate_verdict(gate_output: str) -> str:
     return "CHANGES REQUIRED" if "CHANGES" in v else v
 
 
-def final_gate_verdict(gate_output: str, checks_ok: bool) -> str:
-    """Beth's verdict, clamped by deterministic evidence: red checks can never
-    ship, no matter how persuasive the prose. REJECTED passes through — it is
-    already more severe than the clamp."""
+def clamp_reason(
+    gate_output: str, checks_ok: bool, review_verdict: str | None = None
+) -> str | None:
+    """Why an APPROVED gate must be clamped, or None if it may stand.
+
+    Single source of truth for both the verdict and the report, so the rendered
+    header can never disagree with the verdict the pipeline returns.
+    """
+    if parse_gate_verdict(gate_output) != "APPROVED":
+        return None
+    if not checks_ok:
+        return "deterministic checks failed"
+    if review_verdict and review_verdict.upper() != "SHIP":
+        return (f"reviewer's final verdict was {review_verdict.upper()} "
+                "and was never resolved")
+    return None
+
+
+def final_gate_verdict(
+    gate_output: str, checks_ok: bool, review_verdict: str | None = None
+) -> str:
+    """Beth's verdict, clamped by deterministic evidence AND by an unresolved
+    reviewer verdict. Neither red checks nor an unaddressed FIX FIRST can ship,
+    no matter how persuasive the prose. REJECTED passes through — it is already
+    more severe than the clamp.
+
+    WHY the review clamp: fix rounds can be exhausted while the reviewer's last
+    verdict is still FIX FIRST/BLOCK, and the pipeline then hands the gate the
+    very diff the reviewer rejected. Before this clamp only the check channel
+    had a deterministic floor, so green tests could launder an unresolved
+    reviewer finding. In the 2026-07-29 S1 run three of four residual defects
+    were semantic bugs — an inverted `supersedes` gate, an `or` where full
+    scope coverage was required, whitespace satisfying required fields — that
+    no coverage number can see. A human may still overrule a reviewer, but that
+    decision belongs outside the pipeline, not inside an automated gate.
+    """
     verdict = parse_gate_verdict(gate_output)
-    if not checks_ok and verdict == "APPROVED":
-        LOGGER.warning("Gate said APPROVED but deterministic checks failed — "
-                       "clamping to CHANGES REQUIRED")
+    reason = clamp_reason(gate_output, checks_ok, review_verdict)
+    if reason:
+        LOGGER.warning("Gate said APPROVED but %s — clamping to CHANGES REQUIRED", reason)
         return "CHANGES REQUIRED"
     return verdict
 
@@ -535,10 +567,36 @@ def resolve_check_cmd(repo: Path, check_cmd: str) -> tuple[list[str] | None, boo
     return base + argv[1:], False
 
 
+# WHY: interpreter-shutdown callbacks can raise AFTER the test run finishes —
+# on Windows, pytest's tmpdir cleanup hits PermissionError removing
+# `Temp\pytest-of-<user>\pytest-current`. Python prints "Exception ignored in
+# atexit callback" plus a traceback, which lands at the very END of the
+# captured output, which is exactly where _tail() looks. The exit code is
+# unaffected (the exception is ignored), so this never changes PASS/FAIL — but
+# left in, the traceback can push real pytest failures out of the tail cap and
+# leaves the check evidence Atlas and Beth read ending on a traceback for a run
+# that actually passed. This is an evidence-fidelity fix, not a verdict fix.
+_ATEXIT_NOISE_RE = re.compile(r"\n?Exception ignored in atexit callback.*\Z", re.DOTALL)
+
+
+def _strip_atexit_noise(output: str) -> str:
+    """Drop trailing interpreter-shutdown tracebacks from captured output.
+
+    Only strips from the first such marker to end-of-output — atexit callbacks
+    run after everything meaningful, so nothing recoverable follows them.
+    """
+    return _ATEXIT_NOISE_RE.sub("", output)
+
+
 def _run_check_cmd(argv: list[str], repo: Path, timeout: int) -> tuple[int | None, str]:
     """Run the check command in the target repo. Returns (exit code | None on
     timeout, combined output). Never raises — a check that cannot run is a
-    failed check, not a crashed pipeline."""
+    failed check, not a crashed pipeline.
+
+    The verdict is taken from the exit code alone; captured output is evidence
+    only. Trailing atexit noise is stripped so the evidence ends on the test
+    runner's own summary.
+    """
     try:
         result = subprocess.run(
             argv, cwd=str(repo), capture_output=True, text=True,
@@ -548,7 +606,7 @@ def _run_check_cmd(argv: list[str], repo: Path, timeout: int) -> tuple[int | Non
     except OSError as exc:
         return 127, f"[ERROR] could not execute check command: {exc}"
     output = (result.stdout or "") + (f"\n{result.stderr}" if result.stderr else "")
-    return result.returncode, output.strip()
+    return result.returncode, _strip_atexit_noise(output).strip()
 
 
 def run_checks(
@@ -778,18 +836,34 @@ def _pipeline_report(
     gate_verdict: str,
     gate: str,
 ) -> str:
-    """Render PIPELINE_REPORT.md. When Beth's APPROVED was clamped by red
-    checks, a canonical verdict section is prepended so every downstream
-    parser (server UI included) reads the clamped verdict, not her original."""
-    clamped = not checks_ok and parse_gate_verdict(gate) == "APPROVED"
+    """Render PIPELINE_REPORT.md. When Beth's APPROVED was clamped — by red
+    checks or by an unresolved reviewer verdict — a canonical verdict section is
+    prepended so every downstream parser (server UI included) reads the clamped
+    verdict, not her original.
+
+    An unresolved reviewer verdict is additionally surfaced as its own banner
+    even when the gate did not say APPROVED, so a FIX FIRST diff is never
+    presented as final without the reader being told.
+    """
+    reason = clamp_reason(gate, checks_ok, last_verdict if reviews else None)
     body = gate
     clamp_note = ""
-    if clamped:
-        clamp_note = " (clamped from APPROVED — deterministic checks failed)"
-        body = ("## Final Verdict\nCHANGES REQUIRED — pipeline clamp: deterministic "
-                "checks failed. Beth's original gate (APPROVED) follows below.\n\n" + gate)
+    if reason:
+        clamp_note = f" (clamped from APPROVED — {reason})"
+        body = (f"## Final Verdict\nCHANGES REQUIRED — pipeline clamp: {reason}. "
+                "Beth's original gate (APPROVED) follows below.\n\n" + gate)
     atlas_line = (f"{len(reviews)} (last verdict: {last_verdict})" if reviews
                   else "0 (checks never passed — no review ran)")
+    unresolved = ""
+    if reviews and last_verdict.upper() != "SHIP":
+        unresolved = (
+            f"> **UNRESOLVED REVIEW — the reviewer's final verdict was "
+            f"{last_verdict.upper()}, and this diff is the diff they rejected.**\n"
+            f"> Fix rounds were exhausted before the reviewer was satisfied. Every\n"
+            f"> finding in `atlas_review_round{len(reviews)}.md` should be treated as\n"
+            f"> open unless the gate below explicitly adjudicates it. Green\n"
+            f"> deterministic checks do not resolve a review finding.\n\n"
+        )
     return (
         f"# Oracle Build Pipeline Report\n\n"
         f"**Spec:** {spec_path}\n**Repo:** {repo}\n"
@@ -797,6 +871,7 @@ def _pipeline_report(
         f"**Checks:** {'PASS' if checks_ok else 'FAIL'} (final round — see check_round*.md)\n"
         f"**Atlas rounds:** {atlas_line}\n"
         f"**Final Gate:** {gate_verdict}{clamp_note}\n\n"
+        f"{unresolved}"
         f"{body}\n"
     )
 
@@ -958,7 +1033,10 @@ def run_pipeline(
         timeout=1800,  # generous for high-effort Fable gate; still bounded
     )
 
-    gate_verdict = final_gate_verdict(gate, checks_ok)
+    # `verdict` is the reviewer's last word; pass it so an unresolved FIX FIRST
+    # clamps APPROVED exactly as red checks do. Only meaningful when a review
+    # actually ran — no reviews means no reviewer finding to be unresolved.
+    gate_verdict = final_gate_verdict(gate, checks_ok, verdict if reviews else None)
     report = _pipeline_report(spec_path, repo, reviews, verdict, checks_ok, gate_verdict, gate)
     (out_dir / "PIPELINE_REPORT.md").write_text(report, encoding="utf-8")
     print(_banner(f"BETH (FABLE) — FINAL GATE → {gate_verdict}", gate, "═"))
