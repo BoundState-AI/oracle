@@ -36,3 +36,32 @@ def test_curated_pack_integrity():
     data = json.loads(CURATED_6030.read_text(encoding="utf-8"))
     assert data["source_hash"].startswith("sha256:5246d3b9")
     assert data["total_requirements"] == 115
+
+
+def test_curated_pack_hyphen_and_rationale_fidelity():
+    """AF1: no soft-hyphen join artifacts; rationale not embedded in shall_text."""
+    import json
+    import re
+
+    data = json.loads(CURATED_6030.read_text(encoding="utf-8"))
+    join_artifacts = (
+        "NASASTD",
+        "NASA-STD5009",
+        "insitu",
+        "postbuild",
+        "postAM",
+        "LotMature",
+        "growthrate",
+    )
+    for r in data["requirements"]:
+        text = r["shall_text"]
+        for art in join_artifacts:
+            assert art not in text, f"{r['id']} has join artifact {art!r}"
+        assert "[Rationale" not in text, f"{r['id']} embeds rationale in shall_text"
+        assert not re.search(r"(?i)\brationale\s*:", text), (
+            f"{r['id']} embeds rationale prose in shall_text"
+        )
+    by_id = {r["id"]: r for r in data["requirements"]}
+    assert "NASA-STD-5019" in by_id["amr-15"]["shall_text"]
+    assert "NASA-STD-5009" in by_id["amr-20"]["shall_text"]
+    assert "in-situ" in by_id["amr-21"]["shall_text"]

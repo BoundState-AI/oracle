@@ -159,16 +159,14 @@ def map_readiness(
             reasons=("meets_as_written pending qualifying evidence",),
         )
 
-    # not_met without plan-quality action
+    # not_met/partial without plan-quality action (AF2: owner+exit_criteria required)
     if unit.implementation_state in ("not_met", "partial"):
         return ReadinessResult(
             unit_id=uid,
-            label=ReadinessLabel.NOT_MET_WITH_PLAN
-            if open_acts
-            else ReadinessLabel.TBD_VERIFY,
+            label=ReadinessLabel.TBD_VERIFY,
             reasons=(
                 (
-                    "open actions lack owner+exit_criteria"
+                    "open actions lack owner+exit_criteria (plan-quality floor)"
                     if open_acts
                     else "not_met without open ActionRecord"
                 ),

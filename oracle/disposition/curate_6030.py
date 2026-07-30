@@ -97,13 +97,19 @@ def _clean_page_text(text: str) -> str:
 
 
 def _normalize_ws(text: str) -> str:
-    """Join hyphenated line breaks and collapse whitespace for shall text."""
+    """Collapse PDF line wraps while preserving real hyphens (AF1).
+
+    Soft line-break after a compound hyphen (e.g. NASA-STD-\\n5019, in-\\nsitu)
+    must stay hyphenated — never join by deleting the hyphen (that produced
+    NASASTD-5019 / insitu / postbuild). Newlines become spaces; hyphen +
+    whitespace + token is re-tightened to hyphen+token.
+    """
     t = text.replace("\r\n", "\n").replace("\r", "\n")
-    # join hyphenation across newlines: word-\nword → wordword
-    t = re.sub(r"(\w)-\n(\w)", r"\1\2", t)
-    # single newlines inside sentences → space
+    # single newlines inside sentences → space (keep paragraph breaks)
     t = re.sub(r"(?<!\n)\n(?!\n)", " ", t)
     t = re.sub(r"[ \t]+", " ", t)
+    # "NASA-STD- 5019" / "in- situ" / "post- build" → restore compound form
+    t = re.sub(r"([A-Za-z0-9])-\s+([A-Za-z0-9])", r"\1-\2", t)
     t = re.sub(r"\n{3,}", "\n\n", t)
     return t.strip()
 
@@ -206,7 +212,7 @@ def extract_amrs_from_pdf(pdf_path: Path | str) -> list[ExtractedAmr]:
         end = markers[i + 1].start() if i + 1 < len(markers) else len(body)
         block = body[start:end]
 
-        # Split rationale / notes
+        # Split rationale / notes — never leave [Rationale: inside shall_text (AF1)
         rationale = ""
         notes = ""
         rat = _RATIONALE.search(block)
@@ -214,26 +220,43 @@ def extract_amrs_from_pdf(pdf_path: Path | str) -> list[ExtractedAmr]:
             rationale = _normalize_ws(rat.group(1))
             before = block[: rat.start()]
             after = block[rat.end() :]
-            # Guidance after rationale until next major header
             notes = _normalize_ws(after)
             shall_raw = before
         else:
             shall_raw = block
+            # Unbracketed rationale prose sometimes follows shall
+            soft_rat = re.search(
+                r"\n\s*\[?Rationale\s*:",
+                shall_raw,
+                re.I,
+            )
+            if soft_rat and soft_rat.start() > 20:
+                if not rationale:
+                    rationale = _normalize_ws(shall_raw[soft_rat.start() :])
+                shall_raw = shall_raw[: soft_rat.start()]
 
-        # Truncate shall at common post-requirement prose markers if multi-para
-        # Keep full shall sentence(s) including lettered sub-items that are part of shall
         shall_raw = shall_raw.strip()
-        # Cut at standalone section headers inside block
+        # Cut at standalone section headers / next topic titles inside block
         cut = re.search(
             r"\n(?=\d+\.\d+\s+[A-Z])",
             shall_raw,
         )
         if cut and cut.start() > 40:
-            # material after may be guidance without [Rationale:]
             extra = shall_raw[cut.start() :].strip()
             if not notes:
                 notes = _normalize_ws(extra)
             shall_raw = shall_raw[: cut.start()]
+        # Cut trailing "Class C Parts" / similar section titles leaked into shall
+        title_cut = re.search(
+            r"\n\s*(?:Class\s+[A-C]\s+Parts|GENERAL REQUIREMENTS)\b",
+            shall_raw,
+            re.I,
+        )
+        if title_cut and title_cut.start() > 40:
+            extra = shall_raw[title_cut.start() :].strip()
+            if not notes:
+                notes = _normalize_ws(extra)
+            shall_raw = shall_raw[: title_cut.start()]
 
         shall = _normalize_ws(shall_raw)
         # Strip leading colon/space remnants

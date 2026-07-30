@@ -154,7 +154,7 @@ def test_readiness_truth_table_exhaustive():
         map_readiness(u, has_qualifying_evidence=True).label == ReadinessLabel.MET
     )
 
-    # Not Met with Plan
+    # Not Met with Plan (plan-quality: owner + exit_criteria)
     u = UnitAxesState(
         **base,
         applicability="yes",
@@ -163,6 +163,16 @@ def test_readiness_truth_table_exhaustive():
         approval_state="not_required",
     )
     assert map_readiness(u, [plan]).label == ReadinessLabel.NOT_MET_WITH_PLAN
+
+    # AF2: ownerless / exit-less open action is NOT plan-quality
+    thin = ActionRecord(
+        action_id="THIN-1",
+        title="Do something",
+        owner="",
+        exit_criteria="",
+        affected_unit_ids=("U",),
+    )
+    assert map_readiness(u, [thin]).label == ReadinessLabel.TBD_VERIFY
 
     # migrate string
     m = migrate_string_action("Obtain EFCP", unit_id="AMR-14")
