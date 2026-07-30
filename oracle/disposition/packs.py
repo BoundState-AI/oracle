@@ -130,6 +130,8 @@ class DraftPackWorkspace:
         meta = json.loads(self.meta_path.read_text(encoding="utf-8"))
         if not reviewer or not reviewer.strip():
             raise ValueError("reviewer identity required (FR-003)")
+        # Pin content hash at review time (detect post-review mutation at promote)
+        meta["content_hash"] = content_hash_path(self.draft_path)
         meta["status"] = "reviewed"
         meta["reviewed_by"] = reviewer.strip()
         meta["notes"] = notes
@@ -143,6 +145,15 @@ class DraftPackWorkspace:
         meta = json.loads(self.meta_path.read_text(encoding="utf-8"))
         if meta.get("status") != "reviewed":
             raise ValueError("Draft must be reviewed before promote (FR-003)")
+        # H3: recompute hash at promote; refuse if draft mutated after review
+        current_hash = content_hash_path(self.draft_path)
+        reviewed_hash = meta.get("content_hash")
+        if reviewed_hash and reviewed_hash != current_hash:
+            raise ValueError(
+                "Draft content changed after mark_reviewed(); re-review required "
+                f"(reviewed={reviewed_hash}, current={current_hash})"
+            )
+        meta["content_hash"] = current_hash
         dest_p = Path(dest)
         if "builtin_packs" in dest_p.parts:
             raise ValueError("Refusing to write into builtin_packs")
@@ -150,6 +161,7 @@ class DraftPackWorkspace:
         shutil.copy2(self.draft_path, dest_p)
         meta["status"] = "promoted"
         meta["promoted_to"] = str(dest_p)
+        meta["promoted_hash"] = current_hash
         self.meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
         return dest_p
 
@@ -169,15 +181,36 @@ def pack_revision_diff(
     removed = sorted(set(old_map) - set(new_map))
     changed: list[str] = []
     for rid in sorted(set(old_map) & set(new_map)):
-        if old_map[rid].shall_text != new_map[rid].shall_text:
+        o, n = old_map[rid], new_map[rid]
+        if o.shall_text != n.shall_text:
             changed.append(rid)
-        elif old_map[rid].locator.section != new_map[rid].locator.section:
+            continue
+        if o.locator.section != n.locator.section or o.locator.page != n.locator.page:
             changed.append(rid)
+            continue
+        if o.locator.standard != n.locator.standard or o.locator.revision != n.locator.revision:
+            changed.append(rid)
+            continue
+        # H3: actor/trigger/provenance deltas force re-evaluation
+        o_actor = o.actor_candidate.value if o.actor_candidate else None
+        n_actor = n.actor_candidate.value if n.actor_candidate else None
+        if o_actor != n_actor:
+            changed.append(rid)
+            continue
+        o_tr = tuple(t.value for t in o.trigger_candidates)
+        n_tr = tuple(t.value for t in n.trigger_candidates)
+        if o_tr != n_tr:
+            changed.append(rid)
+            continue
+        if o.pack_content_hash != n.pack_content_hash and o.shall_text == n.shall_text:
+            # same text, different pack pin — still reevaluate
+            pass
     return {
         "old_hash": old_h,
         "new_hash": new_h,
         "added": added,
         "removed": removed,
         "changed_text_or_locator": changed,
-        "reevaluate": sorted(set(added + changed)),
+        # H3: removed ids also require re-evaluation (drop/invalidate prior dispositions)
+        "reevaluate": sorted(set(added + changed + removed)),
     }

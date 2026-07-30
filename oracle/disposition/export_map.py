@@ -172,18 +172,28 @@ def map_axes_to_export_label(snap: AxisSnapshot) -> ExportLabel:
         raise AxisContradiction("export_coherence", f"unmapped approval for Meet path: {appr}")
 
     if impl == "alternate_proposed":
+        # Rejected tailoring must not claim Meets Intent (review C2).
+        if appr == "rejected":
+            return ExportLabel.OPEN_NOT_MET
         # Guard 1: Meets Intent never under a compliance heading.
         return ExportLabel.MEETS_INTENT
 
     if impl == "partial":
-        if appr == "not_required":
-            return ExportLabel.OPEN_NOT_MET
-        return ExportLabel.MEETS_INTENT
+        # Partial is incomplete conformance — never Meets Intent (§13.2: no MI
+        # when implementation is absent/incomplete without an alternate proposal).
+        # Rejected/approved/not_required partial all → Open/Not Met (review C2).
+        return ExportLabel.OPEN_NOT_MET
 
     if impl == "not_met":
-        if appr == "not_required":
+        # Rejected relief is not a live Exception (review C2).
+        if appr in ("not_required", "rejected"):
             return ExportLabel.OPEN_NOT_MET
-        if appr in ("required", "draft", "submitted", "approved", "rejected"):
+        # External responsibility: approval pending elsewhere is Open/Not Met,
+        # not Exception — AC-3 AMR-1 (program applies; formal approval external).
+        if snap.organization_responsibility == "external":
+            return ExportLabel.OPEN_NOT_MET
+        # Live relief path (local owner tracks exception approval)
+        if appr in ("required", "draft", "submitted", "approved"):
             return ExportLabel.EXCEPTION
         raise AxisContradiction("export_coherence", f"unmapped approval for not_met: {appr}")
 

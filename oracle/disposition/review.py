@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
 Module: oracle.disposition.review
-Purpose: Phase 3 review controls — package assignments, role transitions, acceptance.
+Purpose: Phase 3 review controls — package assignments, role-bound decisions.
 
-Backed by EventLog semantics (caller records events). No silent auto-approval.
+Decisions must also be recorded on the session event log via
+DispositionSession.record_review_decision (C3). No silent auto-approval.
+No disposition_author exemption from assignment.
 
 Safety Critical: advisory-only per D-1
 __safety_critical__: bool = False
@@ -14,13 +16,15 @@ Classification: BoundState Proprietary
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal, Optional
+from typing import TYPE_CHECKING, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
+
+if TYPE_CHECKING:
+    from oracle.disposition.session import DispositionSession, UnitAxesState
 
 LOGGER = logging.getLogger("oracle.disposition.review")
 
@@ -99,6 +103,13 @@ class ReviewPackage(BaseModel):
             self.unit_review_state[unit_id] = "in_review"
         return a
 
+    def _assignment_for(self, unit_id: str, reviewer: str, role: Role) -> bool:
+        """Require matching unit + reviewer name + role (C3)."""
+        return any(
+            a.unit_id == unit_id and a.assignee == reviewer and a.role == role
+            for a in self.assignments
+        )
+
     def decide(
         self,
         unit_id: str,
@@ -107,17 +118,36 @@ class ReviewPackage(BaseModel):
         reviewer: str,
         role: Role,
         comment: str = "",
+        session: Optional["DispositionSession"] = None,
+        unit: Optional["UnitAxesState"] = None,
+        accepted_with_tbd: bool = False,
     ) -> ReviewDecision:
         if role == "auditor":
             raise ValueError("auditor cannot accept/reject")
-        # Must be assigned (or package creator for author role)
-        assigned = any(
-            a.unit_id == unit_id and a.assignee == reviewer for a in self.assignments
-        )
-        if not assigned and role != "disposition_author":
+        # C3: no author exemption; role must match assignment
+        if not self._assignment_for(unit_id, reviewer, role):
             raise ValueError(
-                f"{reviewer} is not assigned to {unit_id}; refuse unassigned review"
+                f"{reviewer!r} is not assigned to {unit_id} as {role}; "
+                "refuse unassigned or role-spoofed review"
             )
+
+        # C3: review-coherence at decide() when unit axes available
+        u = unit
+        if u is None and session is not None and session.state is not None:
+            u = session.state.units.get(unit_id)
+        if decision == "accepted" and u is not None:
+            has_tbd = (
+                u.applicability == "tbd"
+                or u.organization_responsibility == "tbd"
+                or u.implementation_state == "tbd"
+                or u.approval_state == "tbd"
+            )
+            if has_tbd and not (accepted_with_tbd or u.accepted_with_tbd):
+                raise ValueError(
+                    "review_coherence: accepted requires non-TBD axes or "
+                    "accepted_with_tbd election"
+                )
+
         d = ReviewDecision(
             unit_id=unit_id,
             decision=decision,
@@ -128,6 +158,18 @@ class ReviewPackage(BaseModel):
         )
         self.decisions.append(d)
         self.unit_review_state[unit_id] = decision  # type: ignore[assignment]
+
+        # C3: bind to hash-chained session log when provided
+        if session is not None:
+            session.record_review_decision(
+                unit_id,
+                decision=decision,
+                reviewer=reviewer,
+                role=role,
+                comment=comment,
+                accepted_with_tbd=accepted_with_tbd,
+            )
+
         LOGGER.info(
             "Review %s on %s by %s (%s)", decision, unit_id, reviewer, role
         )
@@ -152,14 +194,13 @@ def create_review_package(
     created_by: str,
     unit_ids: Optional[list[str]] = None,
 ) -> ReviewPackage:
-    pkg = ReviewPackage(
+    return ReviewPackage(
         package_id=f"rp-{session_id[:12]}",
         session_id=session_id,
         created_at=_utcnow(),
         created_by=created_by,
         unit_review_state={u: "proposed" for u in (unit_ids or [])},
     )
-    return pkg
 
 
 def _utcnow() -> str:

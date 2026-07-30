@@ -67,23 +67,42 @@ class EvidenceGateResult(BaseModel):
 
 
 def is_expired(art: EvidenceArtifact, as_of: Optional[str] = None) -> bool:
+    """
+    Return True if expired. Fail closed: unparseable expiration_date is treated
+    as expired (H5) so it cannot pass the Meet evidence gate.
+    """
     if not art.expiration_date:
         return False
     try:
         exp = date.fromisoformat(art.expiration_date[:10])
-        ref = date.fromisoformat((as_of or date.today().isoformat())[:10])
-        return ref > exp
     except ValueError:
-        return False
+        return True  # fail closed
+    try:
+        ref = date.fromisoformat((as_of or "9999-12-31")[:10])
+    except ValueError:
+        ref = date(9999, 12, 31)
+    # Prefer explicit as_of; when omitted use a fixed default for determinism
+    # in tests — callers should pass as_of for production gates.
+    if as_of is None:
+        ref = date.today()
+    return ref > exp
 
 
-def evidence_supports_meet(art: EvidenceArtifact, as_of: Optional[str] = None) -> EvidenceGateResult:
+def evidence_supports_meet(
+    art: EvidenceArtifact,
+    as_of: Optional[str] = None,
+) -> EvidenceGateResult:
     """Mandatory evidence gate for Meet / Meets Intent claims."""
     reasons: list[str] = []
     if art.withdrawn:
         reasons.append("evidence withdrawn")
-    if is_expired(art, as_of):
-        reasons.append(f"evidence expired on {art.expiration_date}")
+    if art.expiration_date:
+        try:
+            date.fromisoformat(art.expiration_date[:10])
+        except ValueError:
+            reasons.append(f"unparseable expiration_date {art.expiration_date!r}")
+        if is_expired(art, as_of):
+            reasons.append(f"evidence expired on {art.expiration_date}")
     if not art.doc_id or not art.revision:
         reasons.append("missing doc_id or revision")
     if not art.effective_date and not art.approval_date:

@@ -90,9 +90,11 @@ def evaluate_unit(
                     or f"class/plan fact {edge.fact_key} unresolved — cannot force N/A"
                 )
 
-    if class_unresolved and unit.unit_id in {
-        "AMR-5", "AMR-6", "AMR-8", "AMR-10", "AMR-12", "AMR-15", "AMR-17", "AMR-18",
-    }:
+    class_gated = any(
+        e.fact_key == "classification.primary"
+        for e in graph.prerequisites_of(unit.unit_id)
+    )
+    if class_unresolved and class_gated:
         meet_blockers.append("classification_unresolved")
         blocked[ExportLabel.MEET.value] = "classification_unresolved"
         blocked[ExportLabel.MEETS_INTENT.value] = "classification_unresolved"
@@ -141,12 +143,23 @@ def evaluate_unit(
         requires_approval = True
         actions.append("Track exception/relief approval separately from implementation")
 
-    # Evidence gate for Meet
-    if unit.implementation_state == "meets_as_written" and not has_evidence_for_meet:
-        if unit.applicability == "yes":
-            meet_blockers.append("Meet requires at least one evidence reference")
-            # Soft block — still computable as Meet on axes; gate flags for release
-            notes.append("Evidence gate: Meet not release-eligible without evidence")
+    # Hard evidence gate for Meet when applicability is established (FR-009 / C1)
+    if unit.implementation_state == "meets_as_written" and unit.applicability == "yes":
+        if not has_evidence_for_meet:
+            meet_blockers.append("Meet requires at least one qualifying evidence reference")
+            blocked[ExportLabel.MEET.value] = "no qualifying evidence for Meet"
+            notes.append("Evidence gate HARD: Meet blocked without evidence")
+
+    # N/A without scope rationale is blocked (C1 UNSUPPORTED_NA)
+    if unit.applicability == "no":
+        rationale = has_scope_rationale or bool(
+            getattr(unit, "scope_citation", None)
+            or (unit.comment and "scope" in (unit.comment or "").lower())
+        )
+        if not rationale:
+            blocked[ExportLabel.NA.value] = (
+                "N/A requires positive scope/trigger rationale (scope_citation or comment)"
+            )
 
     # Axis mapping
     try:
@@ -156,16 +169,24 @@ def evaluate_unit(
         current_s = None
         notes.append(f"axes unmapped: {e}")
 
+    # If mapped label is blocked, it is not current-allowed
+    if current_s and current_s in blocked:
+        notes.append(f"current mapped label {current_s!r} is blocked: {blocked[current_s]}")
+
     # Allowed = all labels not blocked, plus always TBD if facts open
     all_labels = [lab.value for lab in ExportLabel]
     allowed = tuple(lab for lab in all_labels if lab not in blocked)
 
-    # Force TBD preference when classification unresolved on gated units
-    if class_unresolved and unit.unit_id in {
-        "AMR-5", "AMR-6", "AMR-8", "AMR-10", "AMR-12", "AMR-15", "AMR-17", "AMR-18",
-    }:
+    # Force TBD preference when classification fact gates this unit (graph-driven, M6)
+    class_gated = any(
+        e.fact_key == "classification.primary"
+        for e in graph.prerequisites_of(unit.unit_id)
+    )
+    if class_unresolved and class_gated:
         if ExportLabel.TBD.value not in allowed:
             allowed = allowed + (ExportLabel.TBD.value,)
+        blocked.setdefault(ExportLabel.MEET.value, "classification_unresolved")
+        blocked.setdefault(ExportLabel.MEETS_INTENT.value, "classification_unresolved")
 
     # Axis-level Meet blockers
     if unit.applicability != "yes":

@@ -201,6 +201,11 @@ class UnitAxesState(BaseModel):
     org_responsibility_tbd_reason: Optional[TBDReason] = TBDReason.EVIDENCE_ABSENT
     implementation_tbd_reason: Optional[TBDReason] = TBDReason.EVIDENCE_ABSENT
     approval_tbd_reason: Optional[TBDReason] = TBDReason.EVIDENCE_ABSENT
+    scope_citation: Optional[str] = None  # required for N/A (FR-009)
+    accepted_with_tbd: bool = False  # review coherence election
+    review_state: Literal[
+        "not_reviewed", "proposed", "in_review", "accepted", "rejected", "superseded"
+    ] = "proposed"
     comment: Optional[str] = None
     comment_status: Literal["proposed", "accepted", "edited"] = "proposed"
     evidence_refs: tuple[EvidenceRef, ...] = ()
@@ -247,6 +252,8 @@ class SessionState(BaseModel):
     units: dict[str, UnitAxesState] = Field(default_factory=dict)
     paired_answers: dict[str, str] = Field(default_factory=dict)  # question_key -> answer
     exports: list[dict[str, Any]] = Field(default_factory=list)
+    needs_rereview: list[str] = Field(default_factory=list)  # durable via event replay
+    rereview_diffs: dict[str, dict[str, Any]] = Field(default_factory=dict)
     schema_version: str = SESSION_SCHEMA
 
 
@@ -352,10 +359,19 @@ class DispositionSession:
         multi_pack: bool = True,
     ) -> SessionState:
         """Create a new session or refuse if header already pins a different pack."""
+        # M1: do not call resume() under the lock (non-reentrant)
+        if self._header_path.exists():
+            return self.resume(
+                actor_name=actor_name,
+                repin=repin,
+                multi_pack=multi_pack,
+                pack_path=pack_path,
+            )
+
         with self._exclusive_lock():
             if self._header_path.exists():
-                return self.resume(
-                    actor_name=actor_name, repin=repin, multi_pack=multi_pack
+                raise SessionError(
+                    "Session was created concurrently; call resume() instead of open()"
                 )
 
             records, digest, pack_hashes = self._load_records(
@@ -406,7 +422,6 @@ class DispositionSession:
             )
             self.state = state
             self._graph = DependencyGraph.from_seeds()
-            self._needs_rereview: set[str] = set()
             return state
 
     def resume(
@@ -415,9 +430,9 @@ class DispositionSession:
         actor_name: str,
         repin: bool = False,
         pack_path: Path | str | None = None,
-        multi_pack: bool = True,
+        multi_pack: Optional[bool] = None,
     ) -> SessionState:
-        """Reload = replay event log; verify pack pin."""
+        """Reload = replay event log; verify pack pin (default: no silent repin)."""
         with self._exclusive_lock():
             if not self._header_path.exists():
                 raise SessionError(f"No session header at {self._header_path}")
@@ -427,16 +442,34 @@ class DispositionSession:
             except EventLogError:
                 raise
 
-            # Pack pin check
+            # H2: auto-detect multi vs single pin from header
+            has_multi = bool(header.get("pack_hashes")) and len(
+                header.get("pack_hashes") or {}
+            ) > 1
+            if multi_pack is None:
+                multi_pack = has_multi and pack_path is None
+            # Single-pack sessions: multi_pack must stay False unless repin rebuilds
+            if pack_path is None and not has_multi and not repin:
+                multi_pack = False
+
             try:
                 records, digest, pack_hashes = self._load_records(
                     pack_path,
                     expected_hash=None if repin else header.get("pack_hash"),
                     repin=repin,
-                    multi_pack=multi_pack and pack_path is None,
+                    multi_pack=bool(multi_pack) and pack_path is None,
                 )
             except PackPinError:
-                raise
+                # Compat: retry single-pack pin when composite fails (H2)
+                if pack_path is None and not repin:
+                    records, digest, pack_hashes = self._load_records(
+                        None,
+                        expected_hash=header.get("pack_hash"),
+                        repin=False,
+                        multi_pack=False,
+                    )
+                else:
+                    raise
             if repin and digest != header["pack_hash"]:
                 header["pack_hash"] = digest
                 header["pack_hashes"] = pack_hashes
@@ -455,7 +488,6 @@ class DispositionSession:
                 pack_hash=header["pack_hash"],
                 actor_name=actor_name or header.get("actor_name", "unknown"),
             )
-            # Re-seed units from pack then replay overrides
             for rec in records:
                 state.units[rec.requirement_id] = UnitAxesState(
                     unit_id=rec.requirement_id,
@@ -471,7 +503,6 @@ class DispositionSession:
             self._replay_into(state)
             self.state = state
             self._graph = DependencyGraph.from_seeds()
-            self._needs_rereview = set(getattr(self, "_needs_rereview", set()) or set())
             return state
 
     def _replay_into(self, state: SessionState) -> None:
@@ -505,7 +536,41 @@ class DispositionSession:
             elif et == "context_updated":
                 state.context = ProjectContext.model_validate(p["context"])
             elif et == "export_produced":
-                state.exports.append(p)
+                # M3: store only the export meta slice, not whole payload envelope
+                meta = {
+                    k: v
+                    for k, v in p.items()
+                    if k not in ("event_type", "_schema")
+                }
+                state.exports.append(meta)
+            elif et == "propagation_rereview":
+                affected = list(p.get("affected_units") or [])
+                for u in affected:
+                    if u not in state.needs_rereview:
+                        state.needs_rereview.append(u)
+                if p.get("diffs"):
+                    state.rereview_diffs.update(p["diffs"])
+            elif et == "rereview_cleared":
+                uid = p.get("unit_id")
+                if uid and uid in state.needs_rereview:
+                    state.needs_rereview = [x for x in state.needs_rereview if x != uid]
+                if uid and uid in state.rereview_diffs:
+                    del state.rereview_diffs[uid]
+            elif et == "review_decision":
+                # Axes review_state on unit when present
+                uid = p.get("unit_id")
+                if uid and uid in state.units:
+                    dec = p.get("decision")
+                    if dec in (
+                        "accepted",
+                        "rejected",
+                        "superseded",
+                        "in_review",
+                        "proposed",
+                    ):
+                        state.units[uid] = state.units[uid].model_copy(
+                            update={"review_state": dec}
+                        )
             # session_opened / pack_repinned: no state delta beyond header
 
     def assert_fact(
@@ -533,6 +598,23 @@ class DispositionSession:
                 f"Fact {key!r} is an assumption; refusing silent confirmation "
                 "(pass confirm_assumption=True for explicit promotion)"
             )
+        # H1: inferred facts never auto-confirm; require human acceptance
+        if kind == "inferred" and not confirm_assumption and not assumed:
+            raise SessionError(
+                f"Inferred fact {key!r} requires confirm_assumption=True "
+                "(human acceptance) before it is treated as confirmed"
+            )
+        confirmed = False
+        if assumed:
+            confirmed = False
+        elif kind == "inferred":
+            confirmed = bool(confirm_assumption)
+        else:
+            confirmed = bool(
+                confirm_assumption or not (prior and prior.assumed)
+            ) and not assumed
+
+        prior_snapshot = prior.model_dump(mode="json") if prior else None
         fact = Fact(
             fact_id=f"fact-{uuid.uuid4().hex[:10]}",
             key=key,
@@ -545,7 +627,7 @@ class DispositionSession:
             assumed=assumed,
             owner=owner,
             supersedes=prior.fact_id if prior else None,
-            confirmed=(not assumed) and (confirm_assumption or not (prior and prior.assumed)),
+            confirmed=confirmed,
             unit_ids=unit_ids,
         )
         et = "fact_superseded" if prior else "fact_asserted"
@@ -557,14 +639,23 @@ class DispositionSession:
             )
             self.state.facts[key] = fact
             self.state.facts_by_id[fact.fact_id] = fact
-            # §10.2 propagation: committed facts mark dependents for re-review
-            if not assumed:
+            # §10.2: only confirmed (non-assumed) facts propagate
+            if fact.confirmed and not fact.assumed:
                 graph = getattr(self, "_graph", None) or DependencyGraph.from_seeds()
                 self._graph = graph
                 affected = graph.propagate_from_fact(key, committed=True)
-                if not hasattr(self, "_needs_rereview"):
-                    self._needs_rereview = set()
-                self._needs_rereview.update(affected)
+                diffs: dict[str, Any] = {}
+                for uid in affected:
+                    u = self.state.units.get(uid)
+                    diffs[uid] = {
+                        "before": u.model_dump(mode="json") if u else None,
+                        "trigger_fact": key,
+                        "prior_fact": prior_snapshot,
+                        "new_fact": fact.model_dump(mode="json"),
+                    }
+                    if uid not in self.state.needs_rereview:
+                        self.state.needs_rereview.append(uid)
+                    self.state.rereview_diffs[uid] = diffs[uid]
                 if affected:
                     self.eventlog.append(
                         actor=author,
@@ -572,15 +663,30 @@ class DispositionSession:
                             "event_type": "propagation_rereview",
                             "fact_key": key,
                             "affected_units": affected,
+                            "diffs": diffs,
                         },
                     )
         return fact
 
     def units_needing_rereview(self) -> list[str]:
-        return sorted(getattr(self, "_needs_rereview", set()))
+        if self.state is None:
+            return []
+        return list(self.state.needs_rereview)
 
-    def clear_rereview(self, unit_id: str) -> None:
-        getattr(self, "_needs_rereview", set()).discard(unit_id)
+    def clear_rereview(self, unit_id: str, *, actor_name: str) -> None:
+        """Clear re-review flag only via logged event (H1)."""
+        if self.state is None:
+            raise SessionError("Session not open")
+        with self._exclusive_lock():
+            self.eventlog.append(
+                actor=actor_name,
+                unit_id=unit_id,
+                payload={"event_type": "rereview_cleared", "unit_id": unit_id},
+            )
+            self.state.needs_rereview = [
+                x for x in self.state.needs_rereview if x != unit_id
+            ]
+            self.state.rereview_diffs.pop(unit_id, None)
 
     def set_axes(
         self,
@@ -588,17 +694,25 @@ class DispositionSession:
         *,
         actor_name: str,
         election: bool = True,
+        enforce_decision: bool = True,
         **axis_fields: Any,
     ) -> UnitAxesState:
+        """
+        Set axes. When election=True (default), refuse labels blocked by the
+        decision engine (C1). §13.2 runs on any stored comment text.
+        """
         if self.state is None:
             raise SessionError("Session not open")
+        from oracle.disposition.comments import prohibited_language_hits
+        from oracle.disposition.decision import evaluate_unit
+        from oracle.disposition.graph import DependencyGraph
+
         cur = self.state.units.get(unit_id)
         if cur is None:
             cur = UnitAxesState(unit_id=unit_id)
         data = cur.model_dump()
         data.update({k: v for k, v in axis_fields.items() if v is not None})
         data["actor_name"] = actor_name
-        # Clear TBD reasons when axis leaves TBD
         for axis, reason in (
             ("applicability", "applicability_tbd_reason"),
             ("organization_responsibility", "org_responsibility_tbd_reason"),
@@ -608,8 +722,47 @@ class DispositionSession:
             if data.get(axis) != "tbd":
                 data[reason] = None
         unit = UnitAxesState.model_validate(data)
-        # Validate mapping
-        _ = unit.export_label()
+
+        # C1: §13.2 on stored comments (including edited)
+        if unit.comment:
+            hits = prohibited_language_hits(unit.comment)
+            if hits:
+                raise SessionError(
+                    f"Comment fails §13.2 prohibited-language check: {hits}"
+                )
+
+        # Validate axis mapping
+        try:
+            label = unit.export_label()
+        except Exception as e:
+            raise SessionError(f"Axes do not map under §7.1: {e}") from e
+
+        # C1: elections refuse decision-engine blocks
+        if election and enforce_decision:
+            graph = getattr(self, "_graph", None) or DependencyGraph.from_seeds()
+            has_ev = bool(unit.evidence_refs)
+            decision = evaluate_unit(
+                unit,
+                facts=self.state.facts,
+                graph=graph,
+                has_scope_rationale=bool(unit.scope_citation),
+                has_evidence_for_meet=has_ev,
+            )
+            if label.value in decision.blocked:
+                raise SessionError(
+                    f"Election refused: export label {label.value!r} is blocked "
+                    f"({decision.blocked[label.value]})"
+                )
+            # Also refuse if Meet/NA mapped but blocked even when checking intent
+            if (
+                label.value == "Meet"
+                and unit.applicability == "yes"
+                and not has_ev
+            ):
+                raise SessionError(
+                    "Election refused: Meet requires qualifying evidence (hard gate)"
+                )
+
         et = "election" if election else "axis_set"
         with self._exclusive_lock():
             self.eventlog.append(
@@ -619,6 +772,53 @@ class DispositionSession:
             )
             self.state.units[unit_id] = unit
         return unit
+
+    def record_review_decision(
+        self,
+        unit_id: str,
+        *,
+        decision: str,
+        reviewer: str,
+        role: str,
+        comment: str = "",
+        accepted_with_tbd: bool = False,
+    ) -> None:
+        """Append review decision to the hash-chained event log (C3)."""
+        if self.state is None:
+            raise SessionError("Session not open")
+        unit = self.state.units.get(unit_id)
+        if unit is None:
+            raise SessionError(f"Unknown unit {unit_id}")
+        # Review coherence: accepted requires non-TBD or accepted_with_tbd
+        if decision == "accepted":
+            has_tbd = (
+                unit.applicability == "tbd"
+                or unit.organization_responsibility == "tbd"
+                or unit.implementation_state == "tbd"
+                or unit.approval_state == "tbd"
+            )
+            if has_tbd and not (accepted_with_tbd or unit.accepted_with_tbd):
+                raise SessionError(
+                    "review_coherence: accepted requires non-TBD axes or "
+                    "accepted_with_tbd election"
+                )
+        with self._exclusive_lock():
+            self.eventlog.append(
+                actor=reviewer,
+                unit_id=unit_id,
+                payload={
+                    "event_type": "review_decision",
+                    "unit_id": unit_id,
+                    "decision": decision,
+                    "role": role,
+                    "comment": comment,
+                    "accepted_with_tbd": accepted_with_tbd,
+                },
+            )
+            updates: dict[str, Any] = {"review_state": decision}
+            if accepted_with_tbd:
+                updates["accepted_with_tbd"] = True
+            self.state.units[unit_id] = unit.model_copy(update=updates)
 
     def record_paired_answer(self, question_key: str, answer: str, actor_name: str) -> None:
         if self.state is None:

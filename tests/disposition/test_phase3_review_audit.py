@@ -29,21 +29,42 @@ def test_phase3_review_assignment_and_accept(tmp_path):
         reviewer="tech.reviewer",
         role="technical_reviewer",
         comment="Open/Not Met correct without EFCP",
+        session=s,
     )
-    with pytest.raises(ValueError, match="not assigned"):
+    with pytest.raises(ValueError, match="not assigned|role"):
         pkg.decide(
             "AMR-17",
             decision="accepted",
             reviewer="stranger",
             role="technical_reviewer",
         )
+    # Role spoof refused: assigned as technical, cannot decide as quality
+    with pytest.raises(ValueError, match="not assigned|role"):
+        pkg.decide(
+            "AMR-14",
+            decision="accepted",
+            reviewer="tech.reviewer",
+            role="quality_reviewer",
+        )
+    # AMR-17 still TBD axes → need accepted_with_tbd
+    with pytest.raises(ValueError, match="review_coherence"):
+        pkg.decide(
+            "AMR-17",
+            decision="accepted",
+            reviewer="tech.reviewer",
+            role="technical_reviewer",
+            session=s,
+        )
     pkg.decide(
         "AMR-17",
         decision="accepted",
         reviewer="tech.reviewer",
         role="technical_reviewer",
+        accepted_with_tbd=True,
+        session=s,
     )
     assert pkg.is_package_accepted(["AMR-14", "AMR-17"])
+    assert s.state.units["AMR-14"].review_state == "accepted"
     path = tmp_path / "review.json"
     pkg.save(path)
     loaded = ReviewPackage.load(path)

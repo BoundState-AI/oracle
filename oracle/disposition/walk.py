@@ -24,11 +24,13 @@ from typing import Callable, Optional, TextIO
 from oracle.disposition.codes import TBDReason
 from oracle.disposition.comments import assemble_comment, prohibited_language_hits
 from oracle.disposition.export import export_csv, export_docx, stamp_meta
+from oracle.disposition.packs import load_rdw_default_packs
 from oracle.disposition.rulepack import (
     RequirementRecord,
     load_requirement_records,
     prerequisites_of,
 )
+from oracle.disposition.session import SessionError
 from oracle.disposition.session import (
     DispositionSession,
     ProjectContext,
@@ -462,7 +464,8 @@ def run_walk(
         session.open(actor_name=actor_name, repin=repin, seed_context=True)
         io.write(f"Opened session {session.state.session_id}")  # type: ignore[union-attr]
 
-    records_list, _ = load_requirement_records(repin=True)
+    # H4: walk the same multi-pack set the session seeds (6030+6033)
+    records_list, _ = load_rdw_default_packs(repin=True)
     records = {r.requirement_id: r for r in records_list}
     ordered = _order_units(records_list)
     if unit_filter:
@@ -518,6 +521,7 @@ def run_walk(
                     actor_name=actor_name,
                     applicability="tbd",
                     applicability_tbd_reason=TBDReason.CUSTOMER_INPUT_MISSING,
+                    enforce_decision=False,
                 )
                 io.write("Quit mid-unit: recorded TBD(customer_input_missing).")
                 _progress_screen(session, io)
@@ -528,14 +532,16 @@ def run_walk(
                     actor_name=actor_name,
                     applicability="tbd",
                     applicability_tbd_reason=TBDReason.CUSTOMER_INPUT_MISSING,
+                    enforce_decision=False,
                 )
                 io.write("Skipped: TBD(customer_input_missing).")
                 break
-            _apply_answer(session, rec, qkey, ans, actor_name)
-            # If fact already known, question functions should not re-ask —
-            # guard: if ledger has answer and we asked anyway, design error.
-            if qkey in session.state.facts and qkey.startswith("actor."):  # type: ignore[union-attr]
-                pass
+            try:
+                _apply_answer(session, rec, qkey, ans, actor_name)
+            except (SessionError, ValueError, Exception) as e:
+                # M2: re-prompt on invalid free-text instead of crash
+                io.write(f"Could not apply answer ({e}). Please try again.")
+                continue
 
         done += 1
 

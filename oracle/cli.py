@@ -3575,29 +3575,56 @@ def _cmd_disposition_golden(args: argparse.Namespace) -> None:
 
 
 def _cmd_disposition_export(args: argparse.Namespace) -> None:
+    from pathlib import Path
+
+    from oracle.disposition.evidence import EvidenceStore
     from oracle.disposition.export import export_all, stamp_meta
     from oracle.disposition.packs import load_rdw_default_packs
     from oracle.disposition.session import DispositionSession
 
     s = DispositionSession(args.session_dir)
-    s.resume(actor_name=args.actor, repin=True)
+    # H2: default repin=False — levy drift is a new run, not silent rewrite
+    s.resume(actor_name=args.actor, repin=bool(getattr(args, "repin", False)))
     recs, _ = load_rdw_default_packs(repin=True)
     records = {r.requirement_id: r for r in recs}
-    paths = export_all(s, records, args.export_dir)
+    ev_root = Path(args.session_dir) / "evidence"
+    known = None
+    if ev_root.is_dir():
+        known = EvidenceStore(ev_root).known_doc_ids()
+    paths = export_all(s, records, args.export_dir, known_artifact_ids=known)
     s.record_export({**stamp_meta(s), "paths": {k: str(v) for k, v in paths.items()}}, args.actor)
     print(json.dumps({k: str(v) for k, v in paths.items()}, indent=2))
 
 
 def _cmd_disposition_audit(args: argparse.Namespace) -> None:
+    from pathlib import Path
+
     from oracle.disposition.audit import build_lineage
+    from oracle.disposition.evidence import EvidenceStore
     from oracle.disposition.packs import load_rdw_default_packs
+    from oracle.disposition.review import ReviewPackage
     from oracle.disposition.session import DispositionSession
 
     s = DispositionSession(args.session_dir)
-    s.resume(actor_name=args.actor, repin=True)
+    # H2: audit is strictly read-only — never repin
+    s.resume(actor_name=args.actor, repin=False)
     recs, _ = load_rdw_default_packs(repin=True)
     records = {r.requirement_id: r for r in recs}
-    lin = build_lineage(args.unit, s, records)
+    ev_store = None
+    ev_root = Path(args.session_dir) / "evidence"
+    if ev_root.is_dir():
+        ev_store = EvidenceStore(ev_root)
+    review_pkg = None
+    rp = Path(args.session_dir) / "review_package.json"
+    if rp.is_file():
+        review_pkg = ReviewPackage.load(rp)
+    lin = build_lineage(
+        args.unit,
+        s,
+        records,
+        evidence_store=ev_store,
+        review_package=review_pkg,
+    )
     print(lin.model_dump_json(indent=2))
 
 

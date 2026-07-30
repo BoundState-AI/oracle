@@ -72,33 +72,61 @@ def build_matrix_rows(
     records: dict[str, RequirementRecord],
     *,
     known_artifact_ids: Optional[set[str]] = None,
+    enforce_decision: bool = True,
+    require_review_accepted: bool = False,
 ) -> list[MatrixRow]:
-    """Build matrix rows; refuse rows that cite nonexistent artifacts."""
+    """Build matrix rows; refuse phantom refs and decision-blocked labels (C1)."""
     if session.state is None:
         raise ExportError("Session not open")
-    known = known_artifact_ids or set()
-    # Always allow evidence refs recorded on the unit itself
+    from oracle.disposition.comments import prohibited_language_hits
+    from oracle.disposition.decision import evaluate_unit
+    from oracle.disposition.graph import DependencyGraph
+
+    graph = DependencyGraph.from_seeds()
     rows: list[MatrixRow] = []
     for uid, unit in sorted(session.state.units.items()):
-        for ref in unit.evidence_refs:
-            # Case 23: refuse phantom refs not in known set when set is provided
-            if known_artifact_ids is not None and ref.doc_id not in known:
-                # Unit-local refs are always accepted if attached via session
-                if ref.doc_id not in {r.doc_id for r in unit.evidence_refs}:
-                    raise ExportError(
-                        f"Refuse export: unit {uid} references nonexistent artifact {ref.doc_id!r}"
-                    )
-        # Stricter API: caller may pass known_artifact_ids that must cover refs
+        # Case 23: refuse phantom refs when known set provided
         if known_artifact_ids is not None:
             for ref in unit.evidence_refs:
                 if ref.doc_id not in known_artifact_ids:
                     raise ExportError(
-                        f"Refuse export: unit {uid} references nonexistent artifact {ref.doc_id!r}"
+                        f"Refuse export: unit {uid} references nonexistent "
+                        f"artifact {ref.doc_id!r}"
                     )
         try:
             label = unit.export_label().value
         except Exception as e:
             raise ExportError(f"Unit {uid} axes do not map: {e}") from e
+
+        # C1: §13.2 on stored comment
+        if unit.comment:
+            hits = prohibited_language_hits(unit.comment)
+            if hits:
+                raise ExportError(
+                    f"Refuse export: unit {uid} comment fails §13.2: {hits}"
+                )
+
+        if enforce_decision:
+            has_ev = bool(unit.evidence_refs)
+            decision = evaluate_unit(
+                unit,
+                facts=session.state.facts,
+                graph=graph,
+                has_scope_rationale=bool(unit.scope_citation),
+                has_evidence_for_meet=has_ev,
+            )
+            if label in decision.blocked:
+                raise ExportError(
+                    f"Refuse export: unit {uid} label {label!r} blocked "
+                    f"({decision.blocked[label]})"
+                )
+
+        if require_review_accepted and unit.review_state != "accepted":
+            raise ExportError(
+                f"Refuse export: unit {uid} review_state={unit.review_state!r} "
+                "(not accepted)"
+            )
+
         rec = records.get(uid)
         rows.append(
             MatrixRow(
@@ -169,8 +197,14 @@ def export_csv(
     path: Path | str,
     *,
     known_artifact_ids: Optional[set[str]] = None,
+    enforce_decision: bool = True,
 ) -> Path:
-    rows = build_matrix_rows(session, records, known_artifact_ids=known_artifact_ids)
+    rows = build_matrix_rows(
+        session,
+        records,
+        known_artifact_ids=known_artifact_ids,
+        enforce_decision=enforce_decision,
+    )
     counts = count_by_export_label(rows)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -240,6 +274,7 @@ def export_docx(
     path: Path | str,
     *,
     known_artifact_ids: Optional[set[str]] = None,
+    enforce_decision: bool = True,
 ) -> Path:
     try:
         from docx import Document
@@ -248,7 +283,12 @@ def export_docx(
             "python-docx is required for DOCX export (already a repo dependency)"
         ) from e
 
-    rows = build_matrix_rows(session, records, known_artifact_ids=known_artifact_ids)
+    rows = build_matrix_rows(
+        session,
+        records,
+        known_artifact_ids=known_artifact_ids,
+        enforce_decision=enforce_decision,
+    )
     counts = count_by_export_label(rows)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -357,6 +397,8 @@ def export_xlsx(
     path: Path | str,
     *,
     known_artifact_ids: Optional[set[str]] = None,
+    enforce_decision: bool = True,
+    evidence_rows: Optional[list[list[str]]] = None,
 ) -> Path:
     """
     Phase 2: supplier matrix as XLSX using stdlib zipfile (no new dependency).
@@ -365,7 +407,12 @@ def export_xlsx(
     """
     import zipfile
 
-    rows = build_matrix_rows(session, records, known_artifact_ids=known_artifact_ids)
+    rows = build_matrix_rows(
+        session,
+        records,
+        known_artifact_ids=known_artifact_ids,
+        enforce_decision=enforce_decision,
+    )
     counts = count_by_export_label(rows)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -391,6 +438,14 @@ def export_xlsx(
     tbd_data = [[t["unit_id"], t["reasons"]] for t in tbd]
     actions = open_action_register(session)
     act_data = [[a["unit_id"], a["action"]] for a in actions]
+    # H5: evidence register sheet
+    ev_data = evidence_rows or []
+    if not ev_data:
+        for r in rows:
+            if r.evidence_refs:
+                for part in r.evidence_refs.split("; "):
+                    if part:
+                        ev_data.append([r.unit_id, part, ""])
     meta_data = [
         ["banner", ADVISORY_BANNER],
         ["session_id", st.session_id],
@@ -410,6 +465,7 @@ def export_xlsx(
   <Override PartName="/xl/worksheets/sheet3.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
   <Override PartName="/xl/worksheets/sheet4.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
   <Override PartName="/xl/worksheets/sheet5.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/worksheets/sheet6.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
 </Types>"""
     rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
@@ -422,6 +478,7 @@ def export_xlsx(
   <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/>
   <Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet4.xml"/>
   <Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet5.xml"/>
+  <Relationship Id="rId6" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet6.xml"/>
 </Relationships>"""
     workbook = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
@@ -431,7 +488,8 @@ def export_xlsx(
     <sheet name="Assumptions" sheetId="2" r:id="rId2"/>
     <sheet name="TBD" sheetId="3" r:id="rId3"/>
     <sheet name="OpenActions" sheetId="4" r:id="rId4"/>
-    <sheet name="Meta" sheetId="5" r:id="rId5"/>
+    <sheet name="Evidence" sheetId="5" r:id="rId5"/>
+    <sheet name="Meta" sheetId="6" r:id="rId6"/>
   </sheets>
 </workbook>"""
 
@@ -440,6 +498,7 @@ def export_xlsx(
         _xlsx_sheet_xml(["key", "statement", "owner", "confidence"], assump_data),
         _xlsx_sheet_xml(["unit_id", "reasons"], tbd_data),
         _xlsx_sheet_xml(["unit_id", "action"], act_data),
+        _xlsx_sheet_xml(["unit_id", "evidence_ref", "note"], ev_data),
         _xlsx_sheet_xml(["field", "value"], meta_data),
     ]
 
@@ -461,13 +520,38 @@ def export_all(
     out_dir: Path | str,
     *,
     known_artifact_ids: Optional[set[str]] = None,
+    enforce_decision: bool = True,
 ) -> dict[str, Path]:
     """Write CSV + DOCX + XLSX suite under out_dir."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    # H5: if known set omitted, synthesize from unit evidence refs (non-phantom)
+    if known_artifact_ids is None and session.state is not None:
+        known_artifact_ids = set()
+        for u in session.state.units.values():
+            for r in u.evidence_refs:
+                known_artifact_ids.add(r.doc_id)
     paths = {
-        "csv": export_csv(session, records, out / "supplier_matrix.csv", known_artifact_ids=known_artifact_ids),
-        "docx": export_docx(session, records, out / "supplier_matrix.docx", known_artifact_ids=known_artifact_ids),
-        "xlsx": export_xlsx(session, records, out / "supplier_matrix.xlsx", known_artifact_ids=known_artifact_ids),
+        "csv": export_csv(
+            session,
+            records,
+            out / "supplier_matrix.csv",
+            known_artifact_ids=known_artifact_ids,
+            enforce_decision=enforce_decision,
+        ),
+        "docx": export_docx(
+            session,
+            records,
+            out / "supplier_matrix.docx",
+            known_artifact_ids=known_artifact_ids,
+            enforce_decision=enforce_decision,
+        ),
+        "xlsx": export_xlsx(
+            session,
+            records,
+            out / "supplier_matrix.xlsx",
+            known_artifact_ids=known_artifact_ids,
+            enforce_decision=enforce_decision,
+        ),
     }
     return paths

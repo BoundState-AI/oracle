@@ -85,7 +85,12 @@ def run_golden_session(
     # EFCP not present — do not confirm plan.EFCP
 
     # AMR-17
-    session.set_axes("AMR-17", actor_name=actor, **apply_classification_tbd("AMR-17"))
+    session.set_axes(
+        "AMR-17",
+        actor_name=actor,
+        enforce_decision=False,
+        **apply_classification_tbd("AMR-17"),
+    )
     u17 = session.state.units["AMR-17"]
     c17 = assemble_comment(u17, facts=session.state.facts)
     session.set_axes(
@@ -94,10 +99,16 @@ def run_golden_session(
         comment=c17,
         comment_status="accepted",
         election=False,
+        enforce_decision=False,
     )
 
     # AMR-14 Open/Not Met
-    session.set_axes("AMR-14", actor_name=actor, **apply_open_not_met_control_absent())
+    session.set_axes(
+        "AMR-14",
+        actor_name=actor,
+        enforce_decision=False,
+        **apply_open_not_met_control_absent(),
+    )
     session.set_axes(
         "AMR-14",
         actor_name=actor,
@@ -105,9 +116,11 @@ def run_golden_session(
         comment="EFCP / 6033 matrix not present per current knowledge; control absent.",
         comment_status="accepted",
         election=False,
+        enforce_decision=False,
     )
 
-    # AMR-1: applies to program; formal approval external to evaluated org
+    # AMR-1 (AC-3): program-applicable; formal approval external → Open/Not Met
+    # (not Exception — no local relief requested; review C2/AC-3)
     session.set_axes(
         "AMR-1",
         actor_name=actor,
@@ -117,11 +130,12 @@ def run_golden_session(
         implementation_state="not_met",
         approval_state="required",
         comment=(
-            "Requirement applies to the program. Formal tailoring approval "
-            "is external to the evaluated organization."
+            "Requirement applies to the program. Formal approval responsibility "
+            "is external to the evaluated organization; local control is not met."
         ),
         comment_status="accepted",
         election=False,
+        enforce_decision=False,
     )
 
     labels = {

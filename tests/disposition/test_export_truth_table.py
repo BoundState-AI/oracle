@@ -121,6 +121,39 @@ def test_canonical_label_examples():
     assert map_axes_to_export_label(ex) == ExportLabel.EXCEPTION
 
 
+def test_c2_rejected_and_partial_do_not_leak_compliance():
+    """Review C2: four cells must not export as Meets Intent / live Exception."""
+    # alternate_proposed + rejected → Open/Not Met
+    assert (
+        map_axes_to_export_label(
+            _snap("yes", "owner", "alternate_proposed", "rejected")
+        )
+        == ExportLabel.OPEN_NOT_MET
+    )
+    # partial + rejected → Open/Not Met
+    assert (
+        map_axes_to_export_label(_snap("yes", "owner", "partial", "rejected"))
+        == ExportLabel.OPEN_NOT_MET
+    )
+    # not_met + rejected → Open/Not Met
+    assert (
+        map_axes_to_export_label(_snap("yes", "owner", "not_met", "rejected"))
+        == ExportLabel.OPEN_NOT_MET
+    )
+    # partial + approved → Open/Not Met (not Meets Intent)
+    assert (
+        map_axes_to_export_label(_snap("yes", "owner", "partial", "approved"))
+        == ExportLabel.OPEN_NOT_MET
+    )
+    # AC-3 AMR-1 shape: external + not_met + required → Open/Not Met
+    assert (
+        map_axes_to_export_label(
+            _snap("yes", "external", "not_met", "required", actor="program")
+        )
+        == ExportLabel.OPEN_NOT_MET
+    )
+
+
 def test_no_exception_softening_to_meet():
     """Guard 1: not_met + relief path never maps to Meet or Meets Intent as Meet."""
     ex = _snap("yes", "owner", "not_met", "required")

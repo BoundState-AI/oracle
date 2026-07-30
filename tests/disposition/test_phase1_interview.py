@@ -12,30 +12,48 @@ def test_phase1_golden_session_labels(tmp_path):
     assert result["labels"]["AMR-17"] == "TBD"
     assert "classification_unresolved" in result["amr17_tbd_reason"]
     assert result["labels"]["AMR-14"] == "Open/Not Met"
+    # AC-3: program-applicable + external approval → Open/Not Met (not Exception)
+    assert result["labels"]["AMR-1"] == "Open/Not Met"
     assert result["ceo_assumed"] is True
     assert result["export_paths"]
-    # Classification Class A marks dependents for re-review
+    # Classification Class A marks dependents for re-review (durable)
     assert any(u.startswith("AMR-") for u in result["rereview_after_class_a"])
+    # H1: re-review survives resume
+    from oracle.disposition.session import DispositionSession
+
+    s2 = DispositionSession(tmp_path / "g1")
+    s2.resume(actor_name="golden-operator", repin=False)
+    assert any(u.startswith("AMR-") for u in s2.units_needing_rereview())
 
 
 def test_phase1_amr2_blocked_without_amcp(tmp_path):
+    import pytest
+    from oracle.disposition.session import SessionError, UnitAxesState
+
     s = DispositionSession(tmp_path / "s")
     s.open(actor_name="a", multi_pack=True)
-    s.set_axes(
-        "AMR-2",
-        actor_name="a",
+    # C1: election of Meet without AMCP must be refused
+    with pytest.raises(SessionError, match="blocked|AMCP|evidence|Meet"):
+        s.set_axes(
+            "AMR-2",
+            actor_name="a",
+            applicability="yes",
+            obligated_actor="producer",
+            organization_responsibility="owner",
+            implementation_state="meets_as_written",
+            approval_state="not_required",
+        )
+    probe = UnitAxesState(
+        unit_id="AMR-2",
         applicability="yes",
         obligated_actor="producer",
         organization_responsibility="owner",
         implementation_state="meets_as_written",
         approval_state="not_required",
     )
-    d = evaluate_unit(s.state.units["AMR-2"], facts=s.state.facts)
-    assert "MEET" in str(d.blocked).upper() or ExportLabel_MEET_blocked(d)
-
-
-def ExportLabel_MEET_blocked(d) -> bool:
-    return "Meet" in d.blocked or any("AMCP" in b for b in d.blockers_meet)
+    d = evaluate_unit(probe, facts=s.state.facts)
+    assert "Meet" in d.blocked
+    assert "AMCP" in d.blocked["Meet"] or any("AMCP" in b for b in d.blockers_meet)
 
 
 def test_phase1_assumption_not_confirmed(tmp_path):
