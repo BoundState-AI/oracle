@@ -479,7 +479,7 @@ ENV_FAIL_MARKER = "RESULT: FAIL (ENVIRONMENT)"
 # Top-level packages of this repo: a missing module from OUTSIDE this set is
 # an environment problem; a missing module INSIDE it is a build defect (e.g.
 # Ben typo'd an import) and must still route to Ben.
-_REPO_TOP_LEVELS = ("oracle", "hearth", "pipeline", "sentinel", "eval", "tests", "server")
+_REPO_TOP_LEVELS = ("oracle", "pipeline", "sentinel", "eval", "tests", "server")
 
 
 def _looks_like_env_failure(output: str) -> bool:

@@ -1,135 +1,55 @@
-# HEARTH — Buyer-Side Real Estate Intelligence Platform
+# ORACLE — Orchestrated Review And Compliance Liaison Engine
 
-> Bouncer gets you past the door, HEARTH gets you the house behind it.
+Upload any document — spec, proposal, regulatory filing — and ORACLE runs it
+through multi-oracle adversarial review to convergence against user-selected
+rule packs. Upload a new regulatory standard and ORACLE generates a
+structured rule pack from it, adds it to a persistent library, and makes it
+available for all future reviews and grounded chat.
 
-The residential buyer's structural disadvantage is **unexplained defaults**:
-pre-filled commission percentages, region-wide agreement scopes, backstop
-clauses, contract deadlines the buyer doesn't know are negotiable. Every organ
-of this platform exists to surface a default, cite the evidence against it,
-and present a buyer-favorable alternative **for the buyer's licensed human to
-draft and execute**.
+Three organs live in this repo:
 
-This repository is a clone of the BoundState `oracle` repo: the ORACLE
-multi-oracle review engine (which reviewed the HEARTH spec) lives in
-`oracle/`, and HEARTH lives in `hearth/`. Spec: `docs/HEARTH_spec_v0.3.md`.
+| Organ | Where | What it does |
+|---|---|---|
+| Review engine | `oracle/` | Multi-oracle review (Beth coordinator + Fran/Codex/Grok/Gemini reviewers), pack generation (`shall_extractor` + rulepack builders), pack governance, grounded pack chat |
+| Build pipeline | `pipeline/` | Spec → Ben (Grok) builds → deterministic CHECK (tests, diff coverage, protected paths) → Atlas (Codex) reviews → Beth (Fable) gates. See `pipeline/README.md` |
+| Disposition module | `oracle/disposition/` | Requirement-by-requirement standards disposition with provenance (under construction — `docs/ORACLE_DISPOSITION_SPEC.md`, built slice-by-slice through the pipeline per `docs/DISPOSITION_SLICE_PLAN.md`) |
 
-**Status (founder field test):** Phase 1 shipped the DocScrubber CLI
-(findings-only), the CO-Larimer JurisdictionPack (provisional), the data
-models, and the BuyerPack boundary-test scaffold. Phase 2
-(`docs/HEARTH_phase2_scope_v0.4draft.md`) added explicit exposure
-dependencies, Ed25519 reviewer signing + governance freshness, bulk-file
-ingest with identity resolution, and the landmine scan engine. Still
-deliberately absent: valuation engine, MLS adapters, optimizer, LLM calls.
-See `BUILD_NOTES.md` for what is stubbed and why.
-
-## Quickstart — scrub a document in two commands
+## Quickstart
 
 ```bash
 pip install -e .
-hearth scrub tests/fixtures/BDB24-6-24_greyrock_2026-06-11_SYNTHETIC.txt \
-    --pack CO-Larimer --target-price 700000
+
+oracle review myspec.md --packs nasa_std_6030   # adversarial review
+oracle generate-pack regulation.pdf              # standard → rule pack
+oracle list-packs
+oracle promote-pack <pack> --reviewer "Name"     # draft → reviewed (TTY only)
 ```
 
-(Without installing: `python -m hearth scrub <file> --pack CO-Larimer`.)
+Web surface: `uvicorn server:app` (spec-review workspace, build-pipeline tab,
+pack chat). Frontend in `frontend/` (Next.js).
 
-Supported inputs: `.pdf`, `.docx`, `.txt`, `.md`. Useful flags:
+## Configuration
 
-| Flag | Effect |
-|------|--------|
-| `--target-price USD` | enables `exposure_usd` math (e.g. backstop = fee% × price) |
-| `--json PATH` | machine-readable findings |
-| `--audit-dir DIR` | where the immutable audit artifact lands (default `hearth_audit/`) |
-| `--packs-dir DIR` | use a pack library other than the built-in one |
-
-## Phase 2 — evidence, identity, landmines (two commands each)
-
-```bash
-# Ingest a county bulk export (file-based; no live network adapters in P2)
-hearth ingest tests/fixtures/ingest/larimer_assessor_SYNTHETIC.csv \
-    --adapter larimer-assessor --store ./evidence
-
-# Scan a property's evidence against the pack's landmine rules
-hearth scan "shadow mountain" --pack CO-Larimer --store ./evidence
-```
-
-```bash
-# Governance posture: rule statuses, signature schemes, source freshness
-hearth pack-status --pack CO-Larimer
-```
-
-Risk-layer fields the adapters don't cover yet (radon zone, wildfire
-rating, well counts) enter the store as buyer-supplied manual evidence
-(§4 confidence tier 0.80); the scan engine evaluates whatever rows exist
-and reports `insufficient_evidence` for the rest — never silence.
-
-### Exit codes — the scrubber FAILS CLOSED
-
-| Code | Meaning |
-|------|---------|
-| 0 | scrub completed; findings (if any) are in the report |
-| 2 | **REFUSED** — unparseable document, unusable pack, or unwritable audit trail. The document has NOT been reviewed. Never an empty success. |
-
-## What Phase 1 deliberately does not do
-
-- **No `suggested_template`, no generative legal language.** Findings-only
-  mode until the Colorado UPL/brokerage counsel opinion (spec §8/§9) clears
-  the gated-template path.
-- **No LLM calls.** The `ClauseAnalyzer` protocol is stubbed
-  (`NullClauseAnalyzer`); the pipeline is deterministic rule matching.
-- **No network anything in `hearth/`.** Enforced by static scan and a
-  runtime canary suite (`tests/hearth/test_boundary_*.py`): no BuyerPack
-  field may reach an outbound call, a log, or a non-local store — that is a
-  build-failing violation, not a guideline.
-- **All pack rules are provisional** (no licensee/attorney review yet) and
-  render under a PROVISIONAL banner. Findings are leads, not conclusions.
-
-## Architecture (spec §1)
-
-```
-hearth/
-├── api/            # FastAPI, single-tenant — /health only in P1
-├── cli.py          # `hearth scrub ...`
-├── core/
-│   ├── scrubber/   # extraction → segmentation → rule match → findings
-│   ├── boundary.py # testable BuyerPack-exfiltration definition (§1.1/§6)
-│   └── valuation|signals|optimizer|fit|identity   # Phase ≥2 skeletons
-├── data/           # Pydantic v2 contracts (§2, §11), extra="forbid"
-├── packs/
-│   ├── jurisdiction/CO-Larimer/pack.json  # 12 signed provisional micro-rules
-│   └── signing.py  # STUB signer (drift detection, not authenticity)
-├── audit/          # immutable per-run AuditArtifacts (§11)
-└── utils/render.py # report rendering + mandatory banners (§8)
-```
-
-## Dependencies
-
-Phase 1 added **zero** new runtime dependencies beyond the repo baseline
-(pydantic v2, FastAPI, PyMuPDF, python-docx already shipped with ORACLE).
-Phase 2 adds one: **cryptography** — Ed25519 per-reviewer rule signatures
-(§13 P2-B); the stdlib has no Ed25519 implementation.
+API keys via environment: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+`XAI_API_KEY`, `GEMINI_API_KEY`. Per-reviewer model overrides:
+`ORACLE_BETH_MODEL`, `ORACLE_FRAN_MODEL`, `ORACLE_CODEX_MODEL`,
+`ORACLE_GROK_MODEL`, `ORACLE_GEMINI_MODEL` (see `oracle/oracle2.py`).
+Pipeline builder pin: `--ben-model` / `ORACLE_BEN_MODEL`.
 
 ## Testing
 
 ```bash
-pytest tests/hearth -v      # HEARTH Phase-1 suite (gates P1-A…P1-D)
-pytest tests/ -v            # full repo: ORACLE + HEARTH
+pytest tests/ -q
 ```
 
-The Grey Rock BDB24-6-24 document is unit-test fixture #1
-(`tests/fixtures/BDB24-6-24_greyrock_2026-06-11_SYNTHETIC.txt` — synthetic
-reconstruction per handoff rule 3). The boundary canary BuyerPack is
-fixture #2 (`tests/fixtures/buyerpack_canary.json`). Golden file:
-`tests/hearth/golden/greyrock_findings.json` (regenerate deliberately with
-`HEARTH_UPDATE_GOLDEN=1`).
+The suite is keyless-deterministic (vendor keys are stripped inside tests);
+CI enforces a coverage floor, a server boot smoke, and a frontend build on
+every push. Live-fire evaluation against real vendors (`eval/live/`) gates
+releases, never CI.
 
-## Legal posture (spec §8)
+## Repository notes
 
-HEARTH is not a brokerage and performs no act defined as brokerage under
-C.R.S. 12-10-201; it is an analytics and document-intelligence tool used by a
-principal on their own behalf. Output banners are *in addition to* hard
-workflow controls (findings-only mode, human-review gating, no direct-send),
-never instead of them.
-
----
-BoundState AI 2026 · Classification: BoundState Proprietary
-Maintainer: Dr. Joseph Wilde
+- `.oracle_protected` lists files no build pipeline run may modify.
+- `docs/oracle_runs/` holds immutable review-run records.
+- HEARTH (the buyer-side real-estate platform that once cohabited here) was
+  removed 2026-07-29 and lives in git history before commit `28b807a`.

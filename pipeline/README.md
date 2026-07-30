@@ -1,6 +1,6 @@
 # Oracle Pipeline — multi-agent build & review tools
 
-Standalone CLIs (no imports from the ORACLE/HEARTH app) that automate Joe's
+Standalone CLIs (no imports from the ORACLE app) that automate Joe's
 manual oracle workflow for **code**. The spec-review sibling lives at
 `D:\BoundState\oracle.py`.
 

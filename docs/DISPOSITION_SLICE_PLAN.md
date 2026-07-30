@@ -60,7 +60,9 @@ spec_rules-pointer drift assertions (§15/§16) go live here.
 ### S1a — Persistence, concurrency, and audit contract *(the spine — standalone per P-4)*
 The release state machine needs a durable home before any slice records
 human elections or exports. Implements, following the HEARTH
-evidence-store/audit pattern:
+evidence-store/audit pattern (HEARTH was removed from the tree 2026-07-29;
+reference implementation via `git show 28b807a:hearth/db/evidence_store.py`
+and `git show 28b807a:hearth/audit/artifact.py`):
 - Versioned repository schema for units, matrix, elections, acceptance records.
 - Append-only, hash-chained transition/event log (who, when, from→to,
   inputs, rule_version).

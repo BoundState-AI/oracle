@@ -73,10 +73,13 @@ verdict), `PIPELINE_STATE.md` (round record + toolchain provenance),
 1. Cut `docs/slices/S1a_SPEC.md` from the plan's S1a section, same format
    as `S1_SPEC.md` (Goal / Deliverables / Module standards / Done when /
    Never touch / Stop if). Key content per decision P-4: append-only,
-   hash-chained JSONL event log on the HEARTH evidence-store pattern
-   (`hearth/db/`), atomic release-marking via write-temp-rename,
-   single-writer file lock with the optimistic version-check contract
-   implemented, authenticated actor identity on every transition.
+   hash-chained JSONL event log on the HEARTH evidence-store pattern —
+   HEARTH was removed from the working tree; the reference implementation
+   lives in git history: `git show 28b807a:hearth/db/evidence_store.py`
+   and `git show 28b807a:hearth/audit/artifact.py` — atomic
+   release-marking via write-temp-rename, single-writer file lock with the
+   optimistic version-check contract implemented, authenticated actor
+   identity on every transition.
 2. Fresh branch `build/disposition-s1a` from the updated base; same gate
    command with the new spec path.
 3. One slice per branch, one gate per slice, session-per-slice discipline.
