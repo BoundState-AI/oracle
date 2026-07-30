@@ -35,6 +35,8 @@ from oracle.disposition.models import (  # noqa: F401
     transition_unit,
     validate_locator_covered_by_manifest,
     validate_physical_impossibility_declaration,
+    SCHEMA_VERSION,
+    RULE_VERSION,
 )
 from oracle.disposition.rollup import (  # noqa: F401
     Badge,
@@ -46,4 +48,33 @@ from oracle.disposition.state import (  # noqa: F401
     WorkflowState,
     apply_transition,
     is_machine_actor,
+)
+
+# S1a deliverables (persistence, audit, release authority)
+from oracle.disposition.identity import (  # noqa: F401
+    ActorIdentity,
+    Role,
+    machine_identity,
+    is_authorized_transition,
+    require_authorized_transition,
+    rejection_event_descriptor,
+)
+from oracle.disposition.eventlog import (  # noqa: F401
+    Event,
+    EventLog,
+    EventLogError,
+)
+from oracle.disposition.store import (  # noqa: F401
+    DispositionStore,
+    PackageHeader,
+    StoreError,
+    ConcurrencyError,
+    ReimportConflictError,
+)
+from oracle.disposition.release import (  # noqa: F401
+    ReleaseContext,
+    ReleaseRefusal,
+    is_unit_release_eligible,
+    evaluate_package_eligibility,
+    mark_package_release_approved,
 )

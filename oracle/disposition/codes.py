@@ -81,3 +81,34 @@ class OPENSubReason(str, Enum):
 # Convenience sets for fast membership checks in validation
 DISPOSITION_CODES: frozenset[str] = frozenset(c.value for c in DispositionCode)
 OPEN_SUBREASONS: frozenset[str] = frozenset(r.value for r in OPENSubReason)
+
+
+class ProposalBand(str, Enum):
+    """Qualitative confidence band for a machine proposal (§8).
+
+    WHY an enum and not a float: §8 defines exactly three bands with structural
+    bases — it contains no calibration data, no reference distribution, and no
+    empirical reliability model. A 0.0-1.0 float labelled "calibrated
+    confidence" therefore advertises precision that does not exist, and does so
+    to an audience for whom "confidence" is a statistical term: these
+    dispositions sit alongside A-basis and B-basis allowables (99/95 and 90/95)
+    in the same submittal. A three-value enum makes the false precision
+    unrepresentable rather than merely discouraged.
+
+    HIGH   — requirement text unambiguous, scope citation direct, no authority
+             dependency, no definitional remap. Reviewer skims.
+    MEDIUM — disposition depends on a referenced table or subparagraph set not
+             yet examined, or on a routing decision consistent with another
+             open entry. Reviewer verifies against source.
+    LOW    — disposition depends on a scope decision the customer has not made,
+             or on process capability not established at intake. Per §8, Oracle
+             proposes NOTHING: the unit is OPEN with the applicable §2.3
+             sub-reason and renders to the reviewer as a question.
+
+    Never aggregated into a package-level score (§8), and never rendered on a
+    customer-facing artifact — this is internal triage.
+    """
+
+    HIGH = "HIGH"
+    MEDIUM = "MEDIUM"
+    LOW = "LOW"

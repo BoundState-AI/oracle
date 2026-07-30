@@ -47,7 +47,7 @@ def _base_unit(**overrides) -> dict:
         "authority_dependent": False,
         "authority_classification": "pending_review",
         "evidence": (),  # model is now frozen + tuple for evidence
-        "confidence": 0.8,
+        "proposal_band": "HIGH",
         "proposer": "oracle/proposal-v1",
         "schema_version": SCHEMA_VERSION,
         "rule_version": RULE_VERSION,
@@ -161,7 +161,7 @@ def test_rollup_parent_rejects_acceptance_and_evidence_medium4():
         doc_id="D-P",
         revision="R1",
         locator="s:1",
-        link_confidence=0.9,
+        match_score=0.9,
         schema_version=SCHEMA_VERSION,
         rule_version=RULE_VERSION,
     )
@@ -593,7 +593,7 @@ def test_whitespace_only_strings_rejected_for_required_fields():
             doc_id="   ",
             revision="R1",
             locator="s:1",
-            link_confidence=0.9,
+            match_score=0.9,
             schema_version=SCHEMA_VERSION,
             rule_version=RULE_VERSION,
         )
@@ -602,7 +602,7 @@ def test_whitespace_only_strings_rejected_for_required_fields():
             doc_id="D1",
             revision="   ",
             locator="s:1",
-            link_confidence=0.9,
+            match_score=0.9,
             schema_version=SCHEMA_VERSION,
             rule_version=RULE_VERSION,
         )
@@ -611,7 +611,7 @@ def test_whitespace_only_strings_rejected_for_required_fields():
             doc_id="D1",
             revision="R1",
             locator="   ",
-            link_confidence=0.9,
+            match_score=0.9,
             schema_version=SCHEMA_VERSION,
             rule_version=RULE_VERSION,
         )
@@ -785,16 +785,12 @@ def test_public_construction_rejects_non_proposed_states_high1():
         rule_version=RULE_VERSION,
     )
 
-    # Direct construction of non-proposed must fail. release_approved is
-    # rejected by the S1 scope-boundary guard, which fires first and carries a
-    # more specific message; the other two hit the proposed-only guard.
-    for bad_state in ("human_confirmed", "release_approved", "rejected"):
-        expected = (
-            "cannot be constructed in slice S1"
-            if bad_state == "release_approved"
-            else "accepts only workflow_state='proposed'"
-        )
-        with pytest.raises(ValidationError, match=expected):
+    # Direct construction of non-proposed must fail.
+    # human_confirmed / rejected hit the proposed-only guard.
+    # release_approved is allowed only via the narrow audited S1a path
+    # (ReleaseContext + transition_unit or mark_package_release_approved).
+    for bad_state in ("human_confirmed", "rejected"):
+        with pytest.raises(ValidationError, match="accepts only workflow_state='proposed'"):
             DispositionUnit(
                 unit_id="AMR-H1",
                 requirement_text="shall X",
@@ -806,6 +802,20 @@ def test_public_construction_rejects_non_proposed_states_high1():
                 unit_boundary_confirmed_by="b1",
                 workflow_state=bad_state,  # type: ignore[arg-type]
             )
+
+    # release_approved direct construction is still forbidden (guard relaxed only for the controlled token)
+    with pytest.raises(ValidationError, match="cannot be constructed directly|Use release.mark_package_release_approved"):
+        DispositionUnit(
+            unit_id="AMR-H1-REL",
+            requirement_text="shall X",
+            locator=loc,
+            code=DispositionCode.CW,
+            proposer="p",
+            schema_version=SCHEMA_VERSION,
+            rule_version=RULE_VERSION,
+            unit_boundary_confirmed_by="b1",
+            workflow_state="release_approved",  # type: ignore[arg-type]
+        )
 
     # proposed succeeds
     u = DispositionUnit(
@@ -1261,7 +1271,7 @@ def _releasable_shaped_unit() -> DispositionUnit:
         schema_version=SCHEMA_VERSION, rule_version=RULE_VERSION,
     )
     ev = EvidenceEntry(
-        doc_id="D1", revision="R1", locator="s:1", link_confidence=0.99,
+        doc_id="D1", revision="R1", locator="s:1", match_score=0.99,
         schema_version=SCHEMA_VERSION, rule_version=RULE_VERSION,
     )
     return DispositionUnit(
@@ -1272,29 +1282,40 @@ def _releasable_shaped_unit() -> DispositionUnit:
     )
 
 
-def test_release_approved_is_refused_by_transition_unit_in_s1():
-    """transition_unit refuses release_approved regardless of unit quality."""
+def test_release_approved_via_transition_unit_requires_context_s1a():
+    """S1a: transition_unit accepts release_approved only with a full ReleaseContext.
+
+    Without context it raises. With context (and a shaped unit) it produces a
+    validated release_approved successor. The gate logic lives in release.py.
+    """
+    from oracle.disposition.release import ReleaseContext as RC
+
     human = Actor(name="j.wilde@boundstate.ai", is_machine=False)
     u = _releasable_shaped_unit()
     confirmed = transition_unit(u, "human_confirmed", human)
     assert confirmed.workflow_state == "human_confirmed"
 
-    with pytest.raises(NotImplementedError, match="not available from transition_unit"):
+    # No context -> explicit error (the gate cannot be evaluated)
+    with pytest.raises(ValueError, match="requires a ReleaseContext"):
         transition_unit(confirmed, "release_approved", human)
 
+    # With a ReleaseContext the gate runs; a well-shaped unit passes and produces released successor
+    ctx = RC(effective_date="2026-06-01", configurations=("cfg-a",), part_classes=("P1",), evidence_threshold=0.0)
+    rel = transition_unit(confirmed, "release_approved", human, release_context=ctx)
+    assert rel.workflow_state == "release_approved"
 
-def test_release_approved_cannot_be_constructed_by_any_path_in_s1():
-    """The refusal is an invariant, not a convention.
 
-    Construction is rejected even though transition_unit is the only caller
-    that could hold the internal authorization token — so no code path in this
-    slice can yield a release_approved unit.
+def test_release_approved_cannot_be_constructed_directly_s1a():
+    """Direct construction of release_approved is still forbidden.
+
+    Only the audited paths (transition_unit with ReleaseContext, or
+    mark_package_release_approved) may produce it. This test documents the guard.
     """
     loc = Locator(
         standard="NASA-STD-6030", revision="Baseline", section="4.2", page=17,
         schema_version=SCHEMA_VERSION, rule_version=RULE_VERSION,
     )
-    with pytest.raises(ValidationError, match="cannot be constructed in slice S1"):
+    with pytest.raises(ValidationError, match="cannot be constructed directly|Use release.mark_package_release_approved"):
         DispositionUnit(
             unit_id="AMR-REL2", requirement_text="shall", locator=loc,
             code=DispositionCode.CW, proposer="p",

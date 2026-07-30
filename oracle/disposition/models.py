@@ -34,6 +34,7 @@ from oracle.disposition.codes import (
     DISPOSITION_CODES,
     DispositionCode,
     OPENSubReason,
+    ProposalBand,
     WorkflowStateValue,
 )  # WorkflowStateValue is the single source of truth (codes.py)
 
@@ -44,6 +45,21 @@ LOGGER = logging.getLogger("oracle.disposition.models")
 # non-"proposed" workflow_state values. Public construction and model_copy
 # must never set this; the validator below enforces it.
 _ALLOW_TRANSITION_STATE: ContextVar[bool] = ContextVar("_ALLOW_TRANSITION_STATE", default=False)
+
+# Narrow token set ONLY by the release gate (release.py) when it has evaluated
+# a unit (or package) against a full ReleaseContext and is about to construct
+# the release_approved successor. This is the controlled path for S1a.
+# Direct construction and un-audited paths must still raise.
+_ALLOW_RELEASED_CONSTRUCTION: ContextVar[bool] = ContextVar("_ALLOW_RELEASED_CONSTRUCTION", default=False)
+
+
+def _set_release_construction_token() -> Any:
+    """Internal: return a token that must be reset. Used only by release.py."""
+    return _ALLOW_RELEASED_CONSTRUCTION.set(True)
+
+
+def _reset_release_construction_token(token: Any) -> None:
+    _ALLOW_RELEASED_CONSTRUCTION.reset(token)
 
 
 def _freeze_value(v: Any) -> Any:
@@ -163,7 +179,7 @@ class EvidenceEntry(VersionedModel):
     doc_id: str = Field(min_length=1)
     revision: str = Field(min_length=1)
     locator: str = Field(min_length=1)
-    link_confidence: float = Field(ge=0.0, le=1.0)
+    match_score: float = Field(ge=0.0, le=1.0)
 
     @field_validator("doc_id", "revision", "locator", mode="before")
     @classmethod
@@ -566,8 +582,16 @@ class DispositionUnit(VersionedModel):
     evidence: tuple[EvidenceEntry, ...] = Field(default_factory=tuple)
     acceptance: Optional[AcceptanceRecord] = None
 
-    # Provenance and confidence
-    confidence: float = Field(ge=0.0, le=1.0, default=0.0)
+    # Provenance and proposal triage.
+    #
+    # WHY a band and not a float (§8): §8 defines three qualitative bands with
+    # structural bases and contains no calibration data. The prior
+    # `confidence: float` advertised a precision the system cannot produce, in
+    # a document that also carries A-basis/B-basis allowables — where
+    # "confidence" has a defined coverage probability. Internal triage only:
+    # never aggregated to a package score, never rendered to a customer.
+    proposal_band: Optional[ProposalBand] = None
+    band_basis: Optional[str] = None  # the structural reason for the band
     proposer: str = Field(min_length=1)
     confirmed_by: Optional[str] = None
     confirmed_date: Optional[str] = None
@@ -615,24 +639,26 @@ class DispositionUnit(VersionedModel):
 
         Roll-up parents are never transition targets and must remain "proposed".
         """
-        # S1 SCOPE BOUNDARY: release_approved is unreachable by ANY path in this
-        # slice — including the internal transition token. transition_unit
-        # refuses the target, and this makes that refusal an invariant rather
-        # than a convention: no DispositionUnit can exist in release_approved
-        # state while S1 owns this model. See transition_unit's docstring.
+        # S1a: release_approved is allowed ONLY via the narrow controlled token
+        # set by the audited release path in release.py (after full context
+        # evaluation against an explicit ReleaseContext, actor authorization,
+        # and package-level all-or-nothing decision). Direct construction and
+        # un-audited paths must still raise.
         if self.workflow_state == "release_approved":
-            raise ValueError(
-                "workflow_state='release_approved' cannot be constructed in slice S1. "
-                "Release eligibility requires package-level release context (§7.1) that "
-                "S1 does not model; producing a released unit is owned by a later slice."
-            )
+            if not (_ALLOW_TRANSITION_STATE.get() or _ALLOW_RELEASED_CONSTRUCTION.get()):
+                raise ValueError(
+                    "workflow_state='release_approved' cannot be constructed directly. "
+                    "Release eligibility requires package-level ReleaseContext evaluation, "
+                    "actor authorization, and atomic store application (§7.1). "
+                    "Use release.mark_package_release_approved or the controlled "
+                    "transition_unit path."
+                )
         if self.workflow_state != "proposed":
-            # Internal authorized transition path is the only way to construct
-            # a non-proposed state. The token is a one-shot context var set only
-            # inside transition_unit, and — with release_approved excluded above —
-            # the most it can authorize is human_confirmed or rejected, both of
-            # which apply_transition has already validated for legality and actor.
-            if not _ALLOW_TRANSITION_STATE.get():
+            # Internal authorized paths (transition_unit or the release gate) are the
+            # only ways to construct non-proposed states. For release_approved the
+            # dedicated release construction token is also accepted.
+            allowed = _ALLOW_TRANSITION_STATE.get() or _ALLOW_RELEASED_CONSTRUCTION.get()
+            if not allowed:
                 raise ValueError(
                     f"Public DispositionUnit construction accepts only workflow_state='proposed'; "
                     f"got {self.workflow_state!r}. Use transition_unit for state changes."
@@ -761,41 +787,33 @@ def transition_unit(
     unit: DispositionUnit,
     target: WorkflowStateValue,
     actor: "Actor",
+    *,
+    release_context: Optional["ReleaseContext"] = None,
 ) -> "DispositionUnit":
     """
     Produce a successor DispositionUnit in `target` state.
 
-    S1 SCOPE BOUNDARY — `release_approved` is NOT available from this API.
+    For all states except release_approved: delegates to apply_transition
+    (state.py) and rebuilds via normal validated constructor.
 
-    Release eligibility under §7.1 is not a unit-local property. It depends on
-    package-level context that S1 does not model: the run's effective date
-    against each acceptance validity window, approved-scope coverage for the
-    configurations and part classes actually being released, acceptance
-    supersession chains, and evidence link-confidence thresholds. A gate that
-    checks only what a single unit can see is not a partial gate — it is a
-    wrong gate, because it returns "release approved" on inputs §7.1 forbids.
+    For release_approved (S1a): delegates the full eligibility decision to
+    release.py (is_unit_release_eligible against the supplied ReleaseContext).
+    The ReleaseContext carries the package-level run date, target scope
+    dimensions, and evidence threshold. Eligibility is whole — a unit-local
+    view that ignores package context is deliberately not provided.
 
-    So S1 refuses the transition rather than approximating it. `state.py`
-    remains the complete §7.1 machine and still models the
-    `human_confirmed -> release_approved` edge; what is deferred is any
-    unit-level API that *produces* a released unit. That capability belongs to
-    the slice which owns release context and the append-only event log.
+    The successor is constructed under the narrow internal token so the
+    public-construction guard permits release_approved, but only this path
+    can set the token for that state. Direct construction still raises.
 
-    Consequences, which are the point:
-      * No DispositionUnit in S1 can carry workflow_state="release_approved"
-        by any code path — the constructor rejects it unconditionally, so this
-        is an invariant rather than a convention.
-      * There is no release gate to bypass, and therefore no privileged
-        construction path to protect.
+    Actor authorization for release paths is enforced by the identity layer
+    inside release.py when the full package gate is used. For the unit-level
+    transition_unit path we still require a non-machine actor and run the
+    eligibility checks.
 
-    Behaviour:
-      1. Delegates legality and actor rules to apply_transition() in state.py
-         (the sole §7.1 authority) — illegal edges and machine actors raise there.
-      2. Rejects roll-ups as transition targets (§1.1: a parent is never a target).
-      3. Refuses `release_approved` (above).
-      4. Records the human actor's name in `confirmed_by` for human transitions.
-      5. Rebuilds the successor through the normal validation path, so every
-         validator re-runs — the successor is not a trusted copy.
+    A released unit produced here is only a validated in-memory successor.
+    Persistent recording, event chaining, and atomic package marking live
+    in the store + release.mark_package_release_approved.
     """
     from oracle.disposition.state import apply_transition as _apply_transition
 
@@ -803,31 +821,55 @@ def transition_unit(
         raise ValueError("Roll-up parent rows are never disposition targets (§1.1)")
 
     if target == "release_approved":
-        raise NotImplementedError(
-            "release_approved is not available from transition_unit in slice S1. "
-            "Release eligibility under §7.1 requires package-level release context "
-            "(run date vs acceptance validity window, approved-scope coverage, "
-            "supersession chain, evidence link-confidence) which S1 does not model. "
-            "state.py models the edge; producing a released unit is owned by the "
-            "release-context slice. Approximating the gate here would return "
-            "'release approved' on inputs §7.1 forbids."
+        # Delegate the complete gate to release.py
+        from oracle.disposition.release import (
+            is_unit_release_eligible,
+            ReleaseContext as _RC,
+            _build_released_successor,  # uses the narrow token internally
         )
 
+        # Safety: in-memory transition_unit path still requires the source unit
+        # to already be human_confirmed. Direct proposed -> release_approved is blocked.
+        if unit.workflow_state != "human_confirmed":
+            raise ValueError(
+                f"release_approved via transition_unit requires the unit to be in 'human_confirmed' first "
+                f"(got {unit.workflow_state}). Use mark_package_release_approved for full audited package release."
+            )
+
+        if release_context is None:
+            raise ValueError(
+                "release_approved transition requires a ReleaseContext "
+                "(effective_date, configurations, part_classes, evidence_threshold)"
+            )
+
+        if not isinstance(release_context, _RC):
+            rc = _RC(
+                effective_date=getattr(release_context, "effective_date", None) or release_context.get("effective_date"),  # type: ignore[attr-defined]
+                configurations=tuple(getattr(release_context, "configurations", ()) or release_context.get("configurations", ())),
+                part_classes=tuple(getattr(release_context, "part_classes", ()) or release_context.get("part_classes", ())),
+                evidence_threshold=float(getattr(release_context, "evidence_threshold", 0.0) or release_context.get("evidence_threshold", 0.0)),
+            )
+        else:
+            rc = release_context
+
+        ok, why = is_unit_release_eligible(unit, rc)
+        if not ok:
+            raise ValueError(f"Unit {unit.unit_id} is not release-eligible: {why}")
+
+        if getattr(actor, "is_machine", False):
+            raise ValueError("Machine actor may not produce release_approved")
+
+        return _build_released_successor(unit, getattr(actor, "name", "unknown"))
+
+    # Non-release path — original S1 behavior
     new_state = _apply_transition(unit.workflow_state, target, actor)
 
-    # High #3: record the human actor name into confirmed_by for human transitions.
-    # Machine actors never populate confirmed_by (only proposer is set at creation).
-    # We set it when transitioning into any non-proposed state via a human actor.
     data = unit.model_dump()
     data["workflow_state"] = new_state
-    if not actor.is_machine:
-        # Record the actor who performed this human election.
-        # For release_approved we also keep it in confirmed_by (the field that
-        # carries the human who last moved the unit toward release).
-        data["confirmed_by"] = actor.name
+    if not getattr(actor, "is_machine", False):
+        data["confirmed_by"] = getattr(actor, "name", None)
 
-    # Re-hydrate known nested models from their dict forms (they were already
-    # validated on the source unit; this is a controlled internal path).
+    # Re-hydrate
     if data.get("locator") and not isinstance(data.get("locator"), Locator):
         data["locator"] = Locator.model_validate(data["locator"])
     if data.get("evidence"):
@@ -840,12 +882,6 @@ def transition_unit(
     if data.get("acceptance") and not isinstance(data.get("acceptance"), AcceptanceRecord):
         data["acceptance"] = AcceptanceRecord.model_validate(data["acceptance"])
 
-    # HIGH #4: Close the model_construct bypass.
-    # We temporarily enable an internal authorization token so that the
-    # public-construction guard (_enforce_proposed_only_public_construction)
-    # permits the non-proposed state. We then use the NORMAL model_validate
-    # path so every validator (including per-code, boundary, frozen-containers)
-    # runs on the successor.
     token = _ALLOW_TRANSITION_STATE.set(True)
     try:
         successor = DispositionUnit.model_validate(data)
