@@ -67,15 +67,40 @@ def _text_ref(rec: Optional[RequirementRecord], unit_id: str) -> str:
     return f"{loc.standard} {loc.revision} §{loc.section}{page}"
 
 
+# Stamp when phantom-ref check is skipped (no evidence registry). Must appear in Meta.
+PHANTOM_REF_SKIPPED = "phantom-ref check: skipped (no evidence registry)"
+
+
+def _normalize_known_artifacts(
+    known: Optional[set[Any]],
+) -> Optional[set[tuple[str, str]]]:
+    """
+    F2: known artifacts are (doc_id, revision) pairs.
+
+    Accepts legacy set[str] of doc_ids (maps to (doc_id, "*") wildcard) for
+    older callers; prefer explicit pairs.
+    """
+    if known is None:
+        return None
+    out: set[tuple[str, str]] = set()
+    for item in known:
+        if isinstance(item, tuple) and len(item) == 2:
+            out.add((str(item[0]), str(item[1])))
+        else:
+            # legacy doc_id-only: match any revision via sentinel
+            out.add((str(item), "*"))
+    return out
+
+
 def build_matrix_rows(
     session: DispositionSession,
     records: dict[str, RequirementRecord],
     *,
-    known_artifact_ids: Optional[set[str]] = None,
+    known_artifact_ids: Optional[set[Any]] = None,
     enforce_decision: bool = True,
     require_review_accepted: bool = False,
 ) -> list[MatrixRow]:
-    """Build matrix rows; refuse phantom refs and decision-blocked labels (C1)."""
+    """Build matrix rows; refuse phantom refs, rereview, and blocked labels."""
     if session.state is None:
         raise ExportError("Session not open")
     from oracle.disposition.comments import prohibited_language_hits
@@ -83,15 +108,29 @@ def build_matrix_rows(
     from oracle.disposition.graph import DependencyGraph
 
     graph = DependencyGraph.from_seeds()
+    known_pairs = _normalize_known_artifacts(known_artifact_ids)
+
+    # F1: units needing re-review must not export (no bypass flag)
+    rereview = set(session.state.needs_rereview)
+    if rereview:
+        bad = sorted(uid for uid in rereview if uid in session.state.units)
+        if bad:
+            raise ExportError(
+                f"Refuse export: units need re-review before export: {', '.join(bad)}"
+            )
+
     rows: list[MatrixRow] = []
     for uid, unit in sorted(session.state.units.items()):
-        # Case 23: refuse phantom refs when known set provided
-        if known_artifact_ids is not None:
+        # F2 Case 23: phantom-ref on (doc_id, revision) when known set provided
+        if known_pairs is not None:
             for ref in unit.evidence_refs:
-                if ref.doc_id not in known_artifact_ids:
+                pair = (ref.doc_id, ref.revision)
+                exact = pair in known_pairs
+                wildcard = (ref.doc_id, "*") in known_pairs
+                if not exact and not wildcard:
                     raise ExportError(
                         f"Refuse export: unit {uid} references nonexistent "
-                        f"artifact {ref.doc_id!r}"
+                        f"artifact {ref.doc_id!r}@{ref.revision!r}"
                     )
         try:
             label = unit.export_label().value
@@ -107,7 +146,8 @@ def build_matrix_rows(
                 )
 
         if enforce_decision:
-            has_ev = bool(unit.evidence_refs)
+            # F2: qualifying Meet evidence (registry-aware)
+            has_ev = session.has_qualifying_meet_evidence(unit)
             decision = evaluate_unit(
                 unit,
                 facts=session.state.facts,
@@ -196,8 +236,9 @@ def export_csv(
     records: dict[str, RequirementRecord],
     path: Path | str,
     *,
-    known_artifact_ids: Optional[set[str]] = None,
+    known_artifact_ids: Optional[set[Any]] = None,
     enforce_decision: bool = True,
+    phantom_ref_note: Optional[str] = None,
 ) -> Path:
     rows = build_matrix_rows(
         session,
@@ -218,6 +259,8 @@ def export_csv(
         f"rdw={SPEC_VERSIONS['rdw_spec']} engine={SPEC_VERSIONS['oracle_disposition_spec']}\n"
     )
     buf.write(f"# counts={counts}\n")
+    if phantom_ref_note:
+        buf.write(f"# {phantom_ref_note}\n")
 
     writer = csv.writer(buf)
     writer.writerow(
@@ -273,8 +316,9 @@ def export_docx(
     records: dict[str, RequirementRecord],
     path: Path | str,
     *,
-    known_artifact_ids: Optional[set[str]] = None,
+    known_artifact_ids: Optional[set[Any]] = None,
     enforce_decision: bool = True,
+    phantom_ref_note: Optional[str] = None,
 ) -> Path:
     try:
         from docx import Document
@@ -305,6 +349,8 @@ def export_docx(
     doc.add_paragraph("Counts (computed from matrix): " + ", ".join(
         f"{k}={v}" for k, v in counts.items() if v
     ))
+    if phantom_ref_note:
+        doc.add_paragraph(phantom_ref_note)
 
     table = doc.add_table(rows=1, cols=6)
     hdr = table.rows[0].cells
@@ -396,9 +442,10 @@ def export_xlsx(
     records: dict[str, RequirementRecord],
     path: Path | str,
     *,
-    known_artifact_ids: Optional[set[str]] = None,
+    known_artifact_ids: Optional[set[Any]] = None,
     enforce_decision: bool = True,
     evidence_rows: Optional[list[list[str]]] = None,
+    phantom_ref_note: Optional[str] = None,
 ) -> Path:
     """
     Phase 2: supplier matrix as XLSX using stdlib zipfile (no new dependency).
@@ -454,6 +501,8 @@ def export_xlsx(
         ["engine_spec", SPEC_VERSIONS["oracle_disposition_spec"]],
         ["counts", str(counts)],
     ]
+    if phantom_ref_note:
+        meta_data.append(["phantom_ref_check", phantom_ref_note])
 
     content_types = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -519,18 +568,27 @@ def export_all(
     records: dict[str, RequirementRecord],
     out_dir: Path | str,
     *,
-    known_artifact_ids: Optional[set[str]] = None,
+    known_artifact_ids: Optional[set[Any]] = None,
     enforce_decision: bool = True,
 ) -> dict[str, Path]:
-    """Write CSV + DOCX + XLSX suite under out_dir."""
+    """
+    Write CSV + DOCX + XLSX suite under out_dir.
+
+    F2: never synthesize the known-set from the refs under validation.
+    When known_artifact_ids is omitted, load from session evidence registry if
+    present; otherwise skip the phantom check and stamp that fact into Meta
+    (CSV comment / DOCX paragraph / XLSX Meta sheet). No silent skip.
+    """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    # H5: if known set omitted, synthesize from unit evidence refs (non-phantom)
-    if known_artifact_ids is None and session.state is not None:
-        known_artifact_ids = set()
-        for u in session.state.units.values():
-            for r in u.evidence_refs:
-                known_artifact_ids.add(r.doc_id)
+    phantom_note: Optional[str] = None
+    if known_artifact_ids is None:
+        store = session.evidence_store()
+        if store is not None:
+            known_artifact_ids = store.known_doc_revisions()
+        else:
+            phantom_note = PHANTOM_REF_SKIPPED
+            # leave known_artifact_ids None → no phantom enforcement
     paths = {
         "csv": export_csv(
             session,
@@ -538,6 +596,7 @@ def export_all(
             out / "supplier_matrix.csv",
             known_artifact_ids=known_artifact_ids,
             enforce_decision=enforce_decision,
+            phantom_ref_note=phantom_note,
         ),
         "docx": export_docx(
             session,
@@ -545,6 +604,7 @@ def export_all(
             out / "supplier_matrix.docx",
             known_artifact_ids=known_artifact_ids,
             enforce_decision=enforce_decision,
+            phantom_ref_note=phantom_note,
         ),
         "xlsx": export_xlsx(
             session,
@@ -552,6 +612,7 @@ def export_all(
             out / "supplier_matrix.xlsx",
             known_artifact_ids=known_artifact_ids,
             enforce_decision=enforce_decision,
+            phantom_ref_note=phantom_note,
         ),
     }
     return paths

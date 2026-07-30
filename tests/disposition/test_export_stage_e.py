@@ -88,17 +88,18 @@ def test_refuse_phantom_artifact_ref(tmp_path):
 
 def test_docx_export_and_golden_snapshot(tmp_path):
     s, records = _session_with_rows(tmp_path)
-    # Local evidence refs allowed when known set includes them
+    # Local evidence refs allowed when known set includes (doc_id, revision)
     s.attach_evidence(
         "AMR-14",
         EvidenceRef(doc_id="EFCP-gap", revision="n/a", note="absent"),
         "exporter",
     )
+    known = {("EFCP-gap", "n/a")}
     csv_path = export_csv(
-        s, records, tmp_path / "golden.csv", known_artifact_ids={"EFCP-gap"}
+        s, records, tmp_path / "golden.csv", known_artifact_ids=known
     )
     docx_path = export_docx(
-        s, records, tmp_path / "golden.docx", known_artifact_ids={"EFCP-gap"}
+        s, records, tmp_path / "golden.docx", known_artifact_ids=known
     )
     assert csv_path.is_file()
     assert docx_path.is_file()

@@ -201,7 +201,7 @@ class UnitAxesState(BaseModel):
     org_responsibility_tbd_reason: Optional[TBDReason] = TBDReason.EVIDENCE_ABSENT
     implementation_tbd_reason: Optional[TBDReason] = TBDReason.EVIDENCE_ABSENT
     approval_tbd_reason: Optional[TBDReason] = TBDReason.EVIDENCE_ABSENT
-    scope_citation: Optional[str] = None  # required for N/A (FR-009)
+    scope_citation: Optional[str] = None  # required for N/A (FR-009); whitespace rejected
     accepted_with_tbd: bool = False  # review coherence election
     review_state: Literal[
         "not_reviewed", "proposed", "in_review", "accepted", "rejected", "superseded"
@@ -211,6 +211,21 @@ class UnitAxesState(BaseModel):
     evidence_refs: tuple[EvidenceRef, ...] = ()
     open_actions: tuple[str, ...] = ()
     actor_name: Optional[str] = None
+
+    @field_validator("scope_citation", mode="before")
+    @classmethod
+    def _strip_scope_citation(cls, v: Any) -> Optional[str]:
+        """F4: strip; whitespace-only is absent/rejected (not a real citation)."""
+        if v is None:
+            return None
+        if not isinstance(v, str):
+            v = str(v)
+        stripped = v.strip()
+        if len(stripped) == 0:
+            raise ValueError(
+                "scope_citation must be a non-blank string (whitespace-only rejected)"
+            )
+        return stripped
 
     def snapshot(self) -> AxisSnapshot:
         return AxisSnapshot(
@@ -505,18 +520,104 @@ class DispositionSession:
             self._graph = DependencyGraph.from_seeds()
             return state
 
+    def evidence_store(self) -> Optional[Any]:
+        """Return EvidenceStore when <session>/evidence registry exists; else None."""
+        from oracle.disposition.evidence import EvidenceStore
+
+        root = self.root / "evidence"
+        registry = root / "registry.jsonl"
+        if root.is_dir() and registry.is_file():
+            return EvidenceStore(root)
+        return None
+
+    def has_qualifying_meet_evidence(self, unit: UnitAxesState) -> bool:
+        """
+        F2 Meet evidence floor.
+
+        With a session evidence registry: require unit_has_qualifying_meet_evidence
+        and at least one cited EvidenceRef matching a registered (doc_id, revision)
+        that passes evidence_supports_meet. Without registry: bool(evidence_refs)
+        with a warning that refs are unverified (v0 posture).
+        """
+        from oracle.disposition.evidence import evidence_supports_meet
+
+        store = self.evidence_store()
+        if store is None:
+            LOGGER.warning(
+                "Meet evidence refs are unverified (no evidence registry at %s/evidence)",
+                self.root,
+            )
+            return bool(unit.evidence_refs)
+        if not store.unit_has_qualifying_meet_evidence(unit.unit_id):
+            return False
+        by_key = {(a.doc_id, a.revision): a for a in store.list_all()}
+        for ref in unit.evidence_refs:
+            art = by_key.get((ref.doc_id, ref.revision))
+            if art is not None and evidence_supports_meet(art).ok:
+                return True
+        return False
+
+    def _apply_fact_propagation(
+        self,
+        state: SessionState,
+        fact: Fact,
+        *,
+        prior_snapshot: Optional[dict[str, Any]] = None,
+        graph: Optional[DependencyGraph] = None,
+    ) -> list[str]:
+        """
+        §10.2 / F1 / F3: recompute re-review from a confirmed fact.
+
+        Marks dependents for re-review; accepted units transition to superseded.
+        Same code path for live assert_fact and replay (deterministic).
+        """
+        if not (fact.confirmed and not fact.assumed):
+            return []
+        graph = graph or getattr(self, "_graph", None) or DependencyGraph.from_seeds()
+        self._graph = graph
+        affected = graph.propagate_from_fact(fact.key, committed=True)
+        for uid in affected:
+            u = state.units.get(uid)
+            diffs = {
+                "before": u.model_dump(mode="json") if u else None,
+                "trigger_fact": fact.key,
+                "prior_fact": prior_snapshot,
+                "new_fact": fact.model_dump(mode="json"),
+            }
+            if uid not in state.needs_rereview:
+                state.needs_rereview.append(uid)
+            state.rereview_diffs[uid] = diffs
+            # F1: prior acceptance no longer stands
+            if u is not None and u.review_state == "accepted":
+                state.units[uid] = u.model_copy(update={"review_state": "superseded"})
+                diffs["review_transition"] = "accepted→superseded"
+                state.rereview_diffs[uid] = diffs
+        return affected
+
     def _replay_into(self, state: SessionState) -> None:
+        """
+        Rebuild state by replaying the event log.
+
+        F3: on each confirmed fact event, recompute propagation (graph over
+        confirmed facts) so re-review survives a crash between fact append and
+        the audit-only propagation_rereview event. rereview_cleared applied in
+        order. propagation_rereview is ignored on replay.
+        """
+        graph = DependencyGraph.from_seeds()
+        self._graph = graph
         for ev in self.eventlog.iter_events():
             p = ev.payload or {}
             et = p.get("event_type")
-            if et == "fact_asserted":
+            if et == "fact_asserted" or et == "fact_superseded":
                 fact = Fact.model_validate(p["fact"])
+                prior = state.facts.get(fact.key)
+                prior_snapshot = prior.model_dump(mode="json") if prior else None
                 state.facts_by_id[fact.fact_id] = fact
                 state.facts[fact.key] = fact
-            elif et == "fact_superseded":
-                fact = Fact.model_validate(p["fact"])
-                state.facts_by_id[fact.fact_id] = fact
-                state.facts[fact.key] = fact
+                # F3: recompute propagation; do not depend on propagation_rereview
+                self._apply_fact_propagation(
+                    state, fact, prior_snapshot=prior_snapshot, graph=graph
+                )
             elif et == "axis_set":
                 unit = UnitAxesState.model_validate(p["unit"])
                 state.units[unit.unit_id] = unit
@@ -544,23 +645,20 @@ class DispositionSession:
                 }
                 state.exports.append(meta)
             elif et == "propagation_rereview":
-                affected = list(p.get("affected_units") or [])
-                for u in affected:
-                    if u not in state.needs_rereview:
-                        state.needs_rereview.append(u)
-                if p.get("diffs"):
-                    state.rereview_diffs.update(p["diffs"])
+                # F3: audit-only — replay must not depend on this event
+                continue
             elif et == "rereview_cleared":
                 uid = p.get("unit_id")
                 if uid and uid in state.needs_rereview:
                     state.needs_rereview = [x for x in state.needs_rereview if x != uid]
                 if uid and uid in state.rereview_diffs:
                     del state.rereview_diffs[uid]
-            elif et == "review_decision":
-                # Axes review_state on unit when present
+            elif et in ("review_decision", "unit_attested"):
+                # F6/A7: restore review_state and accepted_with_tbd
                 uid = p.get("unit_id")
                 if uid and uid in state.units:
                     dec = p.get("decision")
+                    updates: dict[str, Any] = {}
                     if dec in (
                         "accepted",
                         "rejected",
@@ -568,9 +666,11 @@ class DispositionSession:
                         "in_review",
                         "proposed",
                     ):
-                        state.units[uid] = state.units[uid].model_copy(
-                            update={"review_state": dec}
-                        )
+                        updates["review_state"] = dec
+                    if "accepted_with_tbd" in p:
+                        updates["accepted_with_tbd"] = bool(p["accepted_with_tbd"])
+                    if updates:
+                        state.units[uid] = state.units[uid].model_copy(update=updates)
             # session_opened / pack_repinned: no state delta beyond header
 
     def assert_fact(
@@ -639,33 +739,24 @@ class DispositionSession:
             )
             self.state.facts[key] = fact
             self.state.facts_by_id[fact.fact_id] = fact
-            # §10.2: only confirmed (non-assumed) facts propagate
-            if fact.confirmed and not fact.assumed:
-                graph = getattr(self, "_graph", None) or DependencyGraph.from_seeds()
-                self._graph = graph
-                affected = graph.propagate_from_fact(key, committed=True)
-                diffs: dict[str, Any] = {}
-                for uid in affected:
-                    u = self.state.units.get(uid)
-                    diffs[uid] = {
-                        "before": u.model_dump(mode="json") if u else None,
-                        "trigger_fact": key,
-                        "prior_fact": prior_snapshot,
-                        "new_fact": fact.model_dump(mode="json"),
-                    }
-                    if uid not in self.state.needs_rereview:
-                        self.state.needs_rereview.append(uid)
-                    self.state.rereview_diffs[uid] = diffs[uid]
-                if affected:
-                    self.eventlog.append(
-                        actor=author,
-                        payload={
-                            "event_type": "propagation_rereview",
-                            "fact_key": key,
-                            "affected_units": affected,
-                            "diffs": diffs,
-                        },
-                    )
+            # §10.2 / F1 / F3: confirmed facts propagate via shared path;
+            # propagation_rereview is audit-only (replay recomputes from fact event)
+            affected = self._apply_fact_propagation(
+                self.state, fact, prior_snapshot=prior_snapshot
+            )
+            if affected:
+                diffs = {
+                    uid: self.state.rereview_diffs.get(uid, {}) for uid in affected
+                }
+                self.eventlog.append(
+                    actor=author,
+                    payload={
+                        "event_type": "propagation_rereview",
+                        "fact_key": key,
+                        "affected_units": affected,
+                        "diffs": diffs,
+                    },
+                )
         return fact
 
     def units_needing_rereview(self) -> list[str]:
@@ -740,12 +831,15 @@ class DispositionSession:
         # C1: elections refuse decision-engine blocks
         if election and enforce_decision:
             graph = getattr(self, "_graph", None) or DependencyGraph.from_seeds()
-            has_ev = bool(unit.evidence_refs)
+            # F2: qualifying evidence when registry present; else bool(refs)+warn
+            has_ev = self.has_qualifying_meet_evidence(unit)
+            # F4: stripped-empty scope_citation is absent
+            has_scope = bool(unit.scope_citation)
             decision = evaluate_unit(
                 unit,
                 facts=self.state.facts,
                 graph=graph,
-                has_scope_rationale=bool(unit.scope_citation),
+                has_scope_rationale=has_scope,
                 has_evidence_for_meet=has_ev,
             )
             if label.value in decision.blocked:
@@ -753,7 +847,7 @@ class DispositionSession:
                     f"Election refused: export label {label.value!r} is blocked "
                     f"({decision.blocked[label.value]})"
                 )
-            # Also refuse if Meet/NA mapped but blocked even when checking intent
+            # Also refuse if Meet mapped but lacks qualifying evidence
             if (
                 label.value == "Meet"
                 and unit.applicability == "yes"
@@ -762,6 +856,10 @@ class DispositionSession:
                 raise SessionError(
                     "Election refused: Meet requires qualifying evidence (hard gate)"
                 )
+
+        # Re-open path: re-election on rejected/superseded returns to proposed
+        if election and unit.review_state in ("rejected", "superseded"):
+            unit = unit.model_copy(update={"review_state": "proposed"})
 
         et = "election" if election else "axis_set"
         with self._exclusive_lock():
@@ -773,22 +871,40 @@ class DispositionSession:
             self.state.units[unit_id] = unit
         return unit
 
-    def record_review_decision(
+    def attest_unit(
         self,
         unit_id: str,
         *,
-        decision: str,
-        reviewer: str,
+        actor_name: str,
         role: str,
-        comment: str = "",
+        decision: str,
         accepted_with_tbd: bool = False,
-    ) -> None:
-        """Append review decision to the hash-chained event log (C3)."""
+        comment: str = "",
+    ) -> UnitAxesState:
+        """
+        Single-operator attestation (F6). Role is recorded, not enforced.
+
+        decision: accepted | rejected | proposed (re-open only).
+        Transition legality enforced; accepted → superseded only via F1 propagation.
+        """
+        from oracle.disposition.review import LEGAL_ATTEST_TRANSITIONS
+
         if self.state is None:
             raise SessionError("Session not open")
         unit = self.state.units.get(unit_id)
         if unit is None:
             raise SessionError(f"Unknown unit {unit_id}")
+        if decision not in ("accepted", "rejected", "proposed"):
+            raise SessionError(
+                f"attest decision must be accepted|rejected|proposed, got {decision!r}"
+            )
+        current = unit.review_state
+        if (current, decision) not in LEGAL_ATTEST_TRANSITIONS:
+            raise SessionError(
+                f"illegal review transition {current!r} → {decision!r} "
+                f"(accepted → superseded only via fact propagation; "
+                f"never accepted → proposed directly)"
+            )
         # Review coherence: accepted requires non-TBD or accepted_with_tbd
         if decision == "accepted":
             has_tbd = (
@@ -804,21 +920,54 @@ class DispositionSession:
                 )
         with self._exclusive_lock():
             self.eventlog.append(
-                actor=reviewer,
+                actor=actor_name,
                 unit_id=unit_id,
                 payload={
-                    "event_type": "review_decision",
+                    "event_type": "unit_attested",
                     "unit_id": unit_id,
                     "decision": decision,
                     "role": role,
                     "comment": comment,
-                    "accepted_with_tbd": accepted_with_tbd,
+                    "accepted_with_tbd": bool(accepted_with_tbd),
+                    "actor_name": actor_name,
                 },
             )
-            updates: dict[str, Any] = {"review_state": decision}
-            if accepted_with_tbd:
+            updates: dict[str, Any] = {
+                "review_state": decision,
+                "accepted_with_tbd": bool(
+                    accepted_with_tbd or (decision == "accepted" and unit.accepted_with_tbd)
+                )
+                if decision == "accepted"
+                else unit.accepted_with_tbd,
+            }
+            if decision == "accepted" and accepted_with_tbd:
                 updates["accepted_with_tbd"] = True
-            self.state.units[unit_id] = unit.model_copy(update=updates)
+            elif decision == "proposed":
+                # re-open clears prior TBD election for a clean re-attestation
+                updates["accepted_with_tbd"] = False
+            new_unit = unit.model_copy(update=updates)
+            self.state.units[unit_id] = new_unit
+            return new_unit
+
+    def record_review_decision(
+        self,
+        unit_id: str,
+        *,
+        decision: str,
+        reviewer: str,
+        role: str,
+        comment: str = "",
+        accepted_with_tbd: bool = False,
+    ) -> UnitAxesState:
+        """Deprecated alias for attest_unit (compat for older callers)."""
+        return self.attest_unit(
+            unit_id,
+            actor_name=reviewer,
+            role=role,
+            decision=decision,
+            accepted_with_tbd=accepted_with_tbd,
+            comment=comment,
+        )
 
     def record_paired_answer(self, question_key: str, answer: str, actor_name: str) -> None:
         if self.state is None:

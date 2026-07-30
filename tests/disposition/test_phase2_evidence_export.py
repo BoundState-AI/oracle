@@ -49,9 +49,12 @@ def test_phase2_evidence_register_and_gate(tmp_path):
 
 
 def test_phase2_xlsx_and_export_all(tmp_path):
-    result = run_golden_session(tmp_path / "g", export_dir=None)
+    run_golden_session(tmp_path / "g", export_dir=None)
     s = DispositionSession(tmp_path / "g")
     s.resume(actor_name="golden-operator", repin=True)
+    # F1: Class A at end of golden marks dependents for re-review — clear before export
+    for uid in list(s.units_needing_rereview()):
+        s.clear_rereview(uid, actor_name="golden-operator")
     recs, _ = load_rdw_default_packs(repin=True)
     records = {r.requirement_id: r for r in recs}
     xlsx = export_xlsx(s, records, tmp_path / "m.xlsx")
@@ -64,3 +67,5 @@ def test_phase2_xlsx_and_export_all(tmp_path):
     assert paths["csv"].is_file()
     assert paths["docx"].is_file()
     assert paths["xlsx"].is_file()
+    # F2: no registry → skip stamp present
+    assert "phantom-ref check: skipped" in paths["csv"].read_text(encoding="utf-8")

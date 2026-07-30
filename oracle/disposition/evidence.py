@@ -211,6 +211,14 @@ class EvidenceStore:
     def known_doc_ids(self) -> set[str]:
         return {a.doc_id for a in self.list_all() if not a.withdrawn}
 
+    def known_doc_revisions(self) -> set[tuple[str, str]]:
+        """F2: known set for phantom-ref checks — (doc_id, revision) pairs."""
+        return {
+            (a.doc_id, a.revision)
+            for a in self.list_all()
+            if not a.withdrawn
+        }
+
     def for_unit(self, unit_id: str) -> list[EvidenceArtifact]:
         return [a for a in self.list_all() if unit_id in a.unit_ids and not a.withdrawn]
 

@@ -3,7 +3,9 @@
 Module: oracle.disposition.audit
 Purpose: Phase 3 FR-017 audit view — lineage from export row to source/facts/history.
 
-Read-only navigation structure over session + event log + evidence + review.
+Read-only navigation structure over session + event log + evidence + attestations.
+Review decisions are read from the hash-chained event log (unit_attested /
+review_decision); review_package.json is no longer used (F6).
 
 Safety Critical: advisory-only per D-1
 __safety_critical__: bool = False
@@ -20,11 +22,12 @@ from typing import Any, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 from oracle.disposition.evidence import EvidenceStore
-from oracle.disposition.review import ReviewPackage
 from oracle.disposition.rulepack import RequirementRecord
 from oracle.disposition.session import DispositionSession
 
 LOGGER = logging.getLogger("oracle.disposition.audit")
+
+_ATTEST_EVENT_TYPES = frozenset({"unit_attested", "review_decision"})
 
 
 class AuditLineage(BaseModel):
@@ -46,13 +49,39 @@ class AuditLineage(BaseModel):
     open_actions: list[str] = Field(default_factory=list)
 
 
+def _attestation_events_for_unit(
+    session: DispositionSession, unit_id: str
+) -> list[dict[str, Any]]:
+    """Collect attestation events for a unit from the hash-chained log."""
+    decisions: list[dict[str, Any]] = []
+    for ev in session.eventlog.iter_events():
+        p = ev.payload or {}
+        if p.get("event_type") not in _ATTEST_EVENT_TYPES:
+            continue
+        if p.get("unit_id") != unit_id and ev.unit_id != unit_id:
+            continue
+        decisions.append(
+            {
+                "event_id": ev.event_id,
+                "timestamp": ev.timestamp,
+                "actor": ev.actor,
+                "unit_id": p.get("unit_id") or unit_id,
+                "decision": p.get("decision"),
+                "role": p.get("role"),
+                "comment": p.get("comment", ""),
+                "accepted_with_tbd": p.get("accepted_with_tbd", False),
+                "hash": ev.hash,
+            }
+        )
+    return decisions
+
+
 def build_lineage(
     unit_id: str,
     session: DispositionSession,
     records: dict[str, RequirementRecord],
     *,
     evidence_store: Optional[EvidenceStore] = None,
-    review_package: Optional[ReviewPackage] = None,
 ) -> AuditLineage:
     if session.state is None:
         raise ValueError("Session not open")
@@ -102,13 +131,7 @@ def build_lineage(
                 }
             )
 
-    decisions = []
-    if review_package is not None:
-        decisions = [
-            d.model_dump(mode="json")
-            for d in review_package.decisions
-            if d.unit_id == unit_id
-        ]
+    decisions = _attestation_events_for_unit(session, unit_id)
 
     return AuditLineage(
         unit_id=unit_id,
@@ -134,5 +157,7 @@ def audit_package(
 ) -> list[AuditLineage]:
     if session.state is None:
         raise ValueError("Session not open")
+    # Drop removed review_package kwarg if callers still pass it
+    kwargs.pop("review_package", None)
     ids = unit_ids or sorted(session.state.units.keys())
     return [build_lineage(u, session, records, **kwargs) for u in ids]

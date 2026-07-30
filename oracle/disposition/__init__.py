@@ -65,7 +65,11 @@ from oracle.disposition.graph import DependencyGraph  # noqa: F401
 from oracle.disposition.packs import load_rdw_default_packs, DraftPackWorkspace  # noqa: F401
 from oracle.disposition.decision import evaluate_unit  # noqa: F401
 from oracle.disposition.evidence import EvidenceStore  # noqa: F401
-from oracle.disposition.review import ReviewPackage, create_review_package  # noqa: F401
+from oracle.disposition.review import (  # noqa: F401
+    Role as AttestationRole,
+    ReviewState,
+    LEGAL_ATTEST_TRANSITIONS,
+)
 from oracle.disposition.audit import build_lineage  # noqa: F401
 from oracle.disposition.integrations import LocalEvidenceConnector  # noqa: F401
 from oracle.disposition.golden import run_golden_session  # noqa: F401

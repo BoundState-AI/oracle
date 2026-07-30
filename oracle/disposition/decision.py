@@ -68,8 +68,14 @@ def evaluate_unit(
         class_fact.assumed and not class_fact.confirmed
     )
 
+    # F4: stripped-empty scope_citation is absent
+    scope_cite = getattr(unit, "scope_citation", None)
+    if isinstance(scope_cite, str) and not scope_cite.strip():
+        scope_cite = None
+    effective_scope = has_scope_rationale or bool(scope_cite)
+
     # N/A requires positive rationale
-    if unit.applicability == "no" and not has_scope_rationale and not unit.comment:
+    if unit.applicability == "no" and not effective_scope and not unit.comment:
         # still allow N/A if axes already No — comment should carry rationale
         notes.append("N/A should cite scope/trigger rationale in comment or scope_citation")
 
@@ -119,7 +125,7 @@ def evaluate_unit(
 
     # External responsibility never forces N/A
     if unit.organization_responsibility == "external":
-        if unit.applicability == "no" and not has_scope_rationale:
+        if unit.applicability == "no" and not effective_scope:
             notes.append(
                 "External responsibility alone is not N/A; store states separately"
             )
@@ -150,11 +156,10 @@ def evaluate_unit(
             blocked[ExportLabel.MEET.value] = "no qualifying evidence for Meet"
             notes.append("Evidence gate HARD: Meet blocked without evidence")
 
-    # N/A without scope rationale is blocked (C1 UNSUPPORTED_NA)
+    # N/A without scope rationale is blocked (C1 UNSUPPORTED_NA / F4)
     if unit.applicability == "no":
-        rationale = has_scope_rationale or bool(
-            getattr(unit, "scope_citation", None)
-            or (unit.comment and "scope" in (unit.comment or "").lower())
+        rationale = effective_scope or bool(
+            unit.comment and "scope" in (unit.comment or "").lower()
         )
         if not rationale:
             blocked[ExportLabel.NA.value] = (

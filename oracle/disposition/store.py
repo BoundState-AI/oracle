@@ -180,13 +180,31 @@ class DispositionStore:
 
     @staticmethod
     def _pid_alive(pid: int) -> bool:
+        if os.name == "nt":
+            # WHY not os.kill(pid, 0) here: on Windows signal 0 is
+            # CTRL_C_EVENT, so os.kill(pid, 0) SENDS Ctrl+C to the console
+            # process group instead of probing liveness — it killed pytest
+            # runs and the operator's terminal whenever the probed pid was
+            # alive on the same console. OpenProcess is a true probe.
+            import ctypes
+
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            STILL_ACTIVE = 259
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid)
+            )
+            if not handle:
+                return False
+            try:
+                exit_code = ctypes.c_ulong()
+                if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                    return exit_code.value == STILL_ACTIVE
+                return True
+            finally:
+                kernel32.CloseHandle(handle)
         try:
-            if os.name == "nt":
-                # On Windows, os.kill(pid, 0) raises if not alive for some cases; use tasklist heuristic is heavy.
-                # Simple: try signal-less kill
-                os.kill(pid, 0)
-            else:
-                os.kill(pid, 0)
+            os.kill(pid, 0)
             return True
         except (OSError, ProcessLookupError):
             return False

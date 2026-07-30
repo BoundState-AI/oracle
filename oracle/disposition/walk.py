@@ -23,7 +23,7 @@ from typing import Callable, Optional, TextIO
 
 from oracle.disposition.codes import TBDReason
 from oracle.disposition.comments import assemble_comment, prohibited_language_hits
-from oracle.disposition.export import export_csv, export_docx, stamp_meta
+from oracle.disposition.export import ExportError, export_all, stamp_meta
 from oracle.disposition.packs import load_rdw_default_packs
 from oracle.disposition.rulepack import (
     RequirementRecord,
@@ -482,35 +482,49 @@ def run_walk(
         while True:
             qkey, prompt = _highest_value_question(rec, session)
             if qkey == "done":
-                # Comment proposal
+                # F5: comment accept/edit lives inside retry handling — §13.2
+                # refusal re-prompts; unit stays open; walk continues.
                 assert session.state is not None
                 unit = session.state.units[rec.requirement_id]
-                comment = assemble_comment(
+                proposed = assemble_comment(
                     unit,
                     org_name="the evaluated organization",
                     facts=session.state.facts,
                 )
-                hits = prohibited_language_hits(comment)
-                io.write(f"Proposed comment (§13.1): {comment}")
+                hits = prohibited_language_hits(proposed)
+                io.write(f"Proposed comment (§13.1): {proposed}")
                 if hits:
                     io.write(f"  (note: prohibited-language hits after soften: {hits})")
-                edit = io.ask("Accept comment? [y/edit text/skip]: ")
-                if edit.lower() in ("y", "yes", ""):
-                    session.set_axes(
-                        rec.requirement_id,
-                        actor_name=actor_name,
-                        comment=comment,
-                        comment_status="accepted",
-                        election=False,
-                    )
-                elif edit.lower() != "skip":
-                    session.set_axes(
-                        rec.requirement_id,
-                        actor_name=actor_name,
-                        comment=edit,
-                        comment_status="edited",
-                        election=False,
-                    )
+                while True:
+                    edit = io.ask("Accept comment? [y/edit text/skip]: ")
+                    try:
+                        if edit.lower() in ("y", "yes", ""):
+                            session.set_axes(
+                                rec.requirement_id,
+                                actor_name=actor_name,
+                                comment=proposed,
+                                comment_status="accepted",
+                                election=False,
+                            )
+                            break
+                        if edit.lower() == "skip":
+                            break
+                        # free-text edit — §13.2 may refuse; re-prompt
+                        session.set_axes(
+                            rec.requirement_id,
+                            actor_name=actor_name,
+                            comment=edit,
+                            comment_status="edited",
+                            election=False,
+                        )
+                        break
+                    except SessionError as e:
+                        msg = str(e)
+                        if "13.2" in msg or "prohibited" in msg.lower():
+                            io.write(f"Comment refused ({msg}). Please edit again.")
+                            continue
+                        io.write(f"Could not store comment ({e}). Please try again.")
+                        continue
                 break
 
             ans = io.ask(prompt)
@@ -538,28 +552,27 @@ def run_walk(
                 break
             try:
                 _apply_answer(session, rec, qkey, ans, actor_name)
-            except (SessionError, ValueError, Exception) as e:
-                # M2: re-prompt on invalid free-text instead of crash
+            except (SessionError, ValueError) as e:
+                # M2/F5: re-prompt on invalid free-text; no bare Exception
                 io.write(f"Could not apply answer ({e}). Please try again.")
                 continue
-
         done += 1
 
     _progress_screen(session, io)
 
     if export_dir:
-        ed = Path(export_dir)
-        ed.mkdir(parents=True, exist_ok=True)
-        csv_path = ed / "supplier_matrix.csv"
-        docx_path = ed / "supplier_matrix.docx"
-        export_csv(session, records, csv_path)
+        # F2: route through export_all so the evidence registry is resolved
+        # and a missing registry is stamped into Meta — never a silent skip.
         try:
-            export_docx(session, records, docx_path)
-        except Exception as e:
-            io.write(f"DOCX export skipped: {e}")
+            paths = export_all(session, records, export_dir)
+        except ExportError as e:
+            io.write(f"Export refused: {e}")
+            return session
         meta = stamp_meta(session)
-        session.record_export({**meta, "csv": str(csv_path)}, actor_name)
-        io.write(f"Exported CSV to {csv_path}")
+        session.record_export(
+            {**meta, "paths": {k: str(v) for k, v in paths.items()}}, actor_name
+        )
+        io.write(f"Exported matrix suite to {export_dir}")
 
     return session
 
