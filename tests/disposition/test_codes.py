@@ -34,12 +34,14 @@ def test_open_subreason_enum_is_closed():
     expected = {
         "evidence_absent",
         "scope_decision_not_made",
+        "customer_input_missing",
         "authority_unidentified",
         "approval_not_exercised",
         "referenced_artifact_missing",
         "referenced_standard_unavailable",
         "reference_semantics_unresolved",
         "dependency_eliminated",
+        "classification_unresolved",
     }
     assert {r.value for r in OPENSubReason} == expected
     assert OPEN_SUBREASONS == expected

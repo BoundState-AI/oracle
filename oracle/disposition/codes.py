@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 Module: oracle.disposition.codes
-Purpose: Closed enumerations for disposition codes and OPEN sub-reasons (§2, §2.3).
+Purpose: Closed enumerations for disposition axes, export labels, codes, TBD reasons.
 
-All values are known at construction time. Unknown codes or sub-reasons are
-impossible by design — they are rejected before any downstream logic runs.
+Axes are the system of record (RDW §7). The five engine codes (CW/MI/EX/NA/OPEN)
+and customer export labels are derived views (RDW §7.1).
 
 Safety Critical: advisory-only per spec D-1
 
@@ -26,8 +26,7 @@ from typing import Literal
 LOGGER = logging.getLogger("oracle.disposition.codes")
 
 
-# Single source of truth for workflow state values (consolidated from prior split definitions).
-# Used by models.py, state.py, and tests. Defined here to keep the closed vocabulary in one place.
+# Single source of truth for workflow state values (Review axis = engine §7.1).
 WorkflowStateValue = Literal[
     "proposed",
     "human_confirmed",
@@ -36,15 +35,43 @@ WorkflowStateValue = Literal[
 ]
 
 
+# ---------------------------------------------------------------------------
+# Six independent axes (RDW §7)
+# ---------------------------------------------------------------------------
+
+Applicability = Literal["yes", "no", "tbd"]
+ObligatedActor = Literal["program", "ceo", "producer", "supplier", "subtier", "other"]
+OrgResponsibility = Literal["owner", "support", "external", "tbd"]
+# not_reached: only legal when applicability is No (migration "—" cells)
+ImplementationState = Literal[
+    "meets_as_written",
+    "alternate_proposed",
+    "partial",
+    "not_met",
+    "tbd",
+    "not_reached",
+]
+ApprovalState = Literal[
+    "not_required",
+    "required",
+    "draft",
+    "submitted",
+    "approved",
+    "rejected",
+    "tbd",
+]
+
+
 class DispositionCode(str, Enum):
     """
-    The five canonical disposition codes per spec §2.
+    The five canonical disposition codes — derived export view (RDW §7.1).
 
-    CW  — Complies as written
-    MI  — Intent met by alternative means (exception requiring acceptance)
-    EX  — Exception requested
-    NA  — Not applicable (must cite scope declaration)
-    OPEN — Evidence or decision incomplete (never releasable)
+    CW  — Complies as written ≈ Meet
+    MI  — Intent met by alternative means ≈ Meets Intent
+    EX  — Exception requested ≈ Exception
+    NA  — Not applicable ≈ N/A
+    OPEN — Evidence or decision incomplete ≈ TBD (Open/Not Met also collapses here
+           in the five-code view; the six-label view preserves the distinction)
     """
 
     CW = "CW"
@@ -57,30 +84,67 @@ class DispositionCode(str, Enum):
         return self.value
 
 
+class ExportLabel(str, Enum):
+    """Customer-facing export labels (RDW §7.1). Never the system of record."""
+
+    MEET = "Meet"
+    MEETS_INTENT = "Meets Intent"
+    NA = "N/A"
+    TBD = "TBD"
+    OPEN_NOT_MET = "Open/Not Met"
+    EXCEPTION = "Exception"
+
+    def __str__(self) -> str:  # pragma: no cover - trivial
+        return self.value
+
+
 class OPENSubReason(str, Enum):
     """
-    Closed vocabulary for OPEN sub-reasons (§2.3).
+    Closed vocabulary for OPEN/TBD reasons (engine §2.3 + RDW §7).
 
-    Every OPEN unit carries exactly one value from this set.
-    Extending the vocabulary is a spec change, not an implementation edit.
+    Every TBD on any axis carries exactly one value from this set.
+    `customer_input_missing` is the RDW alias of `scope_decision_not_made`
+    (both remain valid; they are distinct enum members that normalize equal
+    for alias comparison via is_customer_input_reason()).
+    `classification_unresolved` is new per RDW §7.
     """
 
     EVIDENCE_ABSENT = "evidence_absent"
     SCOPE_DECISION_NOT_MADE = "scope_decision_not_made"
+    CUSTOMER_INPUT_MISSING = "customer_input_missing"
     AUTHORITY_UNIDENTIFIED = "authority_unidentified"
     APPROVAL_NOT_EXERCISED = "approval_not_exercised"
     REFERENCED_ARTIFACT_MISSING = "referenced_artifact_missing"
     REFERENCED_STANDARD_UNAVAILABLE = "referenced_standard_unavailable"
     REFERENCE_SEMANTICS_UNRESOLVED = "reference_semantics_unresolved"
     DEPENDENCY_ELIMINATED = "dependency_eliminated"
+    CLASSIFICATION_UNRESOLVED = "classification_unresolved"
 
     def __str__(self) -> str:  # pragma: no cover - trivial
         return self.value
 
 
+# Alias used by axis TBD fields (same closed vocabulary)
+TBDReason = OPENSubReason
+
+
+def is_customer_input_reason(reason: OPENSubReason | str | None) -> bool:
+    """True for customer_input_missing or its alias scope_decision_not_made."""
+    if reason is None:
+        return False
+    val = reason.value if isinstance(reason, OPENSubReason) else str(reason)
+    return val in {
+        OPENSubReason.CUSTOMER_INPUT_MISSING.value,
+        OPENSubReason.SCOPE_DECISION_NOT_MADE.value,
+    }
+
+
 # Convenience sets for fast membership checks in validation
 DISPOSITION_CODES: frozenset[str] = frozenset(c.value for c in DispositionCode)
 OPEN_SUBREASONS: frozenset[str] = frozenset(r.value for r in OPENSubReason)
+EXPORT_LABELS: frozenset[str] = frozenset(lab.value for lab in ExportLabel)
+# Composition keys for roll-ups (includes ONM for Open/Not Met)
+COMPOSITION_KEYS: frozenset[str] = frozenset({"CW", "MI", "EX", "NA", "OPEN", "ONM"})
 
 
 class ProposalBand(str, Enum):

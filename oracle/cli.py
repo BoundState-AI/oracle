@@ -3560,6 +3560,13 @@ def cmd_show_pack(args: argparse.Namespace) -> None:
         print(_render_pack_for_oracle(pack_data, pack_id))
 
 
+def _cmd_disposition_walk(args: argparse.Namespace) -> None:
+    """Minimal wiring: RDW disposition walk (oracle/disposition/walk.py)."""
+    from oracle.disposition.walk import cmd_disposition_walk
+
+    cmd_disposition_walk(args)
+
+
 def cmd_promote_pack(args: argparse.Namespace) -> None:
     """Handle 'promote-pack' subcommand."""
     pack_dir = _resolve_pack_dir(getattr(args, 'pack_dir', None))
@@ -3690,6 +3697,53 @@ Examples:
     p_promote.add_argument("--yes", action="store_true",
                            help="Auto-confirm (required with --non-interactive)")
     p_promote.set_defaults(func=cmd_promote_pack)
+
+    # --- disposition (RDW MVP: walk interview) ---
+    p_disp = subparsers.add_parser(
+        "disposition",
+        help="Requirements Disposition Workbench (RDW) commands",
+    )
+
+    def _disposition_help(_args: argparse.Namespace) -> None:
+        p_disp.print_help()
+
+    p_disp.set_defaults(func=_disposition_help)
+    disp_sub = p_disp.add_subparsers(dest="disposition_command")
+    p_walk = disp_sub.add_parser(
+        "walk",
+        help="Interactive axis-based disposition interview (TTY required)",
+    )
+    p_walk.add_argument(
+        "--session-dir",
+        type=str,
+        default="oracle_sessions/disposition-default",
+        help="Session root (append-only event log)",
+    )
+    p_walk.add_argument("--actor", type=str, default="operator", help="Human actor name")
+    p_walk.add_argument(
+        "--units",
+        type=str,
+        default=None,
+        help="Comma-separated unit ids to walk (e.g. AMR-1,AMR-14,AMR-17)",
+    )
+    p_walk.add_argument(
+        "--export-dir",
+        type=str,
+        default=None,
+        help="If set, write CSV/DOCX exports after the walk",
+    )
+    p_walk.add_argument(
+        "--repin",
+        action="store_true",
+        help="Allow re-pinning when builtin pack content hash changed",
+    )
+    p_walk.add_argument(
+        "--max-units",
+        type=int,
+        default=None,
+        help="Optional cap on units walked (for smoke runs)",
+    )
+    p_walk.set_defaults(func=_cmd_disposition_walk)
 
     args = parser.parse_args()
 

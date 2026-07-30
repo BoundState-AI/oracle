@@ -39,13 +39,17 @@ def test_every_nonempty_code_combination_resolves_to_exactly_one_badge():
 
 
 def test_badge_total_order_precedence():
-    """Direct assertions of the §1.1 total order rules."""
+    """Direct assertions of the §1.1 / S1R total order rules."""
     # Any OPEN wins
     assert compose_badge([DispositionCode.OPEN, DispositionCode.CW]) == Badge.OPEN
     assert compose_badge(["OPEN", "NA"]) == Badge.OPEN
 
     # Else any EX wins
     assert compose_badge([DispositionCode.EX, DispositionCode.MI, DispositionCode.CW]) == Badge.EX
+
+    # Else Open/Not Met (ONM) between EX and MI
+    assert compose_badge(["ONM", "MI", "CW"]) == Badge.ONM
+    assert compose_badge(["EX", "ONM"]) == Badge.EX
 
     # Else any MI wins
     assert compose_badge([DispositionCode.MI, DispositionCode.CW]) == Badge.MI

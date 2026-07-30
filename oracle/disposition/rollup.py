@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
 Module: oracle.disposition.rollup
-Purpose: Parent roll-up composition vectors and badge derivation per §1.1.
+Purpose: Parent roll-up composition vectors and badge derivation per §1.1 + RDW S1R.
 
 A parent requirement with child units is a non-dispositional roll-up row.
-It carries a composition vector (counts of children per code) and derives
-a single render badge via a total order. Parents are never disposition
-targets and are excluded from all counts.
+It carries a composition vector (counts of children per export-label key)
+and derives a single render badge via a total order. Parents are never
+disposition targets and are excluded from all counts.
 
-Badge precedence (highest first):
-  OPEN > EX > MI > MIXED > CW > NA
+Badge precedence (highest first) — Open/Not Met between EX and MI:
+  OPEN > EX > ONM > MI > MIXED > CW > NA
 
-Every child-code combination resolves to exactly one badge.
+Every child-label combination resolves to exactly one badge.
 
 Safety Critical: advisory-only per spec D-1
 
@@ -30,7 +30,8 @@ import logging
 from enum import Enum
 from typing import Iterable
 
-from oracle.disposition.codes import DISPOSITION_CODES, DispositionCode
+from oracle.disposition.codes import COMPOSITION_KEYS, DispositionCode, ExportLabel
+from oracle.disposition.export_map import export_label_composition_key
 
 LOGGER = logging.getLogger("oracle.disposition.rollup")
 
@@ -45,6 +46,7 @@ class Badge(str, Enum):
 
     OPEN = "OPEN"
     EX = "EX"
+    ONM = "ONM"  # Open/Not Met
     MI = "MI"
     MIXED = "MIXED"
     CW = "CW"
@@ -58,99 +60,97 @@ class Badge(str, Enum):
 _BADGE_PRECEDENCE: list[Badge] = [
     Badge.OPEN,
     Badge.EX,
+    Badge.ONM,
     Badge.MI,
     Badge.MIXED,
     Badge.CW,
     Badge.NA,
 ]
 
-# Map code -> badge when that code alone determines the result
-_CODE_TO_BADGE: dict[str, Badge] = {
-    DispositionCode.OPEN.value: Badge.OPEN,
-    DispositionCode.EX.value: Badge.EX,
-    DispositionCode.MI.value: Badge.MI,
-    DispositionCode.CW.value: Badge.CW,
-    DispositionCode.NA.value: Badge.NA,
-}
+
+def _normalize_key(raw: str | DispositionCode | ExportLabel | Badge) -> str:
+    if isinstance(raw, DispositionCode):
+        return raw.value
+    if isinstance(raw, ExportLabel):
+        return export_label_composition_key(raw)
+    if isinstance(raw, Badge):
+        return raw.value
+    key = str(raw)
+    # Accept full customer labels
+    try:
+        lab = ExportLabel(key)
+        return export_label_composition_key(lab)
+    except ValueError:
+        pass
+    if key == "Open/Not Met" or key == "ONM":
+        return "ONM"
+    return key
 
 
 def rollup_badge(composition: dict[str, int]) -> Badge:
     """
     Derive the single render badge for a parent from its composition vector.
 
-    composition: mapping of code value (CW|MI|EX|NA|OPEN) to child count.
-    Returns exactly one Badge per the §1.1 total order.
+    composition: mapping of composition key (CW|MI|EX|NA|OPEN|ONM) to child count.
+    Returns exactly one Badge per the S1R total order.
 
-    A parent with zero children (empty or all-zero composition) resolves to NA
-    (vacuously no applicable children). This is an edge case; normal usage
-    ensures parents have at least one child.
-
-    Medium #3: defensively rejects unknown keys and negative counts so that
-    a malformed vector (e.g., unknown code with negative count) cannot derive
-    a false CW (or any other) badge.
+    A parent with zero children (empty or all-zero composition) resolves to NA.
     """
     if composition is None:
         composition = {}
 
-    # Validate keys and counts (Medium #3)
     for k, v in composition.items():
-        if k not in DISPOSITION_CODES:
+        nk = _normalize_key(k)
+        if nk not in COMPOSITION_KEYS:
             raise ValueError(
                 f"rollup_badge received unknown code key: {k!r}; "
-                f"allowed: {sorted(DISPOSITION_CODES)}"
+                f"allowed: {sorted(COMPOSITION_KEYS)}"
             )
-        # bool is subclass of int; require exact int (not bool, not subclass)
         if type(v) is not int or v < 0:
             raise ValueError(
                 f"rollup_badge count for {k!r} must be a non-negative int, got {v!r}"
             )
 
-    total_children = sum(composition.values()) if composition else 0
+    def _count(key: str) -> int:
+        total = 0
+        for k, v in (composition or {}).items():
+            if _normalize_key(k) == key:
+                total += v
+        return total
 
-    # 1. Any OPEN child → OPEN
-    if composition and composition.get(DispositionCode.OPEN.value, 0) > 0:
+    if _count("OPEN") > 0:
         return Badge.OPEN
-
-    # 2. Any EX child → EX
-    if composition and composition.get(DispositionCode.EX.value, 0) > 0:
+    if _count("EX") > 0:
         return Badge.EX
-
-    # 3. Any MI child → MI
-    if composition and composition.get(DispositionCode.MI.value, 0) > 0:
+    if _count("ONM") > 0:
+        return Badge.ONM
+    if _count("MI") > 0:
         return Badge.MI
 
-    cw = (composition or {}).get(DispositionCode.CW.value, 0)
-    na = (composition or {}).get(DispositionCode.NA.value, 0)
+    cw = _count("CW")
+    na = _count("NA")
 
-    # 4. Mix of CW and NA → MIXED
     if cw > 0 and na > 0:
         return Badge.MIXED
-
-    # 5. All CW → CW
     if cw > 0 and na == 0:
         return Badge.CW
-
-    # 6. All NA → NA
     if na > 0 and cw == 0:
         return Badge.NA
 
-    # Terminal return for vacuous (zero-total) and any other undecided case.
-    # This is the single fallback and is reached for {} / all-zero compositions.
     return Badge.NA
 
 
-def compose_badge(child_codes: Iterable[str | DispositionCode]) -> Badge:
+def compose_badge(
+    child_codes: Iterable[str | DispositionCode | ExportLabel],
+) -> Badge:
     """
-    Convenience: given an iterable of child codes, build a composition and
-    return the roll-up badge.
-
-    This is the function the truth-table test will call exhaustively.
+    Convenience: given an iterable of child codes/labels, build a composition
+    and return the roll-up badge.
     """
     comp: dict[str, int] = {}
     for raw in child_codes:
-        code = raw.value if isinstance(raw, DispositionCode) else str(raw)
-        if code not in DISPOSITION_CODES:
-            # Accept only valid codes; unknown should have been rejected upstream
-            raise ValueError(f"Unknown child code in roll-up: {code}")
-        comp[code] = comp.get(code, 0) + 1
+        key = _normalize_key(raw)
+        if key not in COMPOSITION_KEYS:
+            raise ValueError(f"Unknown child code in roll-up: {key}")
+        comp[key] = comp.get(key, 0) + 1
     return rollup_badge(comp)

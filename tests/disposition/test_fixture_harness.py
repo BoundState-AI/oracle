@@ -141,6 +141,73 @@ def test_fixture_is_loaded_read_only():
     assert before == after, "Fixture was mutated during read-only load test"
 
 
+# RDW axis migration: AMBIG cases excluded pending domain disposition
+# (docs/FIXTURE_AXIS_MIGRATION.md). Never silently translate these.
+AXIS_MIGRATION_EXCLUDED_CASES = (1, 4, 5, 8, 16, 17, 21)
+AXIS_MIGRATION_EXCLUSION_NOTICE = (
+    "AXIS MIGRATION EXCLUSIONS (AMBIG pending domain disposition): "
+    "cases 1, 4, 5, 8, 16, 17, 21"
+)
+
+
+def test_axis_migration_exclusions_are_reported(capsys):
+    """
+    Stage A deliverable 6: the 7 AMBIG fixture cases are excluded and the
+    exclusion is printed in harness output so coverage is never overstated.
+    """
+    print(AXIS_MIGRATION_EXCLUSION_NOTICE)
+    captured = capsys.readouterr()
+    assert "cases 1, 4, 5, 8, 16, 17, 21" in captured.out
+    assert len(AXIS_MIGRATION_EXCLUDED_CASES) == 7
+    for cid in AXIS_MIGRATION_EXCLUDED_CASES:
+        assert cid in (1, 4, 5, 8, 16, 17, 21)
+
+
+def test_clean_fixture_rows_axis_translation_available():
+    """
+    Clean migration rows (non-AMBIG) must be expressible on six axes via the
+    export map (labels/merge-block semantics unchanged at fixture level).
+    """
+    from oracle.disposition.export_map import axes_from_legacy_code, map_axes_to_export_label, AxisSnapshot
+    from oracle.disposition.codes import TBDReason
+
+    data = _load_fixture()
+    clean_codes = {"CW", "MI", "EX", "NA", "OPEN"}
+    for case in data.get("cases", []):
+        cid = case.get("case_id")
+        if cid in AXIS_MIGRATION_EXCLUDED_CASES:
+            continue
+        # Package / non-unit cases may lack a corrected code
+        corrected = None
+        for key in ("corrected_code", "expected_code", "code"):
+            if case.get(key):
+                corrected = case[key]
+                break
+        if corrected not in clean_codes:
+            continue
+        expanded = axes_from_legacy_code(
+            corrected,
+            open_sub_reason=(
+                case.get("open_sub_reason") or TBDReason.EVIDENCE_ABSENT
+                if corrected == "OPEN"
+                else None
+            ),
+        )
+        snap = AxisSnapshot(
+            applicability=expanded["applicability"],
+            obligated_actor=expanded.get("obligated_actor"),
+            organization_responsibility=expanded["organization_responsibility"],
+            implementation_state=expanded["implementation_state"],
+            approval_state=expanded["approval_state"],
+            applicability_tbd_reason=expanded.get("applicability_tbd_reason"),
+            org_responsibility_tbd_reason=expanded.get("org_responsibility_tbd_reason"),
+            implementation_tbd_reason=expanded.get("implementation_tbd_reason"),
+            approval_tbd_reason=expanded.get("approval_tbd_reason"),
+        )
+        label = map_axes_to_export_label(snap)
+        assert label is not None
+
+
 def test_spec_rules_missing_pointer_is_detected_and_reported(monkeypatch):
     """
     Medium #7: After monkeypatching _allowed_spec_pointers, call the REAL

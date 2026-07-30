@@ -22,7 +22,12 @@ from __future__ import annotations
 __version__ = "0.1.0"
 
 # Re-exports for convenience at the slice boundary
-from oracle.disposition.codes import DispositionCode, OPENSubReason  # noqa: F401
+from oracle.disposition.codes import (  # noqa: F401
+    DispositionCode,
+    ExportLabel,
+    OPENSubReason,
+    TBDReason,
+)
 from oracle.disposition.models import (  # noqa: F401
     AcceptanceRecord,
     CapabilityModelEntry,
@@ -48,6 +53,11 @@ from oracle.disposition.state import (  # noqa: F401
     WorkflowState,
     apply_transition,
     is_machine_actor,
+)
+from oracle.disposition.export_map import (  # noqa: F401
+    AxisSnapshot,
+    map_axes_to_export_label,
+    export_label_to_code,
 )
 
 # S1a deliverables (persistence, audit, release authority)

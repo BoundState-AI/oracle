@@ -28,15 +28,38 @@ from datetime import date, datetime
 from types import MappingProxyType
 from typing import Annotated, Any, Literal, Mapping, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    computed_field,
+    field_validator,
+    model_validator,
+)
 
 from oracle.disposition.codes import (
+    COMPOSITION_KEYS,
     DISPOSITION_CODES,
+    Applicability,
+    ApprovalState,
     DispositionCode,
+    ExportLabel,
+    ImplementationState,
+    ObligatedActor,
     OPENSubReason,
+    OrgResponsibility,
     ProposalBand,
+    TBDReason,
     WorkflowStateValue,
 )  # WorkflowStateValue is the single source of truth (codes.py)
+from oracle.disposition.export_map import (
+    AxisContradiction,
+    AxisSnapshot,
+    axes_from_legacy_code,
+    export_label_to_code,
+    map_axes_to_export_label,
+)
 
 LOGGER = logging.getLogger("oracle.disposition.models")
 
@@ -97,7 +120,7 @@ def _require_stripped_nonblank(v: Optional[str], field_name: str) -> Optional[st
 # ---------------------------------------------------------------------------
 
 SCHEMA_VERSION: str = "disposition/v1"
-RULE_VERSION: str = "0.5.0"  # Tracks the governing spec version baseline
+RULE_VERSION: str = "0.5.0"  # Tracks the governing engine-spec baseline (axis model via RDW/RFC)
 
 
 class VersionedModel(BaseModel):
@@ -493,31 +516,32 @@ AuthorityClassification = Literal["scan_confirmed", "human_reviewed", "pending_r
 
 class DispositionUnit(VersionedModel):
     """
-    One disposition unit (requirement clause/subparagraph) per spec §7.
+    One disposition unit (requirement clause/subparagraph) — RDW six-axis SoR.
 
-    - Parent rows (is_rollup=True) carry composition_vector and NO code.
+    System of record: six independent axes (applicability, obligated_actor,
+    organization_responsibility, implementation_state, approval_state, plus
+    workflow_state as the Review axis). The five codes and customer export
+    labels are computed read-only views (RDW §7.1).
+
+    - Parent rows (is_rollup=True) carry composition_vector and NO axes/code.
     - A parent is never a disposition target and is excluded from counts.
-    - OPEN requires exactly one open_sub_reason from the closed vocabulary.
-    - NA requires a scope_citation.
-    - MI/EX require intent_statement + alternative_control + control_class.
-    - Evidence is required for CW/MI before release eligibility.
-    - Acceptance is required for MI/EX before release eligibility.
+    - TBD on any axis requires exactly one closed-vocabulary reason.
+    - N/A requires a scope_citation.
+    - Meets Intent / Exception require intent_statement + alternative_control
+      + control_class (Exception may use not_met + relief path without alt
+      when open_sub_reason/approval tracks relief).
+    - Evidence is required for Meet/Meets Intent before release eligibility.
+    - Acceptance is required for Meets Intent/Exception before release.
     - workflow_state transitions are governed by state.py (machine may only propose).
 
-    Non-proposed states are expected to be produced only via transition_unit,
-    which enforces §7.1 through apply_transition. This is a GUARDRAIL, NOT A
-    SECURITY BOUNDARY — Python cannot prevent an in-process caller from
-    constructing a model directly. Enforcement of release authority belongs
-    to the S1a persistence/event-log layer, where transitions are recorded in
-    an append-only hash-chained log with authenticated actor identity.
+    Legacy construction may pass `code=` without axes; axes are expanded from
+    a default template. Axes always win when both are supplied.
     """
 
     # Identity and extraction
     unit_id: str = Field(min_length=1)  # e.g. "AMR-51(e)"
     parent_id: Optional[str] = None
     is_rollup: bool = False
-    # Medium #3: use StrictInt so bool (True/False) is rejected at the type boundary.
-    # The validator below adds an explicit `type(v) is int` guard for defense-in-depth.
     composition_vector: Optional[dict[str, StrictInt]] = None  # only for rollups
 
     requirement_text: str = Field(min_length=1)
@@ -527,11 +551,23 @@ class DispositionUnit(VersionedModel):
 
     locator: Locator
 
-    # Disposition
-    code: Optional[DispositionCode] = None  # None for rollups
+    # --- Six axes (system of record) ---
+    applicability: Optional[Applicability] = None
+    obligated_actor: Optional[ObligatedActor] = None
+    organization_responsibility: Optional[OrgResponsibility] = None
+    implementation_state: Optional[ImplementationState] = None
+    approval_state: Optional[ApprovalState] = None
+    # Per-axis TBD reasons (exactly one when the axis value is tbd)
+    applicability_tbd_reason: Optional[TBDReason] = None
+    org_responsibility_tbd_reason: Optional[TBDReason] = None
+    implementation_tbd_reason: Optional[TBDReason] = None
+    approval_tbd_reason: Optional[TBDReason] = None
+    # Explicit accepted-with-TBD election (review coherence)
+    accepted_with_tbd: bool = False
+
     workflow_state: WorkflowStateValue = "proposed"
 
-    # OPEN-specific
+    # OPEN/TBD primary reason (also mirrored onto axes when expanded from legacy code)
     open_sub_reason: Optional[OPENSubReason] = None
 
     # NA-specific
@@ -541,7 +577,7 @@ class DispositionUnit(VersionedModel):
     authority_dependent: bool = False
     authority_classification: AuthorityClassification = "pending_review"
 
-    # MI/EX required fields
+    # MI/EX / Meets Intent / Exception required fields
     intent_statement: Optional[str] = None
     alternative_control: Optional[str] = None
     control_class: Optional[ControlClass] = None
@@ -549,10 +585,7 @@ class DispositionUnit(VersionedModel):
     @field_validator("unit_id", "requirement_text", "proposer", mode="before")
     @classmethod
     def _strip_nonblank_core_identity(cls, v: Any, info) -> str:
-        """Medium #4: required identity/provenance strings must be stripped non-blank.
-
-        Covers unit_id, requirement_text, and proposer (foundational traceability fields).
-        """
+        """Medium #4: required identity/provenance strings must be stripped non-blank."""
         name = info.field_name
         stripped = _require_stripped_nonblank(v, name)
         if stripped is None or len(stripped) == 0:
@@ -570,11 +603,7 @@ class DispositionUnit(VersionedModel):
     )
     @classmethod
     def _strip_nonblank_disposition_strings(cls, v: Any, info) -> Optional[str]:
-        """Medium #4: strip and reject whitespace-only for these provenance/conditional fields.
-
-        Optional fields are allowed to be absent (return None). If present,
-        whitespace-only is rejected.
-        """
+        """Medium #4: strip and reject whitespace-only for provenance/conditional fields."""
         name = info.field_name
         return _require_stripped_nonblank(v, name)
 
@@ -582,21 +611,83 @@ class DispositionUnit(VersionedModel):
     evidence: tuple[EvidenceEntry, ...] = Field(default_factory=tuple)
     acceptance: Optional[AcceptanceRecord] = None
 
-    # Provenance and proposal triage.
-    #
-    # WHY a band and not a float (§8): §8 defines three qualitative bands with
-    # structural bases and contains no calibration data. The prior
-    # `confidence: float` advertised a precision the system cannot produce, in
-    # a document that also carries A-basis/B-basis allowables — where
-    # "confidence" has a defined coverage probability. Internal triage only:
-    # never aggregated to a package score, never rendered to a customer.
     proposal_band: Optional[ProposalBand] = None
-    band_basis: Optional[str] = None  # the structural reason for the band
+    band_basis: Optional[str] = None
     proposer: str = Field(min_length=1)
     confirmed_by: Optional[str] = None
     confirmed_date: Optional[str] = None
 
-    # NOTE: Per §7.1, parent roll-ups never carry an independent code or acceptance.
+    @model_validator(mode="before")
+    @classmethod
+    def _expand_legacy_code_to_axes(cls, data: Any) -> Any:
+        """Accept legacy code= construction; expand default axes when missing."""
+        if not isinstance(data, dict):
+            return data
+        if data.get("is_rollup"):
+            if data.get("code") is not None:
+                raise ValueError(
+                    "Roll-up rows must not carry a code (composition_vector only)"
+                )
+            data.pop("code", None)
+            return data
+        has_axes = data.get("applicability") is not None
+        legacy = data.get("code")
+        if legacy is not None and not has_axes:
+            expanded = axes_from_legacy_code(
+                legacy,
+                open_sub_reason=data.get("open_sub_reason"),
+            )
+            for k, v in expanded.items():
+                data.setdefault(k, v)
+            # OPEN needs open_sub_reason retained
+            if str(legacy) in ("OPEN", "DispositionCode.OPEN") or (
+                getattr(legacy, "value", None) == "OPEN"
+            ):
+                if not data.get("open_sub_reason") and data.get("applicability_tbd_reason"):
+                    data["open_sub_reason"] = data["applicability_tbd_reason"]
+        # Remove code from input — it is computed
+        if "code" in data:
+            data.pop("code")
+        if "export_label" in data:
+            data.pop("export_label")
+        return data
+
+    def axis_snapshot(self) -> AxisSnapshot:
+        """Pure axis snapshot for mapping / gates."""
+        if self.is_rollup:
+            raise ValueError("Roll-up parents have no disposition axes")
+        if self.applicability is None:
+            raise ValueError("applicability axis is required for non-rollup units")
+        return AxisSnapshot(
+            applicability=self.applicability,
+            obligated_actor=self.obligated_actor,
+            organization_responsibility=self.organization_responsibility or "tbd",
+            implementation_state=self.implementation_state or "tbd",
+            approval_state=self.approval_state or "tbd",
+            applicability_tbd_reason=self.applicability_tbd_reason,
+            org_responsibility_tbd_reason=self.org_responsibility_tbd_reason,
+            implementation_tbd_reason=self.implementation_tbd_reason,
+            approval_tbd_reason=self.approval_tbd_reason,
+        )
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def export_label(self) -> Optional[ExportLabel]:
+        """RDW §7.1 customer label (computed; never SoR)."""
+        if self.is_rollup:
+            return None
+        return map_axes_to_export_label(self.axis_snapshot())
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def code(self) -> Optional[DispositionCode]:
+        """Five-code derived view (computed; never SoR)."""
+        if self.is_rollup:
+            return None
+        label = self.export_label
+        if label is None:
+            return None
+        return export_label_to_code(label)
 
     @model_validator(mode="after")
     def _enforce_frozen_containers(self) -> "DispositionUnit":
@@ -669,22 +760,57 @@ class DispositionUnit(VersionedModel):
         return self
 
     @model_validator(mode="after")
+    def _enforce_axes_and_export(self) -> "DispositionUnit":
+        """Non-rollups require axes; axis coherence + §7.1 mapping must succeed."""
+        if self.is_rollup:
+            return self
+        if self.applicability is None:
+            raise ValueError(
+                "Non-rollup disposition units require a code"
+            )
+        # Fill defaults for subordinate axes when only applicability set
+        # (already expanded from legacy; interview path should set all.)
+        if self.organization_responsibility is None:
+            object.__setattr__(self, "organization_responsibility", "tbd")
+        if self.implementation_state is None:
+            object.__setattr__(self, "implementation_state", "tbd")
+        if self.approval_state is None:
+            object.__setattr__(self, "approval_state", "tbd")
+        # Fill TBD reasons from open_sub_reason only when the reason is known.
+        # Do not invent a default — missing reason fails closed at mapping.
+        if self.open_sub_reason is not None:
+            for axis_val, reason_attr in (
+                (self.applicability, "applicability_tbd_reason"),
+                (self.organization_responsibility, "org_responsibility_tbd_reason"),
+                (self.implementation_state, "implementation_tbd_reason"),
+                (self.approval_state, "approval_tbd_reason"),
+            ):
+                if axis_val == "tbd" and getattr(self, reason_attr) is None:
+                    object.__setattr__(self, reason_attr, self.open_sub_reason)
+        try:
+            _ = map_axes_to_export_label(self.axis_snapshot())
+        except AxisContradiction as e:
+            raise ValueError(str(e)) from e
+        return self
+
+    @model_validator(mode="after")
     def _enforce_rollup_invariants(self) -> "DispositionUnit":
         """Low #5 (split): focused validator for roll-up parent restrictions (§1.1)."""
         if not self.is_rollup:
             return self
-        if self.code is not None:
-            raise ValueError("Roll-up rows must not carry a code (composition_vector only)")
         if self.composition_vector is None:
             raise ValueError("Roll-up rows require a composition_vector")
-        # Medium #4 (Atlas R3 #4): parents are never disposition targets.
+        if self.applicability is not None:
+            raise ValueError("Roll-up rows must not carry disposition axes (composition_vector only)")
         if self.acceptance is not None:
             raise ValueError(
-                "Roll-up parent rows must not carry an acceptance record (§1.1: parent is never a disposition target)"
+                "Roll-up parent rows must not carry an acceptance record "
+                "(§1.1: parent is never a disposition target)"
             )
         if self.evidence:
             raise ValueError(
-                "Roll-up parent rows must not carry evidence entries (§1.1: parent is never a disposition target)"
+                "Roll-up parent rows must not carry evidence entries "
+                "(§1.1: parent is never a disposition target)"
             )
         if self.open_sub_reason is not None:
             raise ValueError("Roll-up parent rows must not carry open_sub_reason")
@@ -692,60 +818,57 @@ class DispositionUnit(VersionedModel):
 
     @model_validator(mode="after")
     def _enforce_boundary_confirmation(self) -> "DispositionUnit":
-        """Low #5 (split): focused validator for §7.3 boundary confirmation.
-
-        Every non-rollup unit that carries a code must have a non-blank
-        unit_boundary_confirmed_by at construction time.
-        """
+        """Every non-rollup unit requires unit_boundary_confirmed_by (§7.3)."""
         if self.is_rollup:
-            return self
-        if self.code is None:
-            # Code presence is checked in the per-code validator; do not duplicate.
             return self
         if not self.unit_boundary_confirmed_by or not str(self.unit_boundary_confirmed_by).strip():
             raise ValueError(
                 "unit_boundary_confirmed_by is required for every non-rollup disposition unit "
-                "that carries a code (§7.3)"
+                "that carries a disposition (§7.3)"
             )
         return self
 
     @model_validator(mode="after")
-    def _enforce_code_specific_requirements(self) -> "DispositionUnit":
-        """Low #5 (split): focused validator for per-code required-field rules (§7)."""
+    def _enforce_label_specific_requirements(self) -> "DispositionUnit":
+        """Per-export-label required-field rules (engine §7 via §7.1 view)."""
         if self.is_rollup:
             return self
-        if self.code is None:
-            raise ValueError("Non-rollup disposition units require a code")
+        try:
+            label = map_axes_to_export_label(self.axis_snapshot())
+        except AxisContradiction as e:
+            raise ValueError(str(e)) from e
 
-        code = self.code
-
-        if code == DispositionCode.OPEN:
+        if label == ExportLabel.TBD:
             if not self.open_sub_reason:
-                raise ValueError("OPEN units require exactly one open_sub_reason (§2.3)")
+                # Derive from axis reasons if present
+                reason = (
+                    self.applicability_tbd_reason
+                    or self.implementation_tbd_reason
+                    or self.approval_tbd_reason
+                    or self.org_responsibility_tbd_reason
+                )
+                if reason is None:
+                    raise ValueError("OPEN units require exactly one open_sub_reason (§2.3)")
+                object.__setattr__(self, "open_sub_reason", reason)
             if self.scope_citation or self.intent_statement or self.alternative_control:
-                LOGGER.debug("OPEN unit carries extraneous fields; allowed but not required")
+                LOGGER.debug("OPEN/TBD unit carries extraneous fields; allowed but not required")
 
-        elif code == DispositionCode.NA:
+        elif label == ExportLabel.NA:
             if not self.scope_citation:
                 raise ValueError("NA units require scope_citation (§3.2)")
 
-        elif code in (DispositionCode.MI, DispositionCode.EX):
+        elif label in (ExportLabel.MEETS_INTENT, ExportLabel.EXCEPTION):
             if not (self.intent_statement and self.alternative_control and self.control_class):
                 raise ValueError(
-                    f"{code} units require intent_statement, alternative_control, and control_class"
+                    f"{label.value} units require intent_statement, alternative_control, "
+                    "and control_class"
                 )
 
-        # Evidence is strongly recommended for CW/MI before release eligibility,
-        # but the model does not hard-fail here (release gate is separate).
         return self
 
     @model_validator(mode="after")
     def _enforce_alternative_control_requires_class(self) -> "DispositionUnit":
-        """Medium #5: control_class is required whenever alternative_control is supplied.
-
-        This is independent of code; the contract in §7 states control_class is
-        required whenever alternative_control is present.
-        """
+        """Medium #5: control_class is required whenever alternative_control is supplied."""
         if self.alternative_control is not None and self.control_class is None:
             raise ValueError(
                 "control_class is required whenever alternative_control is supplied (§7)"
@@ -754,22 +877,14 @@ class DispositionUnit(VersionedModel):
 
     @model_validator(mode="after")
     def _enforce_composition_vector_validity(self) -> "DispositionUnit":
-        """Medium #3: composition vectors accept only known codes and non-negative counts.
-
-        Invalid vectors must be rejected at the source of truth (DispositionUnit)
-        so that roll-up badge derivation cannot silently derive a false CW (or any badge).
-
-        Uses StrictInt in the field type + explicit `type(v) is int` to reject bool
-        (Python bool is subclass of int and would otherwise be accepted).
-        """
+        """Composition vectors accept only known export keys and non-negative counts."""
         if self.composition_vector is not None:
             for k, v in self.composition_vector.items():
-                if k not in DISPOSITION_CODES:
+                if k not in COMPOSITION_KEYS and k not in DISPOSITION_CODES:
                     raise ValueError(
                         f"composition_vector contains unknown code key: {k!r}; "
-                        f"allowed: {sorted(DISPOSITION_CODES)}"
+                        f"allowed: {sorted(COMPOSITION_KEYS)}"
                     )
-                # bool is a subclass of int; require exact int (not bool, not subclass)
                 if type(v) is not int or v < 0:
                     raise ValueError(
                         f"composition_vector count for {k!r} must be a non-negative int, got {v!r}"
