@@ -19,14 +19,14 @@
 > standard) and requires: (1) review against the full standard text —
 > the pack extracts shall statements, not the referenced Tables 2–21;
 > (2) M&P review and approval by Dr. Wilde; (3) formal tailoring
-> approval per **AMR 1** with Boeing concurrence and NASA M&P / delegated
-> Technical Authority concurrence. Nothing here is releasable to Boeing
+> approval per **AMR 1** with prime contractor concurrence and NASA M&P / delegated
+> Technical Authority concurrence. Nothing here is releasable to the prime contractor
 > until all three have happened.
 
 **Status:** Draft for M&P review
 **Author:** Dr. Joseph Wilde / Claude (Beth)
 **Date:** 2026-07-16
-**Trigger:** Boeing flow-down of NASA-STD-6030 to BoundState
+**Trigger:** Prime contractor flow-down of NASA-STD-6030 to BoundState
 **Source pack:** `oracle/builtin_packs/nasa_std_6030_rulepack.json` (115 AMRs, pack validates, bootstrap-registered)
 **Companion workflow:** §5 — using ORACLE to assess "do we meet the intent"
 
@@ -51,17 +51,17 @@ correct posture is therefore **not** "6030 doesn't apply" and **not**
 3. **Drop the polymer-specific block with rationale.** §6.11.5.x (AMR 83–96)
    is polymeric-material specific; BoundState cold spray is metallic. ~12%.
 
-Two scope questions to settle **with Boeing before** dispositioning further
+Two scope questions to settle **with the prime contractor before** dispositioning further
 (they change which AMRs bite):
 
 - **Structural deposition vs. repair.** 6030 governs AM *parts*. Cold spray
   used as dimensional restoration / repair on conventionally-made hardware
   is arguably a different contractual scope (AMR 22 territory, plus the
-  repair specs Boeing flows separately). Get the intended scope in writing.
+  repair specs the prime contractor flows separately). Get the intended scope in writing.
 - **The companion-standard chain.** AMR 14 invokes NASA-STD-6033
   (equipment/facility control), AMR 63 invokes NASA-STD-6016 (MUA), AMR
   18/20 invoke NASA-STD-5009, AMR 15 invokes NASA-STD-5019. Confirm which
-  of these Boeing has also flowed, and in what tailored form.
+  of these the prime contractor has also flowed, and in what tailored form.
 
 ---
 
@@ -85,7 +85,7 @@ AMR 17/18 (NDE detectability), AMR 45 (HIP), AMR 69 (anisotropy), AMR 70
 
 | AMR | Disposition | Basis |
 |---|---|---|
-| 1 | AS-IS | The tailoring governance itself. This document is the input; approvals route through Boeing + NASA M&P per the flow-down. |
+| 1 | AS-IS | The tailoring governance itself. This document is the input; approvals route through the prime contractor + NASA M&P per the flow-down. |
 | 2 | AS-IS | AMCP required. The per-AMR conformance means for cold spray documented there, from this assessment. |
 | 3 | AS-IS | AMCP-cited documents under QMS configuration control. |
 | 4 | AS-IS | Flow-down to subtiers: powder suppliers, heat treat, HIP, NDE houses. |
@@ -93,13 +93,13 @@ AMR 17/18 (NDE detectability), AMR 45 (HIP), AMR 69 (anisotropy), AMR 70
 | 7–11 | AS-IS | Class prohibitions (no polymeric Class A, no fasteners/printed threads) apply equally to CS deposits. Exempt/Class C criteria unchanged. |
 | 12 | MOD | Secondary classification: structural-demand tables apply as-is; Table 4 *AM risk* criteria are melt-AM flavored — assess CS risk drivers (inter-particle bond quality, through-thickness anisotropy, substrate-interface integrity) against Table 4 intent and document the mapping. |
 | 13 | AS-IS | AS9100 (or approved alternate) QMS. *Company-maturity gap check — §4.* |
-| 14 | MOD | EFCP per NASA-STD-6033, which is written around melt-AM equipment. Map CS equipment (gas supply/heater, nozzle wear tracking, powder feeder, robot calibration) to 6033 control categories; confirm 6033 flow-down form with Boeing. |
+| 14 | MOD | EFCP per NASA-STD-6033, which is written around melt-AM equipment. Map CS equipment (gas supply/heater, nozzle wear tracking, powder feeder, robot calibration) to 6033 control categories; confirm 6033 flow-down form with the prime contractor. |
 | 15 | AS-IS | Fracture control per NASA-STD-5019 with 6030's limitations. |
 | 16 | AS-IS | Unplanned interruption = nonconformance. CS interruptions are physically benign (no melt pool), but the record-keeping obligation stands. |
 | 17–18 | AS-IS ⚠ | Class A quantitative NDE, full coverage, Special NDE per 5009. **Flag:** verifiable detection of critical initial flaw sizes in CS deposits (tight planar inter-particle debonds) is a known hard problem — see §4. |
 | 19–20 | AS-IS | Class B NDE per 5009. |
 | 21 | MOD | In-situ monitoring qualification clause adopted as-is, but the *technologies* differ: melt-pool monitoring has no CS meaning; CS analogs are particle velocimetry, gas-parameter telemetry, deposition profilometry — qualified under the same clause before use in acceptance. |
-| 22 | AS-IS | Repair/rework provisions. **Scope note:** where cold spray *is* the repair process applied to non-AM hardware, governing scope must be agreed with Boeing (§1). |
+| 22 | AS-IS | Repair/rework provisions. **Scope note:** where cold spray *is* the repair process applied to non-AM hardware, governing scope must be agreed with the prime contractor (§1). |
 | 23–24 | MOD | Witness specimens "integral to the build" → co-deposited companion coupons sprayed in the same run, same feedstock lot, same post-processing. Metals Tables 5/7 quantities adopted unchanged. |
 | 25 | MOD | Continuous-build SPC eligibility adopted; machine-qualification criteria reference 6033 → CS equipment equivalents per AMR 14 mapping. |
 | 26 | MOD | Serialization/traceability as-is; "location on the build area/platform" → deposition sequence / toolpath segment / substrate position. |
@@ -178,10 +178,10 @@ AMR 17/18 (NDE detectability), AMR 45 (HIP), AMR 69 (anisotropy), AMR 70
    specific per AMR 69.
 4. **6033 mapping (AMR 14).** Equipment/facility control plan written for CS
    equipment against a standard drafted for melt machines — a documented
-   category mapping, agreed with Boeing.
+   category mapping, agreed with the prime contractor.
 5. **QMS status (AMR 13).** AS9100 (or approved-alternate) certification is
    a company-maturity item that gates everything above it.
-6. **Scope agreement with Boeing (§1).** Structural deposition vs. repair,
+6. **Scope agreement with the prime contractor (§1).** Structural deposition vs. repair,
    part classes in scope, and the companion-standard flow-down chain.
 
 ---
@@ -201,7 +201,7 @@ where vendor keys live:
 3. **Assemble the compliance matrix** from those findings: per AMR —
    *conforms / conforms-as-tailored (this document) / gap (owner, date)*.
    That matrix plus this tailoring record **is** the AMCP §conformance
-   content Boeing reviews.
+   content the prime contractor reviews.
 4. **Promotion gate as governance:** pack stays draft until promoted
    (`oracle promote-pack`), and this document stays PROVISIONAL until the
    AMR-1 approvals land.
