@@ -115,8 +115,11 @@ RFC together. Attack surfaces, in priority order:
       translation table generated (`docs/FIXTURE_AXIS_MIGRATION.md`, 26
       cases, 7 flagged ambiguous) — the 7 ambiguous rows still need his
       per-case disposition.
-- [ ] Targeted ORACLE pass run; accepted defects folded into RDW_SPEC v0.3 /
-      this RFC; unresolved questions dispositioned
+- [~] Targeted ORACLE pass **DEFERRED by domain authority 2026-07-30** —
+      build proceeds on the v0.2 draft via
+      `docs/slices/RDW_MVP_BUILD_SPEC.md` (risk accepted; Atlas + Beth
+      still review the built diff at the gate). The pass may run post-hoc
+      over spec + built behavior together.
 - [ ] On both: engine spec v0.6.0 stamped (the ONE sanctioned edit of the
       protected file), slice plan re-planned, S1R activated
       (`docs/slices/S1R_SPEC.md` is drafted and gated on this box)
