@@ -1,5 +1,58 @@
 # Slice S1a — Persistence, Concurrency, and Audit Contract
 
+> # ⏸ PARKED — 2026-07-30 (Joe)
+>
+> **Do not build on this slice, and do not fix the findings below, without
+> un-parking it first.** The code exists on `build/disposition-s1` and is not
+> deleted — it is ahead of the product, not wrong in ambition.
+>
+> **Why parked.** S1a is ~1,259 lines of hash-chained event log, single-writer
+> locking, role/permission model, and atomic release marking — an audit spine
+> built before any user has tailored a single standard end to end. The morning's
+> real engagement work was completed with none of it. The distinction that
+> settled it: **you need an audit trail, not an audit system.** Provenance for a
+> customer submittal is "who decided this, when, on what basis, citing what" in a
+> versioned record — roughly 50 lines. Hash chains and concurrency control answer
+> "can a malicious insider forge history", which is a real question for
+> multi-tenant SaaS and a hypothetical one for a single-operator tool.
+>
+> **What replaced it.** `oracle/tailor/` — serve each requirement, explain what it
+> requires and what it is for, ask whether you meet it, record the disposition
+> with a mandatory rationale. That is the product this was supposed to support.
+>
+> **Un-park when any of these becomes true:** a second concurrent operator; a
+> customer-acceptance workflow that actually issues AcceptanceRecords; or a
+> submittal whose provenance a reviewer will audit adversarially.
+>
+> ## Entry criteria — Codex review of `5831d5c`, 2026-07-30
+>
+> These are unfixed by design. They are the definition of done if S1a is ever
+> resumed, not a backlog to grind through now.
+>
+> | # | Severity | Finding |
+> |---|---|---|
+> | 2 | Critical | `apply_release_marking` commits units one at a time, then writes the event after — a failure on unit two left `A=release_approved, B=human_confirmed, release events=0`. Release is not all-or-nothing. |
+> | 3 | Critical | `record_transition` never calls the identity authorization layer. A proposer-only actor committed `human_confirmed`. The in-memory path returns `release_approved` for any non-machine actor with no approver-role check and no audit event. |
+> | 4 | Critical | Superseded acceptances still release — successor-chain checking is deferred to a later slice even though S1a owns the whole gate. **Third appearance of this same defect family** (inverted, then half-gated, now deferred). |
+> | 5 | Critical | `import_units` imported a released unit into a fresh store with zero human-election events. `_unit_diff` does not compare all material fields, so strict import accepted a changed `applicability_clause`. |
+> | 6 | High | Authoritative units are read outside the writer lock and applied with no expected-version check — a stale successor overwrote a rejection with `release_approved`. |
+> | 7 | High | The rejection audit event is attempted without the store lock and all logging failures are suppressed — contradicts both "rejected **and logged**" and "never suppress an error". |
+> | 8 | Medium | Event IDs derive from second-resolution time plus PID; two events in the same second collided. |
+>
+> **Test-quality precondition, which matters more than the list.**
+> `test_s1a_persistence_audit.py` computes `ok, why = is_unit_release_eligible(...)`
+> and then discards both, asserting only that the unit is still
+> `human_confirmed` — a state that was already true before the call. Its own
+> comment says "we only assert that we reached the gate (no crash)". That test
+> cannot fail for the reason it exists. **If S1a resumes, every fix must ship
+> with a test that fails before it.** Otherwise the outcome is eight green tests
+> and eight live bugs.
+>
+> **Not parked with it:** Codex finding #1 (the `ProposalBand` / `match_score`
+> schema change) is S1 code, is load-bearing for `oracle/tailor/`, and remains
+> open as a §7 errata question. See the note at the end of this file.
+
+
 **Build input for:** `py pipeline/oracle_build.py docs/slices/S1a_SPEC.md --repo . --fix-rounds 2 --coverage-floor 80`
 **Parent plan:** `docs/DISPOSITION_SLICE_PLAN.md` (S1a, decision P-4) — read it first.
 **Contract:** `docs/ORACLE_DISPOSITION_SPEC.md` v0.5.0 — the authoritative source
@@ -141,6 +194,34 @@ past a broken hash chain — is the cardinal failure mode here.
   do not treat it as a reference implementation regardless of what the parent
   plan says.
 - `pipeline/*`, `.github/*`.
+
+## Open: Codex finding #1 — the §7 schema change (NOT parked with this slice)
+
+Committed in `5831d5c`, on both pushed branches, and **load-bearing for
+`oracle/tailor/`**:
+
+    DispositionUnit.confidence: float   ->  proposal_band: ProposalBand | None
+                                        +   band_basis: str | None
+    EvidenceEntry.link_confidence       ->  match_score
+
+Codex flags this as a Critical, correctly on process: it edits `codes.py`
+(which this spec says never to touch) and diverges from the authoritative §7
+schema, which still names `link_confidence` and `confidence`.
+
+The substance is sound — §8 defines three qualitative bands and contains no
+calibration data, so a `0.0–1.0` float called "calibrated confidence" advertises
+precision that does not exist, in a document that also carries A-basis and
+B-basis allowables where "confidence" has a defined coverage probability. A
+three-value enum makes the false precision unrepresentable.
+
+The process was wrong: this should have gone through the graded errata channel
+as a §7 amendment, not a direct commit.
+
+**Reverting is now the more expensive option** — `oracle/tailor/advisor.py`
+depends on `ProposalBand`, and tailor is the go-forward product while S1a is
+parked. Recommended resolution: raise a §7 errata to ratify the rename, rather
+than revert working code to match a clause everyone agrees is wrong. Requires a
+human decision; `docs/ORACLE_DISPOSITION_SPEC.md` is a protected path.
 
 ## Stop if
 
