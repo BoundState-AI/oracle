@@ -110,11 +110,16 @@ RFC together. Attack surfaces, in priority order:
 
 ## 6. Approval
 
-- [ ] Domain authority (Dr. Wilde) — the model change and the migration rules
+- [x] Domain authority (Dr. Wilde) — model change + migration rules approved
+      2026-07-30 ("Let's build it"); recorded by Beth. Draft fixture
+      translation table generated (`docs/FIXTURE_AXIS_MIGRATION.md`, 26
+      cases, 7 flagged ambiguous) — the 7 ambiguous rows still need his
+      per-case disposition.
 - [ ] Targeted ORACLE pass run; accepted defects folded into RDW_SPEC v0.3 /
       this RFC; unresolved questions dispositioned
 - [ ] On both: engine spec v0.6.0 stamped (the ONE sanctioned edit of the
-      protected file), slice plan re-planned, S1R spec cut
+      protected file), slice plan re-planned, S1R activated
+      (`docs/slices/S1R_SPEC.md` is drafted and gated on this box)
 
 Until all three boxes: v0.5.0 remains the binding engine contract; no build
 consumes the axis model.
