@@ -3567,6 +3567,40 @@ def _cmd_disposition_walk(args: argparse.Namespace) -> None:
     cmd_disposition_walk(args)
 
 
+def _cmd_disposition_golden(args: argparse.Namespace) -> None:
+    from oracle.disposition.golden import run_golden_session
+
+    result = run_golden_session(args.session_dir, export_dir=args.export_dir)
+    print(json.dumps(result, indent=2, default=str))
+
+
+def _cmd_disposition_export(args: argparse.Namespace) -> None:
+    from oracle.disposition.export import export_all, stamp_meta
+    from oracle.disposition.packs import load_rdw_default_packs
+    from oracle.disposition.session import DispositionSession
+
+    s = DispositionSession(args.session_dir)
+    s.resume(actor_name=args.actor, repin=True)
+    recs, _ = load_rdw_default_packs(repin=True)
+    records = {r.requirement_id: r for r in recs}
+    paths = export_all(s, records, args.export_dir)
+    s.record_export({**stamp_meta(s), "paths": {k: str(v) for k, v in paths.items()}}, args.actor)
+    print(json.dumps({k: str(v) for k, v in paths.items()}, indent=2))
+
+
+def _cmd_disposition_audit(args: argparse.Namespace) -> None:
+    from oracle.disposition.audit import build_lineage
+    from oracle.disposition.packs import load_rdw_default_packs
+    from oracle.disposition.session import DispositionSession
+
+    s = DispositionSession(args.session_dir)
+    s.resume(actor_name=args.actor, repin=True)
+    recs, _ = load_rdw_default_packs(repin=True)
+    records = {r.requirement_id: r for r in recs}
+    lin = build_lineage(args.unit, s, records)
+    print(lin.model_dump_json(indent=2))
+
+
 def cmd_promote_pack(args: argparse.Namespace) -> None:
     """Handle 'promote-pack' subcommand."""
     pack_dir = _resolve_pack_dir(getattr(args, 'pack_dir', None))
@@ -3744,6 +3778,42 @@ Examples:
         help="Optional cap on units walked (for smoke runs)",
     )
     p_walk.set_defaults(func=_cmd_disposition_walk)
+
+    p_golden = disp_sub.add_parser(
+        "golden",
+        help="Replay scrubbed Appendix A/B golden session (AMR-1/14/17)",
+    )
+    p_golden.add_argument(
+        "--session-dir",
+        type=str,
+        default="oracle_sessions/rdw-golden",
+        help="Session root",
+    )
+    p_golden.add_argument(
+        "--export-dir",
+        type=str,
+        default="oracle_sessions/rdw-golden/export",
+        help="Export directory for CSV/DOCX/XLSX",
+    )
+    p_golden.set_defaults(func=_cmd_disposition_golden)
+
+    p_export = disp_sub.add_parser(
+        "export",
+        help="Export supplier matrix suite from an existing session",
+    )
+    p_export.add_argument("--session-dir", type=str, required=True)
+    p_export.add_argument("--export-dir", type=str, required=True)
+    p_export.add_argument("--actor", type=str, default="operator")
+    p_export.set_defaults(func=_cmd_disposition_export)
+
+    p_audit = disp_sub.add_parser(
+        "audit",
+        help="Print audit lineage for a unit (FR-017)",
+    )
+    p_audit.add_argument("--session-dir", type=str, required=True)
+    p_audit.add_argument("--unit", type=str, required=True)
+    p_audit.add_argument("--actor", type=str, default="auditor")
+    p_audit.set_defaults(func=_cmd_disposition_audit)
 
     args = parser.parse_args()
 

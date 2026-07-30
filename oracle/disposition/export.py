@@ -311,3 +311,163 @@ def stamp_meta(session: DispositionSession) -> dict[str, Any]:
         "spec_versions": SPEC_VERSIONS,
         "banner": ADVISORY_BANNER,
     }
+
+
+def _xlsx_sheet_xml(headers: list[str], rows: list[list[str]]) -> str:
+    """Minimal SpreadsheetML worksheet (shared strings avoided — inline)."""
+    def cell(ref: str, val: str) -> str:
+        # Escape XML
+        safe = (
+            val.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+        )
+        return f'<c r="{ref}" t="inlineStr"><is><t>{safe}</t></is></c>'
+
+    def col_letter(i: int) -> str:
+        s = ""
+        n = i
+        while True:
+            s = chr(ord("A") + (n % 26)) + s
+            n = n // 26 - 1
+            if n < 0:
+                break
+        return s
+
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">',
+        "<sheetData>",
+    ]
+    all_rows = [headers] + rows
+    for r_idx, row in enumerate(all_rows, start=1):
+        lines.append(f'<row r="{r_idx}">')
+        for c_idx, val in enumerate(row):
+            ref = f"{col_letter(c_idx)}{r_idx}"
+            lines.append(cell(ref, str(val)))
+        lines.append("</row>")
+    lines.append("</sheetData></worksheet>")
+    return "".join(lines)
+
+
+def export_xlsx(
+    session: DispositionSession,
+    records: dict[str, RequirementRecord],
+    path: Path | str,
+    *,
+    known_artifact_ids: Optional[set[str]] = None,
+) -> Path:
+    """
+    Phase 2: supplier matrix as XLSX using stdlib zipfile (no new dependency).
+
+    Sheets: Matrix, Assumptions, TBD, OpenActions, Meta.
+    """
+    import zipfile
+
+    rows = build_matrix_rows(session, records, known_artifact_ids=known_artifact_ids)
+    counts = count_by_export_label(rows)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    st = session.state
+    assert st is not None
+
+    matrix_headers = [
+        "unit_id", "text_ref", "applicability", "obligated_actor",
+        "organization_responsibility", "implementation_state", "approval_state",
+        "export_label", "comment", "evidence_refs", "actions",
+    ]
+    matrix_data = [
+        [
+            r.unit_id, r.text_ref, r.applicability, r.obligated_actor,
+            r.organization_responsibility, r.implementation_state, r.approval_state,
+            r.export_label, r.comment, r.evidence_refs, r.actions,
+        ]
+        for r in rows
+    ]
+    assump = assumptions_log(session)
+    assump_data = [[f.key, f.statement, f.owner or "", f.confidence] for f in assump]
+    tbd = tbd_register(rows, session)
+    tbd_data = [[t["unit_id"], t["reasons"]] for t in tbd]
+    actions = open_action_register(session)
+    act_data = [[a["unit_id"], a["action"]] for a in actions]
+    meta_data = [
+        ["banner", ADVISORY_BANNER],
+        ["session_id", st.session_id],
+        ["pack_hash", st.pack_hash],
+        ["rdw_spec", SPEC_VERSIONS["rdw_spec"]],
+        ["engine_spec", SPEC_VERSIONS["oracle_disposition_spec"]],
+        ["counts", str(counts)],
+    ]
+
+    content_types = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/worksheets/sheet3.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/worksheets/sheet4.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/worksheets/sheet5.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>"""
+    rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"""
+    wb_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/>
+  <Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet4.xml"/>
+  <Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet5.xml"/>
+</Relationships>"""
+    workbook = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+ xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="Matrix" sheetId="1" r:id="rId1"/>
+    <sheet name="Assumptions" sheetId="2" r:id="rId2"/>
+    <sheet name="TBD" sheetId="3" r:id="rId3"/>
+    <sheet name="OpenActions" sheetId="4" r:id="rId4"/>
+    <sheet name="Meta" sheetId="5" r:id="rId5"/>
+  </sheets>
+</workbook>"""
+
+    sheets = [
+        _xlsx_sheet_xml(matrix_headers, matrix_data),
+        _xlsx_sheet_xml(["key", "statement", "owner", "confidence"], assump_data),
+        _xlsx_sheet_xml(["unit_id", "reasons"], tbd_data),
+        _xlsx_sheet_xml(["unit_id", "action"], act_data),
+        _xlsx_sheet_xml(["field", "value"], meta_data),
+    ]
+
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", content_types)
+        zf.writestr("_rels/.rels", rels)
+        zf.writestr("xl/workbook.xml", workbook)
+        zf.writestr("xl/_rels/workbook.xml.rels", wb_rels)
+        for i, xml in enumerate(sheets, start=1):
+            zf.writestr(f"xl/worksheets/sheet{i}.xml", xml)
+
+    LOGGER.info("Wrote XLSX export to %s (%d rows)", path, len(rows))
+    return path
+
+
+def export_all(
+    session: DispositionSession,
+    records: dict[str, RequirementRecord],
+    out_dir: Path | str,
+    *,
+    known_artifact_ids: Optional[set[str]] = None,
+) -> dict[str, Path]:
+    """Write CSV + DOCX + XLSX suite under out_dir."""
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    paths = {
+        "csv": export_csv(session, records, out / "supplier_matrix.csv", known_artifact_ids=known_artifact_ids),
+        "docx": export_docx(session, records, out / "supplier_matrix.docx", known_artifact_ids=known_artifact_ids),
+        "xlsx": export_xlsx(session, records, out / "supplier_matrix.xlsx", known_artifact_ids=known_artifact_ids),
+    }
+    return paths

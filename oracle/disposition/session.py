@@ -42,6 +42,7 @@ from oracle.disposition.codes import (
 from oracle.disposition.eventlog import EventLog, EventLogError
 from oracle.disposition.export_map import AxisSnapshot, map_axes_to_export_label
 from oracle.disposition.models import CapabilityModelEntry
+from oracle.disposition.graph import DependencyGraph
 from oracle.disposition.rulepack import (
     PackPinError,
     RequirementRecord,
@@ -49,6 +50,7 @@ from oracle.disposition.rulepack import (
     load_requirement_records,
     prerequisites_of,
 )
+from oracle.disposition.packs import load_rdw_default_packs
 
 LOGGER = logging.getLogger("oracle.disposition.session")
 
@@ -309,6 +311,37 @@ class DispositionSession:
                 pass
             raise
 
+    def _load_records(
+        self,
+        pack_path: Path | str | None,
+        *,
+        expected_hash: Optional[str] = None,
+        repin: bool = False,
+        multi_pack: bool = True,
+    ) -> tuple[list, str, dict[str, str]]:
+        """Load single pack or default 6030+6033 multi-pack. Returns recs, pin, hashes."""
+        if pack_path is not None:
+            recs, digest = load_requirement_records(
+                pack_path, expected_hash=expected_hash, repin=repin
+            )
+            return recs, digest, {recs[0].rule_pack_id if recs else "pack": digest}
+        if multi_pack:
+            recs, hashes = load_rdw_default_packs(repin=True)
+            # Composite pin over sorted pack hashes
+            material = "|".join(f"{k}={v}" for k, v in sorted(hashes.items()))
+            import hashlib as _hl
+
+            digest = f"sha256:{_hl.sha256(material.encode()).hexdigest()}"
+            if expected_hash is not None and expected_hash != digest and not repin:
+                raise PackPinError(
+                    f"Multi-pack pin mismatch: session={expected_hash} now={digest}"
+                )
+            return recs, digest, hashes
+        recs, digest = load_requirement_records(
+            None, expected_hash=expected_hash, repin=repin
+        )
+        return recs, digest, {"default": digest}
+
     def open(
         self,
         *,
@@ -316,19 +349,25 @@ class DispositionSession:
         pack_path: Path | str | None = None,
         repin: bool = False,
         seed_context: bool = True,
+        multi_pack: bool = True,
     ) -> SessionState:
         """Create a new session or refuse if header already pins a different pack."""
         with self._exclusive_lock():
             if self._header_path.exists():
-                return self.resume(actor_name=actor_name, repin=repin)
+                return self.resume(
+                    actor_name=actor_name, repin=repin, multi_pack=multi_pack
+                )
 
-            records, digest = load_requirement_records(pack_path, repin=repin)
+            records, digest, pack_hashes = self._load_records(
+                pack_path, repin=repin, multi_pack=multi_pack
+            )
             session_id = f"sess-{uuid.uuid4().hex[:12]}"
-            pack_id = records[0].rule_pack_id if records else "unknown"
+            pack_id = "+".join(sorted(pack_hashes.keys())) if pack_hashes else "unknown"
             header = {
                 "session_id": session_id,
                 "pack_id": pack_id,
                 "pack_hash": digest,
+                "pack_hashes": pack_hashes,
                 "schema_version": SESSION_SCHEMA,
                 "created_at": _utcnow(),
                 "actor_name": actor_name,
@@ -361,10 +400,13 @@ class DispositionSession:
                     "session_id": session_id,
                     "pack_id": pack_id,
                     "pack_hash": digest,
+                    "pack_hashes": pack_hashes,
                     "unit_count": len(state.units),
                 },
             )
             self.state = state
+            self._graph = DependencyGraph.from_seeds()
+            self._needs_rereview: set[str] = set()
             return state
 
     def resume(
@@ -373,6 +415,7 @@ class DispositionSession:
         actor_name: str,
         repin: bool = False,
         pack_path: Path | str | None = None,
+        multi_pack: bool = True,
     ) -> SessionState:
         """Reload = replay event log; verify pack pin."""
         with self._exclusive_lock():
@@ -386,15 +429,17 @@ class DispositionSession:
 
             # Pack pin check
             try:
-                _, digest = load_requirement_records(
+                records, digest, pack_hashes = self._load_records(
                     pack_path,
-                    expected_hash=header["pack_hash"],
+                    expected_hash=None if repin else header.get("pack_hash"),
                     repin=repin,
+                    multi_pack=multi_pack and pack_path is None,
                 )
             except PackPinError:
                 raise
             if repin and digest != header["pack_hash"]:
                 header["pack_hash"] = digest
+                header["pack_hashes"] = pack_hashes
                 self._atomic_write_json(self._header_path, header)
                 self.eventlog.append(
                     actor=actor_name,
@@ -411,7 +456,6 @@ class DispositionSession:
                 actor_name=actor_name or header.get("actor_name", "unknown"),
             )
             # Re-seed units from pack then replay overrides
-            records, _ = load_requirement_records(pack_path, expected_hash=None, repin=True)
             for rec in records:
                 state.units[rec.requirement_id] = UnitAxesState(
                     unit_id=rec.requirement_id,
@@ -426,6 +470,8 @@ class DispositionSession:
                 )
             self._replay_into(state)
             self.state = state
+            self._graph = DependencyGraph.from_seeds()
+            self._needs_rereview = set(getattr(self, "_needs_rereview", set()) or set())
             return state
 
     def _replay_into(self, state: SessionState) -> None:
@@ -511,7 +557,30 @@ class DispositionSession:
             )
             self.state.facts[key] = fact
             self.state.facts_by_id[fact.fact_id] = fact
+            # §10.2 propagation: committed facts mark dependents for re-review
+            if not assumed:
+                graph = getattr(self, "_graph", None) or DependencyGraph.from_seeds()
+                self._graph = graph
+                affected = graph.propagate_from_fact(key, committed=True)
+                if not hasattr(self, "_needs_rereview"):
+                    self._needs_rereview = set()
+                self._needs_rereview.update(affected)
+                if affected:
+                    self.eventlog.append(
+                        actor=author,
+                        payload={
+                            "event_type": "propagation_rereview",
+                            "fact_key": key,
+                            "affected_units": affected,
+                        },
+                    )
         return fact
+
+    def units_needing_rereview(self) -> list[str]:
+        return sorted(getattr(self, "_needs_rereview", set()))
+
+    def clear_rereview(self, unit_id: str) -> None:
+        getattr(self, "_needs_rereview", set()).discard(unit_id)
 
     def set_axes(
         self,

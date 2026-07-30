@@ -60,6 +60,16 @@ from oracle.disposition.export_map import (  # noqa: F401
     export_label_to_code,
 )
 
+# RDW product phases (0–5)
+from oracle.disposition.graph import DependencyGraph  # noqa: F401
+from oracle.disposition.packs import load_rdw_default_packs, DraftPackWorkspace  # noqa: F401
+from oracle.disposition.decision import evaluate_unit  # noqa: F401
+from oracle.disposition.evidence import EvidenceStore  # noqa: F401
+from oracle.disposition.review import ReviewPackage, create_review_package  # noqa: F401
+from oracle.disposition.audit import build_lineage  # noqa: F401
+from oracle.disposition.integrations import LocalEvidenceConnector  # noqa: F401
+from oracle.disposition.golden import run_golden_session  # noqa: F401
+
 # S1a deliverables (persistence, audit, release authority)
 from oracle.disposition.identity import (  # noqa: F401
     ActorIdentity,

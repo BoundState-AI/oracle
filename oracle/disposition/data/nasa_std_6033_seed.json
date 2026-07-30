@@ -1,0 +1,91 @@
+{
+  "schema_version": "rdw-curated-pack/v1",
+  "rule_pack_id": "nasa_std_6033_seed",
+  "standard_id": "NASA-STD-6033",
+  "version": "Baseline-seed",
+  "curated": true,
+  "curator_note": "Human-authored seed records for RDW Phase 0 (not auto-extracted). Extends 6030 EFCP chain.",
+  "total_requirements": 8,
+  "requirements": [
+    {
+      "id": "EFCR-1",
+      "source_tag": "EFCR 1",
+      "section": "4.1",
+      "page": 5,
+      "shall_text": "The program shall document an Equipment Fracture Control Plan (EFCP) or equivalent fracture-control documentation for fracture-critical hardware in accordance with NASA-STD-5019 and related fracture-control requirements when fracture control is applicable.",
+      "subject": "program",
+      "applies_to": ["fracture control applicable", "Class A hardware"],
+      "keywords": ["EFCP", "fracture control"]
+    },
+    {
+      "id": "EFCR-2",
+      "source_tag": "EFCR 2",
+      "section": "4.2",
+      "page": 6,
+      "shall_text": "The producer shall implement NDE and inspection controls consistent with the approved EFCP or mapped 6033 control set for the hardware classification.",
+      "subject": "producer",
+      "applies_to": ["EFCP present", "NDE required"],
+      "keywords": ["NDE", "EFCP"]
+    },
+    {
+      "id": "EFCR-3",
+      "source_tag": "EFCR 3",
+      "section": "4.3",
+      "page": 7,
+      "shall_text": "Critical initial flaw sizes and detection capability shall be established for fracture-critical parts before quantitative NDE credit is claimed.",
+      "subject": "program",
+      "applies_to": ["Class A", "fracture-critical"],
+      "keywords": ["flaw size", "NDE"]
+    },
+    {
+      "id": "EFCR-4",
+      "source_tag": "EFCR 4",
+      "section": "4.4",
+      "page": 8,
+      "shall_text": "The supplier shall maintain objective evidence of special process controls for NDE personnel qualification and equipment calibration.",
+      "subject": "supplier",
+      "applies_to": ["NDE performed"],
+      "keywords": ["qualification", "calibration"]
+    },
+    {
+      "id": "EFCR-5",
+      "source_tag": "EFCR 5",
+      "section": "4.5",
+      "page": 9,
+      "shall_text": "Material family substitutions affecting fracture properties shall be dispositioned with formal approval when they change as-written EFCP controls.",
+      "subject": "producer",
+      "applies_to": ["material substitution"],
+      "keywords": ["material", "approval"]
+    },
+    {
+      "id": "EFCR-6",
+      "source_tag": "EFCR 6",
+      "section": "4.6",
+      "page": 10,
+      "shall_text": "The CEO shall ensure fracture-control responsibilities are allocated and accepted across program, producer, and supplier organizations.",
+      "subject": "ceo",
+      "applies_to": ["fracture control"],
+      "keywords": ["CEO", "allocation"]
+    },
+    {
+      "id": "EFCR-7",
+      "source_tag": "EFCR 7",
+      "section": "4.7",
+      "page": 11,
+      "shall_text": "Powder-based additive processes shall not claim wire-feed specific controls as equivalent without an approved mapping.",
+      "subject": "producer",
+      "applies_to": ["powder process"],
+      "keywords": ["powder", "wire", "physical"]
+    },
+    {
+      "id": "EFCR-8",
+      "source_tag": "EFCR 8",
+      "section": "4.8",
+      "page": 12,
+      "shall_text": "Open fracture-control actions shall be tracked to closure with document identity, revision, approver, and date before related dispositions are release-eligible.",
+      "subject": "program",
+      "applies_to": ["open actions"],
+      "keywords": ["closure", "approval"]
+    }
+  ]
+}
