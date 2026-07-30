@@ -2291,6 +2291,330 @@ async def hearth_pack_status(pack: str = "CO-Larimer") -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Tailor — serve a standard's requirements one at a time, record dispositions
+#
+# The web surface over oracle.tailor. Sessions live on the same /data volume as
+# review sessions and are keyed by id; every write goes through
+# TailorSession.save (atomic write-temp-rename), so a browser that disconnects
+# mid-decision loses nothing already recorded.
+#
+# The advisor PROPOSES. Only /decide records, and only from an explicit user
+# action carrying a rationale — there is no path where a model writes a
+# disposition.
+# ---------------------------------------------------------------------------
+
+TAILOR_DIR_NAME = "tailor"
+
+
+class TailorStartRequest(BaseModel):
+    pack: str
+    operator: str
+    scope_notes: str = ""
+
+
+class TailorDecideRequest(BaseModel):
+    unit_id: str
+    code: str
+    rationale: str
+    open_sub_reason: str | None = None
+    evidence: str = ""
+    note: str = ""
+
+
+class TailorAdviseRequest(BaseModel):
+    unit_id: str
+    # What the engineer said in their own words. Without it the advisor is
+    # guessing rather than mapping a stated position.
+    user_answer: str = ""
+
+
+class TailorBriefRequest(BaseModel):
+    unit_id: str
+
+
+def _tailor_path(session_id: str) -> Path:
+    return SESSIONS_DIR / TAILOR_DIR_NAME / f"{session_id}.json"
+
+
+def _tailor_load(session_id: str):
+    """Load a tailoring session by id, or 404."""
+    from oracle.tailor.session import TailorError, TailorSession
+
+    path = _tailor_path(session_id)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=f"No tailoring session: {session_id}")
+    try:
+        return TailorSession.resume(path)
+    except TailorError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def _tailor_requirement_payload(session, index: int) -> dict[str, Any]:
+    req = session.requirements[index]
+    decision = session.decisions.get(req.id)
+    return {
+        "index": index,
+        "id": req.id,
+        "tag": req.tag,
+        "section": req.section,
+        "page": req.page,
+        "text": req.shall_text or f"{req.subject} shall {req.requirement}",
+        "decision": (
+            {
+                "code": decision.code.value,
+                "rationale": decision.rationale,
+                "open_sub_reason": (
+                    decision.open_sub_reason.value if decision.open_sub_reason else None
+                ),
+                "evidence": decision.evidence,
+                "note": decision.note,
+                "decided_at": decision.decided_at,
+                "decided_by": decision.decided_by,
+            }
+            if decision
+            else None
+        ),
+    }
+
+
+def _tailor_state(session, session_id: str) -> dict[str, Any]:
+    """Session state for the UI. Counts are computed here, never stored."""
+    return {
+        "session_id": session_id,
+        "standard_id": session.standard_id,
+        "operator": session.operator,
+        "total": session.total,
+        "decided": session.decided_count,
+        "cursor": session.cursor,
+        "tally": session.tally(),
+        "index": [
+            {
+                "index": i,
+                "id": r.id,
+                "tag": r.tag,
+                "section": r.section,
+                "code": (
+                    session.decisions[r.id].code.value if r.id in session.decisions else None
+                ),
+            }
+            for i, r in enumerate(session.requirements)
+        ],
+    }
+
+
+@oracle_router.post("/tailor/start")
+async def tailor_start(request: Request, body: TailorStartRequest) -> dict[str, Any]:
+    from oracle.tailor.session import TailorError, TailorSession
+
+    operator = body.operator.strip()
+    if not operator:
+        raise HTTPException(status_code=400, detail="An operator name is required")
+
+    # _pack_dir() bootstraps the builtin packs into the pack directory, so both
+    # builtin and imported packs resolve from the same place.
+    pack_dir = _pack_dir()
+    candidates = [pack_dir / body.pack, pack_dir / f"{body.pack}.json"]
+    pack_path = next((c for c in candidates if c.is_file()), None)
+    if pack_path is None:
+        raise HTTPException(status_code=404, detail=f"Pack not found: {body.pack}")
+
+    session_id = uuid.uuid4().hex
+    path = _tailor_path(session_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        session = TailorSession.start(pack_path, path, operator)
+        # WHY persist scope alongside the session: the advisor's proposals are
+        # only as good as the declared scope, and a resumed session must advise
+        # against the same scope it started with.
+        session.scope_notes = body.scope_notes
+        session.save()
+    except TailorError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    state = _tailor_state(session, session_id)
+    state["requirement"] = _tailor_requirement_payload(session, session.cursor)
+    return state
+
+
+@oracle_router.get("/tailor/{session_id}")
+async def tailor_state(request: Request, session_id: str) -> dict[str, Any]:
+    session = _tailor_load(session_id)
+    state = _tailor_state(session, session_id)
+    if session.current() is not None:
+        state["requirement"] = _tailor_requirement_payload(session, session.cursor)
+    return state
+
+
+@oracle_router.get("/tailor/{session_id}/requirement/{index}")
+async def tailor_requirement(request: Request, session_id: str, index: int) -> dict[str, Any]:
+    session = _tailor_load(session_id)
+    if not 0 <= index < session.total:
+        raise HTTPException(status_code=404, detail=f"No requirement at index {index}")
+    session.seek(index)
+    session.save()
+    return _tailor_requirement_payload(session, index)
+
+
+def _tailor_advisor(session):
+    from oracle.tailor.advisor import Advisor, AnthropicBackend
+
+    return Advisor(
+        backend=AnthropicBackend(),
+        standard_id=session.standard_id,
+        scope_notes=session.scope_notes or "",
+    )
+
+
+def _tailor_find(session, unit_id: str):
+    match = [r for r in session.requirements if r.id == unit_id]
+    if not match:
+        raise HTTPException(status_code=404, detail=f"No requirement: {unit_id}")
+    return match[0]
+
+
+@oracle_router.post("/tailor/{session_id}/brief")
+async def tailor_brief(
+    request: Request, session_id: str, body: TailorBriefRequest
+) -> dict[str, Any]:
+    """Explain one requirement and ask whether the user meets it.
+
+    Step one of the loop — always before a proposal, never a disposition.
+    """
+    from oracle.tailor.advisor import AdvisorError
+
+    session = _tailor_load(session_id)
+    req = _tailor_find(session, body.unit_id)
+    try:
+        brief = _tailor_advisor(session).brief(req)
+    except AdvisorError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {
+        "unit_id": body.unit_id,
+        "requires": brief.requires,
+        "purpose": brief.purpose,
+        "satisfied_by": list(brief.satisfied_by),
+        "question": brief.question,
+        "watch_for": brief.watch_for,
+    }
+
+
+@oracle_router.post("/tailor/{session_id}/advise")
+async def tailor_advise(
+    request: Request, session_id: str, body: TailorAdviseRequest
+) -> dict[str, Any]:
+    """Map the user's answer onto a disposition. Records nothing."""
+    from oracle.tailor.advisor import AdvisorError
+
+    session = _tailor_load(session_id)
+    req = _tailor_find(session, body.unit_id)
+    prior = tuple((uid, d.code.value) for uid, d in session.decisions.items())
+    try:
+        proposal = _tailor_advisor(session).propose(req, prior, body.user_answer)
+    except AdvisorError as exc:
+        # 502, not 200-with-empty: an advisor failure must never render as
+        # "the advisor had no opinion".
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    return {
+        "unit_id": body.unit_id,
+        "code": proposal.code.value,
+        "band": proposal.band.value,
+        "basis": proposal.basis,
+        "reasoning": proposal.reasoning,
+        "draft_rationale": proposal.draft_rationale,
+        "open_sub_reason": (
+            proposal.open_sub_reason.value if proposal.open_sub_reason else None
+        ),
+        "questions": list(proposal.questions),
+        "evidence_needed": list(proposal.evidence_needed),
+        "is_question": proposal.is_question,
+    }
+
+
+@oracle_router.post("/tailor/{session_id}/decide")
+async def tailor_decide(
+    request: Request, session_id: str, body: TailorDecideRequest
+) -> dict[str, Any]:
+    from oracle.disposition.codes import DispositionCode, OPENSubReason
+    from oracle.tailor.session import TailorError
+
+    session = _tailor_load(session_id)
+    if not session.seek_id(body.unit_id):
+        raise HTTPException(status_code=404, detail=f"No requirement: {body.unit_id}")
+
+    try:
+        code = DispositionCode(body.code.upper())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Unknown code: {body.code}") from exc
+
+    sub = None
+    if body.open_sub_reason:
+        try:
+            sub = OPENSubReason(body.open_sub_reason)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"Unknown sub-reason: {body.open_sub_reason}"
+            ) from exc
+
+    try:
+        session.record(
+            code, body.rationale, open_sub_reason=sub, evidence=body.evidence, note=body.note
+        )
+        session.advance_to_next_undecided()
+        session.save()
+    except TailorError as exc:
+        # Covers the mandatory-rationale and OPEN-needs-a-sub-reason rules.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    state = _tailor_state(session, session_id)
+    if session.current() is not None:
+        state["requirement"] = _tailor_requirement_payload(session, session.cursor)
+    return state
+
+
+@oracle_router.delete("/tailor/{session_id}/decide/{unit_id}")
+async def tailor_undo(request: Request, session_id: str, unit_id: str) -> dict[str, Any]:
+    session = _tailor_load(session_id)
+    if not session.clear(unit_id):
+        raise HTTPException(status_code=404, detail=f"Nothing recorded for {unit_id}")
+    session.save()
+    return _tailor_state(session, session_id)
+
+
+@oracle_router.get("/tailor/{session_id}/export")
+async def tailor_export(request: Request, session_id: str) -> dict[str, Any]:
+    """The disposition matrix. Counts recomputed at render time, never stored."""
+    session = _tailor_load(session_id)
+    rows = []
+    for r in session.requirements:
+        d = session.decisions.get(r.id)
+        rows.append(
+            {
+                "id": r.id,
+                "tag": r.tag,
+                "section": r.section,
+                "page": r.page,
+                "text": r.shall_text or f"{r.subject} shall {r.requirement}",
+                "code": d.code.value if d else None,
+                "open_sub_reason": (d.open_sub_reason.value if d and d.open_sub_reason else None),
+                "rationale": d.rationale if d else "",
+                "evidence": d.evidence if d else "",
+                "decided_by": d.decided_by if d else "",
+                "decided_at": d.decided_at if d else "",
+            }
+        )
+    return {
+        "session_id": session_id,
+        "standard_id": session.standard_id,
+        "operator": session.operator,
+        "total": session.total,
+        "decided": session.decided_count,
+        "tally": session.tally(),
+        "rows": rows,
+    }
+
+
 # Mount the authenticated oracle + hearth routers onto the app
 app.include_router(oracle_router)
 app.include_router(hearth_router)

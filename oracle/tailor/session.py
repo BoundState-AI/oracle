@@ -133,6 +133,11 @@ class TailorSession:
     cursor: int = 0
     decisions: dict[str, Decision] = field(default_factory=dict)
     started: str = ""
+    # WHY persisted: proposals are only as good as the declared scope, and a
+    # resumed session must advise against the same scope it was started with.
+    # Re-advising an in-flight session under a different scope would silently
+    # make earlier and later dispositions incomparable.
+    scope_notes: str = ""
 
     # ── construction ──────────────────────────────────────────────────────
 
@@ -167,6 +172,7 @@ class TailorSession:
         s = cls.start(pack_path, session_path, state.get("operator", "unknown"))
         s.started = state.get("started", s.started)
         s.cursor = int(state.get("cursor", 0))
+        s.scope_notes = state.get("scope_notes", "")
         s.decisions = {
             k: Decision.from_dict(v) for k, v in (state.get("decisions") or {}).items()
         }
@@ -270,6 +276,7 @@ class TailorSession:
             "standard_id": self.standard_id,
             "operator": self.operator,
             "started": self.started,
+            "scope_notes": self.scope_notes,
             "saved": _now(),
             "cursor": self.cursor,
             "total": self.total,

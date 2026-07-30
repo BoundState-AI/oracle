@@ -79,6 +79,22 @@ class Proposal:
         return self.band is ProposalBand.LOW
 
 
+@dataclass(frozen=True)
+class Brief:
+    """Plain-English orientation on one requirement, ending in a question.
+
+    Shown before any proposal. The user should be able to answer "do we meet
+    this?" from the brief alone, without opening the standard — which is the
+    difference between a worklist and a helper.
+    """
+
+    requires: str
+    purpose: str
+    satisfied_by: tuple[str, ...] = ()
+    question: str = ""
+    watch_for: str = ""
+
+
 class AdvisorBackend(Protocol):
     """Seam for the model call — lets the CLI and tests share one code path."""
 
@@ -133,6 +149,7 @@ def build_user_prompt(
     standard_id: str,
     scope_notes: str,
     prior: tuple[tuple[str, str], ...] = (),
+    user_answer: str = "",
 ) -> str:
     """Assemble the per-requirement prompt.
 
@@ -160,6 +177,26 @@ def build_user_prompt(
     if prior:
         parts += ["", "DECISIONS ALREADY MADE (stay consistent with these):"]
         parts += [f"  {uid}: {code}" for uid, code in prior[-12:]]
+    if user_answer.strip():
+        parts += [
+            "",
+            "THE ENGINEER'S ANSWER — this is their position, in their words:",
+            user_answer.strip(),
+            "",
+            "Map that answer onto the vocabulary. If they describe doing something"
+            " different that achieves the same objective, that is MI, not EX — and"
+            " the draft rationale must name the objective and the alternative"
+            " control. If they say they do not do it, that is EX, and the draft"
+            " must say what would close it. If their answer does not actually"
+            " settle the requirement, say so and return OPEN rather than reading"
+            " more into it than they said.",
+        ]
+    else:
+        parts += [
+            "",
+            "The engineer has not answered yet. Propose only what the requirement"
+            " and declared scope support on their own.",
+        ]
     parts += ["", "Propose a disposition for this requirement."]
     return "\n".join(parts)
 
@@ -287,21 +324,133 @@ class AnthropicBackend:
 
 @dataclass
 class Advisor:
-    """Turns a requirement into a proposal. Records nothing."""
+    """Explains a requirement, then helps land a disposition. Records nothing.
+
+    Two steps, in this order:
+
+      brief()   here is AMR-N, here is what it requires and why it exists,
+                do you meet it?
+      propose() given the user's answer, here is the code that follows and a
+                draft rationale.
+
+    The order matters. Proposing first invites the user to rubber-stamp a code
+    for a requirement they have not read; explaining first means the answer is
+    theirs and the code follows from it.
+    """
 
     backend: AdvisorBackend
     standard_id: str
     scope_notes: str = ""
 
+    def brief(self, req: Requirement) -> Brief:
+        """Orient the user on one requirement and ask whether they meet it."""
+        raw = self.backend.complete(
+            BRIEF_SYSTEM_PROMPT,
+            build_brief_prompt(req, self.standard_id, self.scope_notes),
+            BRIEF_SCHEMA,
+        )
+        return _to_brief(raw)
+
     def propose(
-        self, req: Requirement, prior: tuple[tuple[str, str], ...] = ()
+        self,
+        req: Requirement,
+        prior: tuple[tuple[str, str], ...] = (),
+        user_answer: str = "",
     ) -> Proposal:
+        """Turn the user's answer into a disposition and a draft rationale.
+
+        `user_answer` is what they said in their own words. With it, the
+        advisor is mapping a stated position onto the vocabulary; without it,
+        it is guessing — and guessing is what drives a unit to OPEN.
+        """
         raw = self.backend.complete(
             SYSTEM_PROMPT,
-            build_user_prompt(req, self.standard_id, self.scope_notes, prior),
+            build_user_prompt(req, self.standard_id, self.scope_notes, prior, user_answer),
             PROPOSAL_SCHEMA,
         )
         return _to_proposal(raw)
+
+
+BRIEF_SYSTEM_PROMPT = """You are orienting a qualified engineer on one requirement \
+from a technical standard, so they can answer whether their organization meets it.
+
+Write for someone who has not read the standard and should not have to. Say what \
+the requirement actually demands in plain language, and — this is the part that \
+matters — what it is FOR. The intent is what makes a "meets intent by alternative \
+means" answer possible later, so name the underlying objective, not just the \
+literal instruction.
+
+Then ask them one direct question: do you meet it?
+
+Rules:
+- Plain English. No standards-speak, no restating the clause verbatim.
+- Name the objective behind the requirement, not only the mechanism it specifies.
+- `satisfied_by` lists what would concretely demonstrate compliance — documents,
+  controls, records, tests. Be specific enough to check against.
+- `question` is the single most decision-relevant thing to ask them. If the
+  requirement is conditional, ask about the condition first.
+- `watch_for` is the trap: the thing people commonly get wrong here, or the
+  distinction that changes the answer. Empty if there isn't one.
+- Do NOT propose a disposition code. That comes after they answer."""
+
+
+def build_brief_prompt(req: Requirement, standard_id: str, scope_notes: str) -> str:
+    parts = [
+        f"STANDARD: {standard_id}",
+        f"REQUIREMENT: {req.tag or req.id}   (section {req.section}"
+        + (f", page {req.page}" if req.page else "")
+        + ")",
+        "",
+        "FULL TEXT:",
+        req.shall_text or f"{req.subject} shall {req.requirement}",
+    ]
+    if scope_notes.strip():
+        parts += ["", "WHAT THIS ORGANIZATION HAS DECLARED:", scope_notes.strip()]
+    parts += ["", "Explain this requirement and ask whether they meet it."]
+    return "\n".join(parts)
+
+
+BRIEF_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "requires": {
+            "type": "string",
+            "description": "What the requirement demands, in plain English. 1-3 sentences.",
+        },
+        "purpose": {
+            "type": "string",
+            "description": "What it is FOR — the objective behind it. 1-3 sentences.",
+        },
+        "satisfied_by": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Concrete things that would demonstrate compliance.",
+        },
+        "question": {
+            "type": "string",
+            "description": "One direct question to the user: do you meet it?",
+        },
+        "watch_for": {
+            "type": "string",
+            "description": "The common trap or the distinction that changes the answer. May be empty.",
+        },
+    },
+    "required": ["requires", "purpose", "satisfied_by", "question", "watch_for"],
+    "additionalProperties": False,
+}
+
+
+def _to_brief(raw: dict[str, Any]) -> Brief:
+    requires = str(raw.get("requires", "")).strip()
+    if not requires:
+        raise AdvisorError("brief did not describe the requirement")
+    return Brief(
+        requires=requires,
+        purpose=str(raw.get("purpose", "")).strip(),
+        satisfied_by=tuple(s for s in raw.get("satisfied_by") or () if str(s).strip()),
+        question=str(raw.get("question", "")).strip(),
+        watch_for=str(raw.get("watch_for", "")).strip(),
+    )
 
 
 def _to_proposal(raw: dict[str, Any]) -> Proposal:
