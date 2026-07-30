@@ -1,0 +1,49 @@
+#!/usr/bin/env python3
+"""
+Module: oracle.disposition
+Purpose: Disposition data model and release state machine (S1 spine).
+
+This subpackage is the pure, deterministic core for the Oracle disposition
+module. All models use Pydantic v2 with extra="forbid". No I/O lives here.
+
+Safety Critical: advisory-only per spec D-1
+
+__safety_critical__: bool = False  # advisory-only per D-1 (S1 is pure data + state)
+
+BoundState AI 2026
+Classification: BoundState Proprietary
+
+Co-Authored-By: Claude "Beth" <noreply@anthropic.com>
+Co-Authored-By: Dr. Joseph Wilde, BoundState AI
+"""
+
+from __future__ import annotations
+
+__version__ = "0.1.0"
+
+# Re-exports for convenience at the slice boundary
+from oracle.disposition.codes import DispositionCode, OPENSubReason  # noqa: F401
+from oracle.disposition.models import (  # noqa: F401
+    AcceptanceRecord,
+    CapabilityModelEntry,
+    DispositionUnit,
+    EvidenceEntry,
+    LevyManifest,
+    LevyManifestEntry,
+    Locator,
+    ScopeDeclaration,
+    transition_unit,
+    validate_locator_covered_by_manifest,
+    validate_physical_impossibility_declaration,
+)
+from oracle.disposition.rollup import (  # noqa: F401
+    Badge,
+    compose_badge,
+    rollup_badge,
+)
+from oracle.disposition.state import (  # noqa: F401
+    Actor,
+    WorkflowState,
+    apply_transition,
+    is_machine_actor,
+)
