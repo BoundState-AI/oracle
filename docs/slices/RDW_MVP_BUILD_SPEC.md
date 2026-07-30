@@ -7,10 +7,12 @@
 domain authority; targeted pass deferred). Where this spec is silent, those
 documents govern — read RDW §7/§7.1/§10/§11/§13 and engine §1.2/§2.1/§7.1
 before writing code.
-**Base:** branch `build/disposition-s1` (S1 as committed). Harvest patterns
-from `feat/tailor-helper` (`oracle/tailor/`) where useful — but the
-disposition data model in THIS spec is authoritative; do not merge that
-branch.
+**Base:** branch `claude/loop-harness-engineering-l3nxl7` (carries S1 as
+committed, the S1a persistence layer, and every governing document above —
+`build/disposition-s1` is already merged in; do not merge it again).
+Harvest patterns from `feat/tailor-helper` (`oracle/tailor/`) where useful —
+but the disposition data model in THIS spec is authoritative; do not merge
+that branch.
 
 ## Goal
 
@@ -79,10 +81,14 @@ Per `docs/slices/S1R_SPEC.md` deliverables 1–6, summarized:
    chain. Assumptions are facts with `assumed=True` and an owner —
    an assumption never silently becomes confirmed.
 3. Persistence: append-only JSONL event log per session (hash-chained
-   prev-hash field; write-temp-rename; single-writer lock file) — the
-   S1a-lite store. Events: fact asserted/superseded, axis set, election,
-   evidence ref attached, export produced. Reload = replay. No mutation of
-   prior lines, ever.
+   prev-hash field; write-temp-rename; single-writer lock file). This
+   ALREADY EXISTS — `oracle/disposition/eventlog.py` (hash-chained
+   append-only log, tamper verification) and `store.py` (single-writer
+   lock, temp-rename atomicity, optimistic versioning). Extend them with
+   the session-level event types; do NOT build a parallel persistence
+   layer. Events: fact asserted/superseded, axis set, election, evidence
+   ref attached, export produced. Reload = replay. No mutation of prior
+   lines, ever.
 4. Evidence in v0 is a typed reference record (doc id, revision, date,
    note) — no file storage yet.
 
