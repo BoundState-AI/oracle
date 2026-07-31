@@ -422,8 +422,8 @@ framing — that was true of the chassis, not the product.
   `output_hash` is computed — stored hash does not represent stored
   output (probe: stored ≠ recomputed).
 - **INTEG-2 (Fran, confirmed):** library export blocklist scans facts
-  only — a disposition comment containing "Boeing" + a contract number
-  exported cleanly (probe-confirmed).
+  only — a disposition comment containing a customer name + a contract
+  number exported cleanly (probe-confirmed).
 - **FR-EXPORTS:** Appendix-A is a CSV skeleton truncating requirement
   text at `[:120]`; roadmap lacks the working-guide fields (what it
   requires / why / process interpretation / matrix comment / current
@@ -640,3 +640,63 @@ extra environment-conditional skips). No repository changes by reviewer.
 Operator authorized commit+push (Dr. Wilde, 2026-07-31). This closes fix
 round 3: FR1-FR8 build + AR1-AR13 + N1-N10, all independently gated.
 Advisory-only per D-1.
+
+---
+
+## Atlas review of the corpus-scrub slice (2026-07-31) — REJECT, 7 findings; ALL FIXED by Beth
+
+Atlas rejected the slice (CS2/CS3/CS4 NOT MET): G1 critical — a termless
+`--apply` wrote organization/person names unchanged (patterns cannot
+catch bare names); G2 — output could overwrite the raw export or the
+terms file; G3 — non-atomic writes left partial output on failure; G4 —
+an earlier synonym column could steal an explicitly `--map`ped field;
+G5 — scrub could write CSV the loader then rejected (unknown labels);
+G6 — a real customer name sat in a source comment; G7 — backslashes in
+replacement text raised re.error. His independent suite: 624/7.
+
+Fixes: a terms file is now REQUIRED for `--apply` (`--no-terms` is an
+explicit attestation, and termless dry runs warn that names are
+unscanned); the output path may never resolve to an input; writes go
+temp-file + atomic rename; header mapping is two-pass with overrides
+first and unknown `--map` headers erroring; rows pass loader-level
+validation (vocabulary normalization + unique ids) BEFORE writing, with
+exact errors reported; replacements are literal text via lambda; the
+comment uses synthetic names. D-3 sweep extended beyond the slice:
+scrubbed engagement names from three COMMITTED docs
+(HANDOFF_2026-07-30.md engagement path, FIX3 handoff, this bundle's
+INTEG-2 line), one committed test (test_fix3.py CEO name), and Beth's
+own model-split spec — current tree now greps clean in code, tests, and
+docs (git history retains the old text; repo is private).
+
+7 new regressions (test_corpus_scrub.py now 16). Suites: **633 passed /
+5 skipped**. Awaiting Atlas re-verdict on the slice. Advisory-only per
+D-1.
+
+---
+
+## Atlas round 2 on the scrub slice (2026-07-31) — G1-G7 CONFIRMED FIXED; one new High (G8), FIXED
+
+Atlas confirmed all seven round-1 fixes with independent probes (incl.
+injected mid-write OSError preserving prior output) but found G8: the
+D-3 scan ran on pre-normalization cells, so normalization could
+INTRODUCE a blocked term afterward — his probe: raw "Comply as Written"
+with operator term "CW=[REDACTED]" wrote "CW" unscanned. His suite:
+631/7 (inventory match).
+
+Fix: the authoritative scan now runs on the FINAL normalized cells —
+the exact content written — immediately before the atomic write; the
+earlier in-loop scan is removed so nothing is scanned early and trusted
+late. Two regressions pin it (his exact probe + a pattern-hit variant).
+Suites: **635 passed / 5 skipped**. Awaiting Atlas re-verdict on CS3.
+Advisory-only per D-1.
+
+---
+
+## Gate CLEARED: corpus-scrub slice (2026-07-31) — Atlas round 3
+
+CS3 CONFIRMED after the G8 fix (final-cell scan verified at
+corpus_scrub.py:331 by independent probes: normalization-introduced
+term refused in apply AND dry-run; replacement-generated identifier
+refused; direct CAGE refused; clean case written). All of CS1-CS6 now
+CONFIRMED; G1-G8 all independently verified fixed. No new findings.
+Committed per the standing loop. Advisory-only per D-1.

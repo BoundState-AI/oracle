@@ -130,8 +130,9 @@ event-schema change needed instead of guessing.
 ## Done when
 
 Scripted walks complete all six disposition types; AMR-14 proposal fires
-in a seeded session; advisor hashes round-trip; library refuses "Boeing"
-in any field and re-offers dispositions as suggestions; Appendix-A XLSX
+in a seeded session; advisor hashes round-trip; library refuses a
+customer name in any field and re-offers dispositions as suggestions;
+Appendix-A XLSX
 carries full texts; the guide renders with explicit gaps; missing curated
 pack fails closed; suites green; corpus harness ready and skipping with
 reason.

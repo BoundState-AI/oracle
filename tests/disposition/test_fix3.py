@@ -62,13 +62,13 @@ def _walk(tmp_path, answers, units, max_units=1, advisor=False):
 
 def test_fr1_ceo_no_asks_who_and_records_identity(tmp_path):
     st, out, _ = _walk(
-        tmp_path, ["n", "Boeing-Scrubbed", "unknown", "quit"], ["AMR-1"], 0
+        tmp_path, ["n", "Acme-Aero", "unknown", "quit"], ["AMR-1"], 0
     )
     assert "Who is the CEO" in out
     assert "ceo.identity" in st.facts
     fact = st.facts["ceo.identity"]
     assert not fact.assumed and fact.confirmed
-    assert "Boeing-Scrubbed" in fact.statement
+    assert "Acme-Aero" in fact.statement
     assert any(o.role == "ceo" and o.confirmed for o in st.context.organizations)
 
 

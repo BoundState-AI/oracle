@@ -3625,6 +3625,56 @@ def _cmd_disposition_library_import(args: argparse.Namespace) -> None:
     print(json.dumps(counts, indent=2))
 
 
+def _cmd_disposition_corpus_scrub(args: argparse.Namespace) -> None:
+    from oracle.disposition.corpus_scrub import scrub
+
+    overrides = {}
+    for m in args.map or []:
+        raw, _, field = m.partition("=")
+        if not raw or not field:
+            raise SystemExit(f"--map needs RawHeader=field (got {m!r})")
+        overrides[raw] = field
+    report = scrub(
+        args.raw,
+        args.out,
+        terms_path=args.terms,
+        mapping_overrides=overrides or None,
+        apply=bool(args.apply),
+        allow_no_terms=bool(getattr(args, "no_terms", False)),
+    )
+    print(f"rows={report.rows} replacements={report.replacements}")
+    print(f"mapped: {report.mapped}")
+    if report.dropped_columns:
+        print(f"dropped columns (not corpus fields): {report.dropped_columns}")
+    for wmsg in report.warnings:
+        print(f"WARNING: {wmsg}")
+    if report.violations:
+        print(f"REFUSED — {len(report.violations)} unresolved D-3 hits:")
+        for v in report.violations:
+            print(f"  row {v.row} [{v.column}] {v.kind}: {v.excerpt!r} ({v.detail})")
+        print("Fix the source or add terms to the terms file, then re-run.")
+        raise SystemExit(1)
+    if report.format_errors:
+        print(f"REFUSED — {len(report.format_errors)} loader-level format errors:")
+        for e in report.format_errors:
+            print(f"  {e}")
+        print("The output must load cleanly via load_corpus; fix and re-run.")
+        raise SystemExit(1)
+    if report.written:
+        print(f"written: {report.out_path}")
+    else:
+        print("dry run clean — re-run with --apply to write")
+
+
+def _cmd_disposition_corpus_check(args: argparse.Namespace) -> None:
+    from oracle.disposition.corpus_scrub import check
+
+    rep = check(args.corpus)
+    print(json.dumps(rep, indent=2))
+    if not rep["reconciled"]:
+        raise SystemExit(1)
+
+
 def _cmd_disposition_audit(args: argparse.Namespace) -> None:
     from pathlib import Path
 
@@ -3931,6 +3981,58 @@ Examples:
         help="Explicitly allow the KNOWN-CORRUPT builtin 6030 pack (AR4/N8)",
     )
     p_lib_import.set_defaults(func=_cmd_disposition_library_import)
+
+    # Corpus intake — D-3 scrub assist (CS1-CS5)
+    p_corpus = disp_sub.add_parser(
+        "corpus",
+        help="Engagement-corpus intake: D-3 scrub + reconciliation check",
+    )
+    corpus_sub = p_corpus.add_subparsers(dest="corpus_command")
+
+    def _corpus_help(_args: argparse.Namespace) -> None:
+        p_corpus.print_help()
+
+    p_corpus.set_defaults(func=_corpus_help)
+
+    p_cs = corpus_sub.add_parser(
+        "scrub",
+        help="Map raw export to corpus schema, replace terms, scan, write",
+    )
+    p_cs.add_argument("raw", type=str, help="Raw engagement export (.csv/.xlsx)")
+    p_cs.add_argument("out", type=str, help="Scrubbed corpus CSV to write")
+    p_cs.add_argument(
+        "--terms",
+        type=str,
+        default=None,
+        help="Operator terms file OUTSIDE the repo (term or term=Replacement per line)",
+    )
+    p_cs.add_argument(
+        "--map",
+        action="append",
+        default=None,
+        metavar="RAW=FIELD",
+        help="Column mapping override, e.g. --map \"Req ID=requirement_id\"",
+    )
+    p_cs.add_argument(
+        "--apply",
+        action="store_true",
+        help="Write the output (only on a zero-violation scan; default dry run)",
+    )
+    p_cs.add_argument(
+        "--no-terms",
+        action="store_true",
+        help="Attest the corpus contains no engagement names (writing "
+        "without a terms file is otherwise refused — patterns cannot "
+        "catch bare names)",
+    )
+    p_cs.set_defaults(func=_cmd_disposition_corpus_scrub)
+
+    p_cc = corpus_sub.add_parser(
+        "check",
+        help="Load a corpus file and report reconciliation vs engagement targets",
+    )
+    p_cc.add_argument("corpus", type=str)
+    p_cc.set_defaults(func=_cmd_disposition_corpus_check)
 
     args = parser.parse_args()
 
