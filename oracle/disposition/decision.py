@@ -91,10 +91,22 @@ def evaluate_unit(
                     blocked.get(ExportLabel.MEET.value)
                     or f"unresolved fact {edge.fact_key}"
                 )
-                blocked[ExportLabel.NA.value] = (
-                    blocked.get(ExportLabel.NA.value)
-                    or f"class/plan fact {edge.fact_key} unresolved — cannot force N/A"
-                )
+                # AR8/N1: classification DETERMINES applicability, so for
+                # class-gated units no citation can substitute — N/A stays
+                # blocked until classification resolves (spec AMR-17 rule).
+                # Other prerequisites (e.g. ceo.identity) block Meet only;
+                # a cited scope exclusion is decidable without them.
+                if edge.fact_key == "classification.primary":
+                    blocked[ExportLabel.NA.value] = (
+                        blocked.get(ExportLabel.NA.value)
+                        or "classification_unresolved — classification "
+                        "determines applicability; resolve before N/A"
+                    )
+                elif not effective_scope:
+                    blocked[ExportLabel.NA.value] = (
+                        blocked.get(ExportLabel.NA.value)
+                        or f"class/plan fact {edge.fact_key} unresolved — cannot force N/A"
+                    )
 
     class_gated = any(
         e.fact_key == "classification.primary"

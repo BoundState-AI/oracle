@@ -18,6 +18,7 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -637,6 +638,9 @@ def export_appendix_a(
     rows = build_matrix_rows(
         session, records, enforce_decision=enforce_decision
     )
+    # AR12: Appendix A is the 6030 AMR matrix — EFCR (6033) rows belong to
+    # the internal products, not this deliverable.
+    rows = [r for r in rows if r.unit_id.upper().startswith("AMR-")]
     counts = count_by_export_label(rows)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -663,20 +667,12 @@ def export_appendix_a(
     writer.writerow(
         ["Section", "Description", "Requirement", "Applicable", "Comments"]
     )
-    for r in rows:
+    for r in sorted(rows, key=lambda x: _unit_sort_key(x.unit_id)):
         rec = records.get(r.unit_id)
         section = rec.locator.section if rec else ""
-        desc = (rec.shall_text[:120] + "…") if rec and len(rec.shall_text) > 120 else (
-            rec.shall_text if rec else ""
-        )
-        applicable = {
-            "Meet": "Yes",
-            "Meets Intent": "Yes (MI)",
-            "Exception": "Yes (EX)",
-            "N/A": "No",
-            "TBD": "TBD",
-            "Open/Not Met": "Yes (Open)",
-        }.get(r.export_label, r.export_label)
+        # FR6: FULL verbatim requirement text — no truncation, ever.
+        desc = rec.shall_text if rec else ""
+        applicable = _APPENDIX_APPLICABLE.get(r.export_label, r.export_label)
         writer.writerow(
             [
                 section,
@@ -689,6 +685,134 @@ def export_appendix_a(
     path.write_text(buf.getvalue(), encoding="utf-8")
     LOGGER.info("Wrote Appendix-A matrix to %s (%d rows)", path, len(rows))
     return path
+
+
+_APPENDIX_APPLICABLE = {
+    "Meet": "Yes",
+    "Meets Intent": "Yes (MI)",
+    "Exception": "Yes (EX)",
+    "N/A": "No",
+    "TBD": "TBD",
+    "Open/Not Met": "Yes (Open)",
+}
+
+
+def _unit_sort_key(unit_id: str) -> tuple[str, int]:
+    """Standard document order: AMR-2 before AMR-10 (numeric, not lexicographic)."""
+    m = re.match(r"([A-Za-z]+)-(\d+)", unit_id or "")
+    if m:
+        return (m.group(1).upper(), int(m.group(2)))
+    return (unit_id or "", 0)
+
+
+def _write_xlsx_book(
+    path: Path,
+    sheets: list[tuple[str, list[str], list[list[str]]]],
+) -> Path:
+    """Generic stdlib OOXML workbook writer: sheets = [(name, headers, rows)]."""
+    import zipfile
+
+    n = len(sheets)
+    overrides = "\n".join(
+        f'  <Override PartName="/xl/worksheets/sheet{i}.xml" '
+        f'ContentType="application/vnd.openxmlformats-officedocument.'
+        f'spreadsheetml.worksheet+xml"/>'
+        for i in range(1, n + 1)
+    )
+    content_types = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\n'
+        '  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>\n'
+        '  <Default Extension="xml" ContentType="application/xml"/>\n'
+        '  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>\n'
+        f"{overrides}\n</Types>"
+    )
+    rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n'
+        '  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>\n'
+        "</Relationships>"
+    )
+    wb_rels_items = "\n".join(
+        f'  <Relationship Id="rId{i}" Type="http://schemas.openxmlformats.org/'
+        f'officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{i}.xml"/>'
+        for i in range(1, n + 1)
+    )
+    wb_rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n'
+        f"{wb_rels_items}\n</Relationships>"
+    )
+    sheet_tags = "\n".join(
+        f'    <sheet name="{name[:31]}" sheetId="{i}" r:id="rId{i}"/>'
+        for i, (name, _, _) in enumerate(sheets, start=1)
+    )
+    workbook = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"\n'
+        ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">\n'
+        f"  <sheets>\n{sheet_tags}\n  </sheets>\n</workbook>"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", content_types)
+        zf.writestr("_rels/.rels", rels)
+        zf.writestr("xl/workbook.xml", workbook)
+        zf.writestr("xl/_rels/workbook.xml.rels", wb_rels)
+        for i, (_, headers, rows_) in enumerate(sheets, start=1):
+            zf.writestr(
+                f"xl/worksheets/sheet{i}.xml", _xlsx_sheet_xml(headers, rows_)
+            )
+    return path
+
+
+def export_appendix_a_xlsx(
+    session: DispositionSession,
+    records: dict[str, RequirementRecord],
+    path: Path | str,
+    *,
+    enforce_decision: bool = True,
+) -> Path:
+    """FR6: the real Appendix-A worksheet — full verbatim text, standard order."""
+    if session.state is None:
+        raise ExportError("Session not open")
+    rows = build_matrix_rows(session, records, enforce_decision=enforce_decision)
+    # AR12: AMR-only — same filter as the CSV form.
+    rows = [r for r in rows if r.unit_id.upper().startswith("AMR-")]
+    counts = count_by_export_label(rows)
+    st = session.state
+    data: list[list[str]] = []
+    for r in sorted(rows, key=lambda x: _unit_sort_key(x.unit_id)):
+        rec = records.get(r.unit_id)
+        data.append(
+            [
+                rec.locator.section if rec else "",
+                rec.shall_text if rec else "",  # FULL text — no truncation
+                r.unit_id,
+                _APPENDIX_APPLICABLE.get(r.export_label, r.export_label),
+                r.comment or r.export_label,
+            ]
+        )
+    meta = [
+        ["banner", ADVISORY_BANNER],
+        ["session_id", st.session_id],
+        ["pack_hash", st.pack_hash],
+        ["rdw_spec", SPEC_VERSIONS["rdw_spec"]],
+        ["counts", str(counts)],
+    ]
+    out = _write_xlsx_book(
+        Path(path),
+        [
+            (
+                "Appendix A",
+                ["Section", "Description", "Requirement", "Applicable", "Comments"],
+                data,
+            ),
+            ("Meta", ["field", "value"], meta),
+        ],
+    )
+    LOGGER.info("Wrote Appendix-A XLSX to %s (%d rows)", out, len(data))
+    return out
 
 
 def export_readiness_roadmap(
@@ -761,6 +885,118 @@ def export_readiness_roadmap(
     return path
 
 
+_GAP = "— (not yet established)"
+
+
+def _guide_section(
+    session: DispositionSession,
+    uid: str,
+    rec: Optional[RequirementRecord],
+    unit: UnitAxesState,
+    acts: list,
+) -> list[str]:
+    """FR6: one working-guide section — explicit gaps, never invented content."""
+    from oracle.disposition.graph import DependencyGraph
+
+    g = getattr(session, "_graph", None) or DependencyGraph.from_seeds()
+    related = sorted(
+        {e.dependent_id for e in g.edges if e.prerequisite_id == uid}
+        | {e.prerequisite_id for e in g.prerequisites_of(uid) if not e.fact_key}
+    )
+    process = session.fact_for("hardware.process")
+    ev = "; ".join(f"{r.doc_id}@{r.revision}" for r in unit.evidence_refs) or _GAP
+    # AR13: "objective evidence" means REGISTERED refs only — a cited but
+    # unregistered ref is a claim, not objective evidence.
+    store = session.evidence_store()
+    if store is None:
+        reg_ev = "— (no evidence registry; cited refs above are unverified)"
+    else:
+        known = store.known_doc_revisions()
+        reg_ev = "; ".join(
+            f"{r.doc_id}@{r.revision}"
+            for r in unit.evidence_refs
+            if (r.doc_id, r.revision) in known
+        ) or _GAP
+    done_when = "; ".join(a.exit_criteria for a in acts if a.exit_criteria) or _GAP
+    dest = "; ".join(a.deliverable for a in acts if a.deliverable) or _GAP
+    gate = (
+        "authority-dependent (CEO/NASA approval path)"
+        if rec and rec.authority_dependent
+        else f"approval_state={unit.approval_state}"
+    )
+    try:
+        label = unit.export_label().value
+    except Exception:
+        label = "<unmapped>"
+    return [
+        f"## {uid} — {label}",
+        f"**What it requires (verbatim):** {rec.shall_text if rec else _GAP}",
+        f"**Why it exists (published rationale):** "
+        f"{(rec.rationale.strip() if rec and rec.rationale else _GAP)}",
+        # AR13: only an attested intent_statement is an interpretation; the
+        # matrix comment has its own line and must not masquerade as one.
+        f"**Process interpretation ({process.statement if process else 'process not recorded'}):** "
+        f"{unit.intent_statement or _GAP}",
+        f"**Matrix comment:** {unit.comment or _GAP}",
+        f"**Current evidence (cited refs):** {ev}",
+        f"**Controlled destination (deliverables):** {dest}",
+        f"**Objective evidence (registered refs):** {reg_ev}",
+        f"**Done-when (exit criteria):** {done_when}",
+        f"**Related AMRs:** {', '.join(related) or _GAP}",
+        f"**Gate / hold point:** {gate}",
+        "",
+    ]
+
+
+def export_implementation_guide(
+    session: DispositionSession,
+    records: dict[str, RequirementRecord],
+    path: Path | str,
+) -> Path:
+    """FR6 internal product: the detailed MRL implementation working guide.
+
+    Per-AMR sections for every non-Met row. Fields come from the record and
+    attested content only; empty fields render as explicit gaps.
+    """
+    if session.state is None:
+        raise ExportError("Session not open")
+    from oracle.disposition.actions import migrate_string_action
+    from oracle.disposition.readiness import map_readiness
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    st = session.state
+    lines = [
+        f"# MRL Implementation Guide",
+        f"{ADVISORY_BANNER}",
+        f"session_id={st.session_id} pack_hash={st.pack_hash} "
+        f"rdw={SPEC_VERSIONS['rdw_spec']}",
+        "",
+    ]
+    n = 0
+    for uid in sorted(st.units.keys(), key=_unit_sort_key):
+        unit = st.units[uid]
+        acts = session.actions_for_unit(uid)
+        if not acts and unit.open_actions:
+            acts = [
+                migrate_string_action(t, unit_id=uid, index=i)
+                for i, t in enumerate(unit.open_actions)
+            ]
+        rr = map_readiness(
+            unit, acts,
+            has_qualifying_evidence=session.has_qualifying_meet_evidence(unit),
+        )
+        if rr.label.value == "Met":
+            continue
+        lines.extend(
+            _guide_section(session, uid, records.get(uid), unit, list(acts))
+        )
+        n += 1
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    LOGGER.info("Wrote implementation guide to %s (%d sections)", path, n)
+    return path
+
+
 def export_dual_products(
     session: DispositionSession,
     records: dict[str, RequirementRecord],
@@ -768,16 +1004,23 @@ def export_dual_products(
     *,
     enforce_decision: bool = True,
 ) -> dict[str, Path]:
-    """Stage E: supplier matrix suite + Appendix-A + readiness roadmap."""
+    """Stage E: supplier suite + Appendix-A (XLSX + CSV) + roadmap + guide."""
     out = Path(out_dir)
     paths = export_all(
         session, records, out, enforce_decision=enforce_decision
     )
-    paths["appendix_a"] = export_appendix_a(
+    paths["appendix_a"] = export_appendix_a_xlsx(
+        session, records, out / "appendix_a_matrix.xlsx",
+        enforce_decision=enforce_decision,
+    )
+    paths["appendix_a_csv"] = export_appendix_a(
         session, records, out / "appendix_a_matrix.csv",
         enforce_decision=enforce_decision,
     )
     paths["roadmap"] = export_readiness_roadmap(
         session, records, out / "readiness_roadmap.md"
+    )
+    paths["implementation_guide"] = export_implementation_guide(
+        session, records, out / "implementation_guide.md"
     )
     return paths

@@ -160,6 +160,14 @@ class EvidenceRef(BaseModel):
     date: Optional[str] = None
     note: str = ""
 
+    @field_validator("doc_id", "revision", mode="before")
+    @classmethod
+    def _strip_identity(cls, v: object) -> object:
+        # N7: registry matching is exact on (doc_id, revision) — whitespace
+        # drift at attachment silently demoted registered evidence. Case is
+        # left alone (revision identifiers may be case-sensitive).
+        return v.strip() if isinstance(v, str) else v
+
 
 class Fact(BaseModel):
     """Asserted/inferred/evidenced fact with supersession chain."""
@@ -218,6 +226,10 @@ class UnitAxesState(BaseModel):
     exception_basis: Optional[str] = None
     permanent_relief_basis: Optional[str] = None
     closure_path_action_id: Optional[str] = None
+    # FR3 — Meets Intent fields (mirror DispositionUnit; gated at election)
+    intent_statement: Optional[str] = None
+    alternative_control: Optional[str] = None
+    control_class: Optional[Literal["integral", "disclosed"]] = None
 
     @field_validator("scope_citation", mode="before")
     @classmethod
@@ -273,6 +285,8 @@ class SessionState(BaseModel):
     facts_by_id: dict[str, Fact] = Field(default_factory=dict)
     units: dict[str, UnitAxesState] = Field(default_factory=dict)
     paired_answers: dict[str, str] = Field(default_factory=dict)  # question_key -> answer
+    # N9: which units each paired answer applied to (self-describing pairs)
+    paired_units: dict[str, tuple[str, ...]] = Field(default_factory=dict)
     exports: list[dict[str, Any]] = Field(default_factory=list)
     needs_rereview: list[str] = Field(default_factory=list)  # durable via event replay
     rereview_diffs: dict[str, dict[str, Any]] = Field(default_factory=dict)
@@ -280,6 +294,9 @@ class SessionState(BaseModel):
     actions: dict[str, Any] = Field(default_factory=dict)  # action_id -> ActionRecord
     raw_answers: list[dict[str, Any]] = Field(default_factory=list)
     advisor_outputs: list[dict[str, Any]] = Field(default_factory=list)
+    # FR5 — library reuse: suggestions are never auto-applied
+    library_suggestions: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    library_action_patterns: list[dict[str, Any]] = Field(default_factory=list)
     schema_version: str = SESSION_SCHEMA
 
 
@@ -306,6 +323,9 @@ class DispositionSession:
         self._header_path = self.root / "session.json"
         self.eventlog = EventLog(self.root / "events.jsonl")
         self.state: Optional[SessionState] = None
+        # N3: the exact records this session pinned at open/resume —
+        # renderers must use THESE, never re-load a (different) default set.
+        self.loaded_records: list = []
 
     @contextmanager
     def _exclusive_lock(self, timeout_s: float = 30.0) -> Iterator[None]:
@@ -351,6 +371,7 @@ class DispositionSession:
         expected_hash: Optional[str] = None,
         repin: bool = False,
         multi_pack: bool = True,
+        allow_builtin: bool = False,
     ) -> tuple[list, str, dict[str, str]]:
         """Load single pack or default 6030+6033 multi-pack. Returns recs, pin, hashes."""
         if pack_path is not None:
@@ -359,7 +380,9 @@ class DispositionSession:
             )
             return recs, digest, {recs[0].rule_pack_id if recs else "pack": digest}
         if multi_pack:
-            recs, hashes = load_rdw_default_packs(repin=True)
+            recs, hashes = load_rdw_default_packs(
+                repin=True, allow_builtin=allow_builtin
+            )
             # Composite pin over sorted pack hashes
             material = "|".join(f"{k}={v}" for k, v in sorted(hashes.items()))
             import hashlib as _hl
@@ -370,6 +393,18 @@ class DispositionSession:
                     f"Multi-pack pin mismatch: session={expected_hash} now={digest}"
                 )
             return recs, digest, hashes
+        # AR4: the single-pack DEFAULT is the known-corrupt builtin — the FR7
+        # fail-closed rule applies here too, not just in the multi-pack loader.
+        if not allow_builtin:
+            raise PackPinError(
+                "Default single-pack load targets the known-corrupt builtin "
+                "6030 pack. Pass allow_builtin=True explicitly (FR7/AR4) or "
+                "use the curated multi-pack default."
+            )
+        LOGGER.warning(
+            "allow_builtin=True: loading the KNOWN-CORRUPT builtin 6030 pack "
+            "as the single-pack default"
+        )
         recs, digest = load_requirement_records(
             None, expected_hash=expected_hash, repin=repin
         )
@@ -383,6 +418,7 @@ class DispositionSession:
         repin: bool = False,
         seed_context: bool = True,
         multi_pack: bool = True,
+        allow_builtin: bool = False,
     ) -> SessionState:
         """Create a new session or refuse if header already pins a different pack."""
         # M1: do not call resume() under the lock (non-reentrant)
@@ -392,6 +428,7 @@ class DispositionSession:
                 repin=repin,
                 multi_pack=multi_pack,
                 pack_path=pack_path,
+                allow_builtin=allow_builtin,
             )
 
         with self._exclusive_lock():
@@ -401,8 +438,12 @@ class DispositionSession:
                 )
 
             records, digest, pack_hashes = self._load_records(
-                pack_path, repin=repin, multi_pack=multi_pack
+                pack_path,
+                repin=repin,
+                multi_pack=multi_pack,
+                allow_builtin=allow_builtin,
             )
+            self.loaded_records = records
             session_id = f"sess-{uuid.uuid4().hex[:12]}"
             pack_id = "+".join(sorted(pack_hashes.keys())) if pack_hashes else "unknown"
             header = {
@@ -457,6 +498,7 @@ class DispositionSession:
         repin: bool = False,
         pack_path: Path | str | None = None,
         multi_pack: Optional[bool] = None,
+        allow_builtin: bool = False,
     ) -> SessionState:
         """Reload = replay event log; verify pack pin (default: no silent repin)."""
         with self._exclusive_lock():
@@ -484,18 +526,24 @@ class DispositionSession:
                     expected_hash=None if repin else header.get("pack_hash"),
                     repin=repin,
                     multi_pack=bool(multi_pack) and pack_path is None,
+                    allow_builtin=allow_builtin,
                 )
             except PackPinError:
-                # Compat: retry single-pack pin when composite fails (H2)
-                if pack_path is None and not repin:
+                # Compat: retry single-pack pin when composite fails (H2).
+                # AR4: the retry targets the builtin, so the same explicit
+                # opt-in is required — legacy builtin-pinned sessions must
+                # not resume silently onto the corrupt pack.
+                if pack_path is None and not repin and allow_builtin:
                     records, digest, pack_hashes = self._load_records(
                         None,
                         expected_hash=header.get("pack_hash"),
                         repin=False,
                         multi_pack=False,
+                        allow_builtin=True,
                     )
                 else:
                     raise
+            self.loaded_records = records
             if repin and digest != header["pack_hash"]:
                 header["pack_hash"] = digest
                 header["pack_hashes"] = pack_hashes
@@ -650,6 +698,10 @@ class DispositionSession:
                     )
             elif et == "paired_answer":
                 state.paired_answers[p["question_key"]] = p["answer"]
+                # N9: legacy events lack unit_ids — default to the classic pair
+                state.paired_units[p["question_key"]] = tuple(
+                    p.get("unit_ids") or ("AMR-21", "AMR-82")
+                )
             elif et == "answer_recorded":
                 state.raw_answers.append(
                     {
@@ -674,6 +726,13 @@ class DispositionSession:
                 state.advisor_outputs.append(
                     {k: v for k, v in p.items() if k not in ("event_type", "_schema")}
                 )
+            elif et == "library_imported":
+                for dsp in p.get("dispositions") or []:
+                    rid = dsp.get("requirement_id")
+                    if rid:
+                        state.library_suggestions[rid] = dsp
+                for pat in p.get("action_patterns") or []:
+                    state.library_action_patterns.append(pat)
             elif et == "context_updated":
                 state.context = ProjectContext.model_validate(p["context"])
             elif et == "export_produced":
@@ -826,6 +885,7 @@ class DispositionSession:
         actor_name: str,
         election: bool = True,
         enforce_decision: bool = True,
+        _defer: Optional[list] = None,
         **axis_fields: Any,
     ) -> UnitAxesState:
         """
@@ -854,12 +914,23 @@ class DispositionSession:
                 data[reason] = None
         unit = UnitAxesState.model_validate(data)
 
-        # C1: §13.2 on stored comments (including edited)
+        # C1: §13.2 on stored comments (including edited). N4: only the
+        # comment being SET in this call refuses — re-checking a carried
+        # legacy comment wedged every axis update on pre-fix sessions.
+        # A carried violation is surfaced as a warning until repaired via
+        # a comment update (which IS checked).
         if unit.comment:
             hits = prohibited_language_hits(unit.comment)
-            if hits:
+            if hits and "comment" in axis_fields:
                 raise SessionError(
                     f"Comment fails §13.2 prohibited-language check: {hits}"
+                )
+            if hits:
+                LOGGER.warning(
+                    "Unit %s carries a pre-existing §13.2 violation %s — "
+                    "repair the comment; axis updates proceed",
+                    unit_id,
+                    hits,
                 )
 
         # Stage A: not_yet_due requires justification
@@ -867,6 +938,16 @@ class DispositionSession:
             raise SessionError(
                 "not_yet_due requires not_yet_due_justification"
             )
+        # AR2: Not Yet Due is only coherent while implementation is undecided.
+        # An explicit contradiction refuses; a stale carried marker clears so a
+        # later Meet/Not-Met election cannot produce two contradictory views.
+        if unit.not_yet_due and unit.implementation_state != "tbd":
+            if axis_fields.get("not_yet_due") is True:
+                raise SessionError(
+                    "not_yet_due requires implementation_state='tbd' "
+                    f"(got {unit.implementation_state!r})"
+                )
+            unit = unit.model_copy(update={"not_yet_due": False})
 
         # Validate axis mapping
         try:
@@ -917,17 +998,47 @@ class DispositionSession:
                         "Election refused: Exception requires closure_path_action_id "
                         "or permanent_relief_basis"
                     )
+            # FR3: Meets Intent requires intent + alternative control + class
+            if label.value == "Meets Intent":
+                missing = [
+                    name
+                    for name, val in (
+                        ("intent_statement", unit.intent_statement),
+                        ("alternative_control", unit.alternative_control),
+                        ("control_class", unit.control_class),
+                    )
+                    if not (str(val or "")).strip()
+                ]
+                if missing:
+                    raise SessionError(
+                        "Election refused: Meets Intent requires "
+                        + ", ".join(missing)
+                    )
 
         # Re-open path: re-election on rejected/superseded returns to proposed
         if election and unit.review_state in ("rejected", "superseded"):
             unit = unit.model_copy(update={"review_state": "proposed"})
 
         et = "election" if election else "axis_set"
+        payload = {"event_type": et, "unit": unit.model_dump(mode="json")}
+        # N5: deferred mode — full validation ran above, but persistence is
+        # the caller's (single atomic batch), so a multi-unit operation can
+        # never persist a prefix of its elections.
+        if _defer is not None:
+            _defer.append(
+                {
+                    "actor": actor_name,
+                    "unit_id": unit_id,
+                    "payload": payload,
+                    "unit": unit,
+                }
+            )
+            return unit
         with self._exclusive_lock():
             self.eventlog.append(
                 actor=actor_name,
                 unit_id=unit_id,
-                payload={"event_type": et, "unit": unit.model_dump(mode="json")},
+                payload=payload,
             )
             self.state.units[unit_id] = unit
         return unit
@@ -1030,7 +1141,14 @@ class DispositionSession:
             comment=comment,
         )
 
-    def record_paired_answer(self, question_key: str, answer: str, actor_name: str) -> None:
+    def record_paired_answer(
+        self,
+        question_key: str,
+        answer: str,
+        actor_name: str,
+        *,
+        unit_ids: tuple[str, ...] = ("AMR-21", "AMR-82"),
+    ) -> None:
         if self.state is None:
             raise SessionError("Session not open")
         with self._exclusive_lock():
@@ -1040,9 +1158,132 @@ class DispositionSession:
                     "event_type": "paired_answer",
                     "question_key": question_key,
                     "answer": answer,
+                    "unit_ids": list(unit_ids),
                 },
             )
             self.state.paired_answers[question_key] = answer
+            self.state.paired_units[question_key] = tuple(unit_ids)
+
+    def apply_paired_answer(
+        self,
+        question_key: str,
+        answer: str,
+        actor_name: str,
+        *,
+        paired_unit_ids: tuple[str, ...] = ("AMR-21", "AMR-82"),
+        scope_citation: Optional[str] = None,
+    ) -> None:
+        """FR5/case 19: apply a paired answer to every paired unit, then record it.
+
+        AR5: a paired "no" elects N/A ONLY with an operator-provided positive
+        scope citation — the answer itself is never laundered into one; without
+        a citation the units land TBD(scope_decision_not_made).
+        AR10: elections happen FIRST; the paired answer is recorded only after
+        they all succeed, so a crash can never suppress the question while
+        leaving its effects unapplied.
+        """
+        if self.state is None:
+            raise SessionError("Session not open")
+        ans = (answer or "").strip().lower()
+        # N5: validate every election first (deferred), then persist ALL of
+        # them + the paired record as ONE atomic eventlog batch — a crash can
+        # never leave the pair divergent or the answer half-applied.
+        deferred: list = []
+        applied_ids: list[str] = []
+        for pid in paired_unit_ids:
+            if pid not in self.state.units:
+                continue
+            applied_ids.append(pid)
+            if ans in ("yes", "y"):
+                self.set_axes(
+                    pid,
+                    actor_name=actor_name,
+                    applicability="yes",
+                    applicability_tbd_reason=None,
+                    _defer=deferred,
+                )
+            elif ans in ("no", "n") and (scope_citation or "").strip():
+                self.set_axes(
+                    pid,
+                    actor_name=actor_name,
+                    applicability="no",
+                    implementation_state="not_reached",
+                    organization_responsibility="external",
+                    scope_citation=scope_citation,
+                    _defer=deferred,
+                )
+            elif ans in ("no", "n"):
+                self.set_axes(
+                    pid,
+                    actor_name=actor_name,
+                    applicability="tbd",
+                    applicability_tbd_reason=TBDReason.SCOPE_DECISION_NOT_MADE,
+                    enforce_decision=False,
+                    _defer=deferred,
+                )
+            else:
+                self.set_axes(
+                    pid,
+                    actor_name=actor_name,
+                    applicability="tbd",
+                    applicability_tbd_reason=TBDReason.CUSTOMER_INPUT_MISSING,
+                    enforce_decision=False,
+                    _defer=deferred,
+                )
+        # AR10 ordering preserved inside the batch: elections precede the
+        # record. N9: the record names the units it applied to.
+        items = [
+            {"actor": d["actor"], "unit_id": d["unit_id"], "payload": d["payload"]}
+            for d in deferred
+        ]
+        items.append(
+            {
+                "actor": actor_name,
+                "payload": {
+                    "event_type": "paired_answer",
+                    "question_key": question_key,
+                    "answer": answer,
+                    "unit_ids": applied_ids,
+                },
+            }
+        )
+        with self._exclusive_lock():
+            self.eventlog.append_many(items)
+            for d in deferred:
+                self.state.units[d["unit_id"]] = d["unit"]
+            self.state.paired_answers[question_key] = answer
+            self.state.paired_units[question_key] = tuple(applied_ids)
+
+    def record_library_import(
+        self,
+        *,
+        source_session_id: str,
+        dispositions: list[dict[str, Any]],
+        action_patterns: list[dict[str, Any]],
+        actor_name: str,
+    ) -> None:
+        """FR5: store imported dispositions/actions as SUGGESTIONS (event-logged).
+
+        Suggestions are shown by the walk with provenance and require normal
+        gated election + attestation — never auto-applied.
+        """
+        if self.state is None:
+            raise SessionError("Session not open")
+        with self._exclusive_lock():
+            self.eventlog.append(
+                actor=actor_name,
+                payload={
+                    "event_type": "library_imported",
+                    "source_session_id": source_session_id,
+                    "dispositions": dispositions,
+                    "action_patterns": action_patterns,
+                },
+            )
+            for dsp in dispositions:
+                rid = dsp.get("requirement_id")
+                if rid:
+                    self.state.library_suggestions[rid] = dsp
+            self.state.library_action_patterns.extend(action_patterns)
 
     def update_context(self, context: ProjectContext, actor_name: str) -> None:
         if self.state is None:

@@ -53,12 +53,15 @@ def load_rdw_default_packs(
     include_6033: bool = True,
     extra_paths: Optional[list[Path | str]] = None,
     repin: bool = True,
+    allow_builtin: bool = False,
+    curated_path: Optional[Path | str] = None,
 ) -> tuple[list[RequirementRecord], dict[str, str]]:
     """
-    Phase 0 / Stage 0: load 6030 (curated preferred) + curated 6033 seed.
+    Phase 0 / Stage 0: load the curated 6030 pack + curated 6033 seed.
 
-    When nasa_std_6030_curated.json is present under disposition/data/, it is
-    preferred over the builtin pack (builtin stays untouched as fallback).
+    FR7: the curated pack is REQUIRED. When it is absent this fails closed —
+    the builtin pack is known-corrupt (77/115 truncated texts) and is only
+    reachable via an explicit allow_builtin=True escape, which logs that fact.
 
     Returns (merged records, {pack_id: content_hash}).
     """
@@ -66,10 +69,22 @@ def load_rdw_default_packs(
     all_recs: list[RequirementRecord] = []
     seen: set[str] = set()
 
-    # Stage 0: curated 6030 supersedes builtin when present
-    pack_6030 = CURATED_6030 if CURATED_6030.is_file() else Path(BUILTIN_NASA_6030)
-    if CURATED_6030.is_file():
-        LOGGER.info("Using curated 6030 pack at %s", CURATED_6030)
+    curated = Path(curated_path) if curated_path is not None else CURATED_6030
+    if curated.is_file():
+        pack_6030 = curated
+    elif allow_builtin:
+        LOGGER.warning(
+            "allow_builtin=True: loading the KNOWN-CORRUPT builtin 6030 pack "
+            "(curated pack missing at %s)",
+            curated,
+        )
+        pack_6030 = Path(BUILTIN_NASA_6030)
+    else:
+        raise PackPinError(
+            f"Curated 6030 pack missing at {curated}. Refusing the "
+            "known-corrupt builtin fallback (FR7); re-run Stage 0 curation "
+            "or pass allow_builtin=True explicitly."
+        )
     paths: list[Path] = [pack_6030]
     if include_6033 and SEED_6033.is_file():
         paths.append(SEED_6033)

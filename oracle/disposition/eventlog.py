@@ -242,6 +242,69 @@ class EventLog:
         LOGGER.info("eventlog.append id=%s actor=%s %s->%s unit=%s", event_id, actor, from_state, to_state, unit_id)
         return ev
 
+    def append_many(
+        self,
+        items: list[dict[str, Any]],
+        *,
+        rule_version: str = RULE_VERSION,
+    ) -> list[Event]:
+        """
+        Append several events ATOMICALLY: all lines land in one temp+rename,
+        so a crash can never persist a prefix of the batch (N5 — paired
+        elections must not diverge). Each item: {actor, unit_id?, payload?}.
+        Hash chain continues through the batch exactly as sequential appends.
+        """
+        if not items:
+            return []
+        prev_hash = self._last_hash()
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        base = f"evt-{now.replace(':', '').replace('-', '')}-{hashlib.sha256(str(os.getpid()).encode()).hexdigest()[:8]}"
+        events: list[Event] = []
+        for i, item in enumerate(items):
+            event_id = f"{base}-b{i}"
+            content_payload = dict(item.get("payload") or {})
+            content_payload.setdefault("_schema", SCHEMA_VERSION)
+            body = {
+                "event_id": event_id,
+                "timestamp": now,
+                "actor": item["actor"],
+                "from_state": item.get("from_state"),
+                "to_state": item.get("to_state"),
+                "unit_id": item.get("unit_id"),
+                "release_context": item.get("release_context"),
+                "rule_version": rule_version,
+                "payload": content_payload,
+            }
+            hash_value = _compute_hash(prev_hash, body)
+            events.append(
+                Event(prev_hash=prev_hash, hash=hash_value, **body)
+            )
+            prev_hash = hash_value
+
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_fd, tmp_name = tempfile.mkstemp(
+            prefix="eventlog-", suffix=".jsonl", dir=str(self.path.parent)
+        )
+        try:
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as tmp:
+                if self.path.exists():
+                    with self.path.open("r", encoding="utf-8") as src:
+                        for line in src:
+                            tmp.write(line)
+                for ev in events:
+                    tmp.write(_canonical_json(ev.to_json_dict()) + "\n")
+            os.replace(tmp_name, self.path)
+        except Exception:
+            try:
+                os.unlink(tmp_name)
+            except Exception:
+                pass
+            raise
+        LOGGER.info(
+            "eventlog.append_many n=%d first=%s", len(events), events[0].event_id
+        )
+        return events
+
     def tail(self, n: int = 10) -> list[Event]:
         """Return the last n events (most recent last)."""
         events = list(self.iter_events())

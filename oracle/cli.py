@@ -3576,14 +3576,18 @@ def _cmd_disposition_golden(args: argparse.Namespace) -> None:
 
 def _cmd_disposition_export(args: argparse.Namespace) -> None:
     from oracle.disposition.export import export_all, stamp_meta
-    from oracle.disposition.packs import load_rdw_default_packs
     from oracle.disposition.session import DispositionSession
 
     s = DispositionSession(args.session_dir)
     # H2: default repin=False — levy drift is a new run, not silent rewrite
-    s.resume(actor_name=args.actor, repin=bool(getattr(args, "repin", False)))
-    recs, _ = load_rdw_default_packs(repin=True)
-    records = {r.requirement_id: r for r in recs}
+    s.resume(
+        actor_name=args.actor,
+        repin=bool(getattr(args, "repin", False)),
+        allow_builtin=bool(getattr(args, "allow_builtin", False)),
+    )
+    # N3: render from the records the SESSION pinned — re-loading the
+    # default set here exported curated text under a builtin pin.
+    records = {r.requirement_id: r for r in s.loaded_records}
     # F2: known set is (doc_id, revision) from registry; export_all loads it
     # when omitted — never synthesize from the refs under validation
     paths = export_all(s, records, args.export_dir)
@@ -3596,7 +3600,11 @@ def _cmd_disposition_library_export(args: argparse.Namespace) -> None:
     from oracle.disposition.session import DispositionSession
 
     s = DispositionSession(args.session_dir)
-    s.resume(actor_name=args.actor, repin=False)
+    s.resume(
+        actor_name=args.actor,
+        repin=False,
+        allow_builtin=bool(getattr(args, "allow_builtin", False)),
+    )
     path = export_library(s, args.out_json)
     print(json.dumps({"library": str(path)}, indent=2))
 
@@ -3608,10 +3616,11 @@ def _cmd_disposition_library_import(args: argparse.Namespace) -> None:
     from oracle.disposition.session import DispositionSession
 
     s = DispositionSession(args.session_dir)
+    allow_builtin = bool(getattr(args, "allow_builtin", False))
     if not (Path(args.session_dir) / "session.json").exists():
-        s.open(actor_name=args.actor, repin=True)
+        s.open(actor_name=args.actor, repin=True, allow_builtin=allow_builtin)
     else:
-        s.resume(actor_name=args.actor, repin=False)
+        s.resume(actor_name=args.actor, repin=False, allow_builtin=allow_builtin)
     counts = import_library(s, args.library_json, actor_name=args.actor)
     print(json.dumps(counts, indent=2))
 
@@ -3621,14 +3630,17 @@ def _cmd_disposition_audit(args: argparse.Namespace) -> None:
 
     from oracle.disposition.audit import build_lineage
     from oracle.disposition.evidence import EvidenceStore
-    from oracle.disposition.packs import load_rdw_default_packs
     from oracle.disposition.session import DispositionSession
 
     s = DispositionSession(args.session_dir)
     # H2: audit is strictly read-only — never repin
-    s.resume(actor_name=args.actor, repin=False)
-    recs, _ = load_rdw_default_packs(repin=True)
-    records = {r.requirement_id: r for r in recs}
+    s.resume(
+        actor_name=args.actor,
+        repin=False,
+        allow_builtin=bool(getattr(args, "allow_builtin", False)),
+    )
+    # N3: lineage must cite the session-pinned records, not the default set
+    records = {r.requirement_id: r for r in s.loaded_records}
     ev_store = None
     ev_root = Path(args.session_dir) / "evidence"
     if ev_root.is_dir():
@@ -3829,6 +3841,11 @@ Examples:
         action="store_true",
         help="Use LiveAdvisor (requires ANTHROPIC_API_KEY / RDW_ADVISOR_MODEL)",
     )
+    p_walk.add_argument(
+        "--allow-builtin",
+        action="store_true",
+        help="Explicitly allow the KNOWN-CORRUPT builtin 6030 pack (AR4)",
+    )
     p_walk.set_defaults(func=_cmd_disposition_walk)
 
     p_golden = disp_sub.add_parser(
@@ -3856,6 +3873,11 @@ Examples:
     p_export.add_argument("--session-dir", type=str, required=True)
     p_export.add_argument("--export-dir", type=str, required=True)
     p_export.add_argument("--actor", type=str, default="operator")
+    p_export.add_argument(
+        "--allow-builtin",
+        action="store_true",
+        help="Explicitly allow the KNOWN-CORRUPT builtin 6030 pack (AR4)",
+    )
     p_export.set_defaults(func=_cmd_disposition_export)
 
     p_audit = disp_sub.add_parser(
@@ -3865,6 +3887,11 @@ Examples:
     p_audit.add_argument("--session-dir", type=str, required=True)
     p_audit.add_argument("--unit", type=str, required=True)
     p_audit.add_argument("--actor", type=str, default="auditor")
+    p_audit.add_argument(
+        "--allow-builtin",
+        action="store_true",
+        help="Explicitly allow the KNOWN-CORRUPT builtin 6030 pack (AR4)",
+    )
     p_audit.set_defaults(func=_cmd_disposition_audit)
 
     # Stage D — context library
@@ -3885,6 +3912,11 @@ Examples:
     p_lib_export.add_argument("session_dir", type=str)
     p_lib_export.add_argument("out_json", type=str)
     p_lib_export.add_argument("--actor", type=str, default="operator")
+    p_lib_export.add_argument(
+        "--allow-builtin",
+        action="store_true",
+        help="Explicitly allow the KNOWN-CORRUPT builtin 6030 pack (AR4/N8)",
+    )
     p_lib_export.set_defaults(func=_cmd_disposition_library_export)
 
     p_lib_import = lib_sub.add_parser(
@@ -3893,6 +3925,11 @@ Examples:
     p_lib_import.add_argument("session_dir", type=str)
     p_lib_import.add_argument("library_json", type=str)
     p_lib_import.add_argument("--actor", type=str, default="operator")
+    p_lib_import.add_argument(
+        "--allow-builtin",
+        action="store_true",
+        help="Explicitly allow the KNOWN-CORRUPT builtin 6030 pack (AR4/N8)",
+    )
     p_lib_import.set_defaults(func=_cmd_disposition_library_import)
 
     args = parser.parse_args()

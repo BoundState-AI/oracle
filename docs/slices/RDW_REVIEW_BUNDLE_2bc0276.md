@@ -388,6 +388,255 @@ confirmed** (monolithic).
    closure (units stay TBD and get individual questions), but the
    ask-once-apply-to-all machinery doesn't fire on import.
 
-*Prepared by Beth from Atlas's reviews of 2026-07-30 and Beth's reviews of
-`ea6cd88`, `2bc0276`, `2ab4e81`, fix round 2, and the assistant slice
-(probe-verified). Advisory-only per D-1.*
+---
+
+## Fran's product review — `983ff9d` (2026-07-30) + Beth verification
+
+Fran's verdict: **excellent foundation, not remotely done** — the branch
+built the compliance-decision *chassis* (hash-pinned engine, axes with
+derived views, curated pack, raw answers, structured actions: all real),
+not the *product* (the AMR-by-AMR expert conversation, requirement-specific
+closure planning, the working-guide deliverables, the 115-row corpus).
+Beth concurs and retracts the earlier "we already built most of it"
+framing — that was true of the chassis, not the product.
+
+**All findings probe-verified by Beth on `983ff9d`:**
+
+- **AF1 + AF2 CONFIRMED FIXED** (hyphen tokens and rationale leaks gone
+  from the curated pack; ownerless action now → TBD Verify).
+- **FR-CEO (critical):** intake asks "Confirm customer is assumed CEO?" —
+  "y" changes nothing; "n" sets `confirmed=True, assumed_ceo=False`
+  WITHOUT asking who the CEO is; no `ceo.identity` fact; intake completes.
+  Broken for the founding engagement; AMR-2/AMR-4 hinge on CEO identity.
+- **FR-NA-TRAP (critical):** the walk cannot complete an N/A — answering
+  "no" elects `applicability=no` with no scope-citation prompt, the C1
+  gate refuses, and the walk re-prompts the same question (3 refusals
+  observed). Same class of gap for Meet evidence, MI intent/alternative,
+  EX basis/closure, NMWP action fields, NYD trigger: the gates demand
+  fields the interview never gathers.
+- **AF3 still open** (advisor LOW over-broad; AMR-14 proposal unreachable
+  in seeded sessions).
+- **FR-LIVE:** `LiveAdvisor` only `explain()`s; propose/suggest fall back
+  to deterministic templates ("Close gap for AMR-X").
+- **INTEG-1 (Fran, confirmed):** LiveAdvisor swaps `model_id` AFTER
+  `output_hash` is computed — stored hash does not represent stored
+  output (probe: stored ≠ recomputed).
+- **INTEG-2 (Fran, confirmed):** library export blocklist scans facts
+  only — a disposition comment containing "Boeing" + a contract number
+  exported cleanly (probe-confirmed).
+- **FR-EXPORTS:** Appendix-A is a CSV skeleton truncating requirement
+  text at `[:120]`; roadmap lacks the working-guide fields (what it
+  requires / why / process interpretation / matrix comment / current
+  evidence / controlled destination / objective evidence / done-when /
+  related AMRs / gate-hold).
+- **FR-LEARN:** import ingests facts + paired answers only — dispositions
+  and action patterns are exported but never reused.
+- **FR-FALLBACK (Fran rec 7):** loader silently falls back to the
+  known-corrupt builtin when the curated pack is absent — should fail
+  closed.
+
+Handoff for the next round: `docs/slices/RDW_FIX3_HANDOFF.md`. The
+binding blocker for the round after it is the **scrubbed 115-AMR corpus +
+16 work packages** from the operator's engagement records — per Fran:
+"the next move is not another roadmap — it is loading our real corpus and
+making it pass end to end."
+
+---
+
+## Fix round 3 — BUILT BY BETH (uncommitted on `983ff9d`, 2026-07-30)
+
+**Role flip: Beth built this round at the operator's request, so Beth
+cannot gate it — Atlas and/or Fran must review the diff.** Scope: FR1–FR8
+of `RDW_FIX3_HANDOFF.md`, all implemented; suites 577 passed / 5 skipped
+(the 5th skip is the corpus golden skipping-with-reason, by design).
+
+- FR1: intake records `ceo.identity` as an assumption on "y", asks WHO on
+  "n" and records a confirmed identity + CEO org; graph fact edges
+  ceo.identity → AMR-2/AMR-4.
+- FR2 (AF3): LOW decided from unit-relevant input-gap facts
+  (classification/ceo via graph edges) — AMR-14's Open/Not Met proposal
+  now fires in a seeded session (test-pinned).
+- FR3: interview completes all six dispositions — N/A citation prompt,
+  Meet evidence citation (+registry registration when present), MI
+  intent/alternative/class prompts + new election gate, EX basis+closure
+  (action mini-form or relief), Open/Not-Met plan offer, Not-Yet-Due
+  justification. Root cause found during build: units without a
+  machine-extracted actor candidate never got an actor/ownership question,
+  so org_responsibility stayed TBD forever — the question engine now asks
+  regardless, and applicability=No is terminal (no moot questions).
+- FR4: LiveAdvisor propose/suggest are real structured-JSON calls with
+  schema validation, blocked-label stripping, §13.2+grader scrub, and
+  deterministic fallback recorded as such; INTEG-1 fixed via
+  finalize-hash-last (round-trip tested incl. fallback); default model id
+  current-generation.
+- FR5 (INTEG-2): blocklist scans every exported string (facts, paired
+  answers, comments, citations, EX/MI fields, action fields) naming the
+  offending field; import applies paired answers through the shared gated
+  path and lands dispositions/actions as event-logged SUGGESTIONS the walk
+  offers with provenance (normal election + attestation to apply).
+- FR6: Appendix-A as a real XLSX worksheet (full verbatim text, numeric
+  document order, Meta sheet) + CSV untruncated; new
+  `implementation_guide.md` with the ten working-guide fields per non-Met
+  AMR, explicit "— (not yet established)" gaps, never invented content.
+- FR7: `load_rdw_default_packs` fails closed when the curated pack is
+  missing; `allow_builtin=True` is the only escape and logs the corruption.
+- FR8: `corpus.py` — CSV corpus format, loader, and EXACT dual-view
+  reconciliation (85/6/7/17 and 2/39/34/18/21/1 + 16 work packages);
+  golden test skips with reason until `RDW_CORPUS_PATH` points at the
+  scrubbed corpus.
+
+End-to-end smoke verified: seeded session → advisor proposes Open/Not Met
+on AMR-14 → attested election → suggested EFCP action recorded
+(plan-quality) → readiness Not Met with Plan → comment → seven export
+products including the Appendix-A XLSX and a populated guide section.
+
+*Prepared by Beth from Atlas's and Fran's reviews of 2026-07-30 and
+Beth's probe-verified reviews of `ea6cd88`, `2bc0276`, `2ab4e81`, fix
+round 2, the assistant slice, and `983ff9d`; fix round 3 built by Beth
+and pending independent review. Advisory-only per D-1.*
+
+---
+
+## Atlas review of fix round 3 (2026-07-31) — 13 findings, ALL FIXED by Beth
+
+Atlas reviewed the uncommitted fix-round-3 diff on `983ff9d` and found
+2 critical / 4 high / 7 medium (independent suite 575/7 at review time).
+Beth (builder this round) fixed all 13; every finding has a pinned
+regression in `tests/disposition/test_atlas_round3.py` (24 tests).
+
+- **AR1 (critical)** Live advisor could show one label while its axes
+  elected another. `derive_label_from_axes` + `verify_proposal_label`
+  (advisor.py) now verify agreement after blocked-label stripping; a
+  divergent proposal never surfaces — deterministic fallback recorded as
+  such. The deterministic EFCP path self-verifies too.
+- **AR2 (critical)** Sticky `not_yet_due` could contradict a later Meet.
+  `set_axes` now refuses an explicit NYD+concrete-implementation election
+  and auto-clears a stale carried marker when implementation leaves TBD.
+- **AR3 (high)** Sub-prompts treated EOF-as-"quit" as data (a probe stored
+  `scope_citation="quit"`), and none were raw-answer-logged. New `_sub_ask`
+  helper: EVERY follow-up prompt (citations, evidence, MI/EX fields, action
+  form, NYD justification, intake, advisor/library/comment confirms) is
+  raw-logged under a namespaced question key and quit/EOF cancels the
+  sub-flow with an explicit TBD fallback. Intake can no longer store
+  "quit" as the CEO or classification.
+- **AR4 (high)** `open(multi_pack=False)` loaded the corrupt builtin with
+  no flag. `allow_builtin` is now plumbed through
+  `_load_records/open/resume` (including the H2 legacy-pin retry) and the
+  CLI (`--allow-builtin` on walk/export/audit); default fails closed.
+- **AR5 (high)** Paired "no" synthesized a scope citation (laundering).
+  `apply_paired_answer` takes `scope_citation`; the walk prompts for a
+  real one; without it both paired units land TBD(scope_decision_not_made).
+  Library bundles carry `paired_citations` so reuse stays honest.
+- **AR6 (high)** Blocklist missed action free-text (due_or_trigger,
+  work_package, ids, provenance). Export now full-tree-scans every string
+  leaf of the serialized bundle (defense in depth over the per-field pass).
+- **AR7 (med)** Suggestions weren't reusable: axes now export
+  `obligated_actor`; a gate-refused suggestion seeds its ungated axes and
+  hands the rest to the interview; imported action patterns are offered
+  as prefilled plans at the Open/Not-Met step (previously unconsumed).
+- **AR8 (med)** Unresolved prerequisite facts (ceo.identity) blocked N/A
+  even with a valid citation. decision.py blocks N/A only when no scope
+  rationale exists; Meet stays blocked.
+- **AR9 (med)** Invalid MI control class silently became "integral"; now
+  re-prompts until valid (blank takes the announced default).
+- **AR10 (med)** Paired answer was recorded before elections (crash could
+  suppress the question with no effects applied). Elections run first;
+  the record event is provably last in the event log.
+- **AR11 (med)** Corpus accepted structurally meaningless data and no
+  XLSX. Loader now enforces unique requirement_ids, canonical
+  contract/readiness label vocabulary (full forms normalized), axis-value
+  vocabulary, and reads .xlsx directly (stdlib OOXML reader).
+- **AR12 (med)** Appendix A included 8 EFCR rows; both CSV and XLSX are
+  now AMR-only (EFCR stays in internal products).
+- **AR13 (med)** Guide listed unregistered refs as "objective evidence"
+  and comments as "process interpretation". Objective evidence now shows
+  registry-verified refs only (explicit unverified note without a
+  registry); interpretation comes from intent_statement or an explicit gap.
+
+Suites after fixes: **601 passed / 5 skipped** (577 + 24 AR regressions).
+End-to-end smoke re-verified (advisor proposal → election → plan →
+comment → seven export products). Built and fixed by Beth — Atlas/Fran
+re-review still gates the commit. Advisory-only per D-1.
+
+---
+
+## Atlas re-review (2026-07-31) — 12/13 confirmed, AR11 partial, 10 new findings; ALL FIXED by Beth
+
+Atlas independently confirmed AR1-AR10, AR12, AR13 fixed (his own probes),
+graded AR11 PARTIAL, and found 1 critical / 2 high / 6 medium / 1 low in
+the fix code itself (independent suite 599/7, inventory matching). Beth
+fixed all ten + completed AR11 the same day; regressions in
+`tests/disposition/test_atlas_round3b.py` (16 tests).
+
+- **N1 (critical)** AR8 over-generalized: class-gated AMR-17 could elect
+  AND export N/A on a bare operator assertion. decision.py now blocks N/A
+  unconditionally when the unresolved prerequisite is
+  `classification.primary` (classification determines applicability — no
+  citation substitutes); other facts (ceo.identity) keep the AR8 behavior.
+  Re-probed: refused at election and at export.
+- **N2 (high)** The AR7 partial seed set applicability="yes", which
+  skipped the classification question (it only fires while applicability
+  is TBD). Partial seed now seeds actor/org only.
+- **N3 (high)** CLI export validated the session's (builtin) pin then
+  rendered from the curated default set — source-provenance mismatch in a
+  deliverable. Sessions now retain `loaded_records` (the exact pinned
+  set); CLI export/audit and the walk render from those, never re-loading
+  defaults. Re-probed: builtin session renders builtin text/locators.
+- **N4 (med)** Legacy sessions with a pre-fix prohibited comment wedged
+  every axis update and crashed the walk quit path. §13.2 now refuses
+  only the comment being SET in the call (carried violations warn until
+  repaired); walk quit/skip teardown is exception-safe.
+- **N5 (med)** Paired elections were separately-persisted events — a
+  crash between them left the pair divergent. New `EventLog.append_many`
+  writes the whole batch in one atomic temp+rename;
+  `apply_paired_answer` validates all elections (deferred), then persists
+  elections + the paired record as ONE batch. AR10 ordering preserved.
+- **N6 (med)** Multi-sheet XLSX corpus silently read the numerically
+  first sheet. The reader now selects by NAME: a sheet named "Corpus"
+  wins, a single sheet is unambiguous, anything else refuses.
+- **N7 (med)** Whitespace drift in EvidenceRef demoted registered
+  evidence (blocked Meet, gap-marked the guide). doc_id/revision are now
+  stripped at model validation; case left alone (may be significant).
+- **N8 (med)** `library export/import` CLI lacked the `--allow-builtin`
+  escape walk/export/audit had. Added.
+- **N9 (med)** Paired-library metadata now self-describing: sessions
+  record which units each paired answer applied to (`paired_units`,
+  replay-safe with legacy default), bundles carry `paired_units` +
+  `paired_citations`, import applies to the bundled pair. Schema bumped
+  to `rdw-library/v2`; reader accepts v1+v2 and refuses unknown versions
+  with a version message.
+- **N10 (low)** Malformed worksheet XML inside a valid zip now fails as
+  CorpusError, not a raw ElementTree exception.
+- **AR11 completed**: `assert_reconciled` enforces a coherence floor —
+  every row carries all four axes, and label/axis invariants hold
+  (NA→applicability no, MI→alternate_proposed, Met→meets_as_written,
+  Not Yet Due→implementation tbd, Technical N/A→applicability no,
+  NMWP→has a plan action). Deliberately NO CW/EX→applicability rule:
+  Fran's real targets (21 Technical N/A vs 17 contract NA) mean some
+  technically-N/A rows answer CW — that rule would reject the real
+  corpus. Atlas's blank-axes probe now refuses.
+
+Suites after fixes: **617 passed / 5 skipped** (601 + 16 N regressions).
+Atlas's N1/N3 probes re-run: both refuse/render correctly. Built and
+fixed by Beth — independent re-verification still gates the commit.
+Advisory-only per D-1.
+
+---
+
+## Gate CLEARED (2026-07-31) — Atlas round 3: all N1-N10 + AR11 completion CONFIRMED-FIXED, no new findings
+
+Atlas independently confirmed every fix with his own probes: N1 refused at
+election AND export; N2 seeded actor/org only with classification question
+firing; N3 builtin pin rendered builtin locators consistently; N4 no wedge
+or crash; N5 simulated rename failure persisted ZERO batch events (true
+atomicity) and the success path chained election, election, paired_answer
+with a valid hash chain; N6 named-sheet selection + ambiguity refusal; N7
+whitespace normalization qualified Meet; N8 library CLI escapes exit=0;
+N9 custom-pair round-trip + v1 accepted + v99 refused; N10 CorpusError
+boundary; AR11 blank-axis corpus refused immediately. Independent suite:
+**615 passed / 7 skipped** (622-test inventory matching Beth's 617+5; two
+extra environment-conditional skips). No repository changes by reviewer.
+
+Operator authorized commit+push (Dr. Wilde, 2026-07-31). This closes fix
+round 3: FR1-FR8 build + AR1-AR13 + N1-N10, all independently gated.
+Advisory-only per D-1.

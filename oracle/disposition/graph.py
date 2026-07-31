@@ -73,6 +73,9 @@ DEPENDENCY_SEEDS: tuple[DependencyEdge, ...] = (
     # AMCP
     _e("AMR-2", "AMR-3", "plan", "AMCP gates AMCP-referenced rows"),
     _e("plan.AMCP", "AMR-2", "fact", "AMCP presence fact", "plan.AMCP"),
+    # FR1: CEO identity governs AMCP submittal + supplier flow-down (AMR-2/AMR-4)
+    _e("ceo.identity", "AMR-2", "fact", "CEO identity governs AMCP submittal responsibility", "ceo.identity"),
+    _e("ceo.identity", "AMR-4", "fact", "CEO identity governs supplier flow-down responsibility", "ceo.identity"),
     # EFCP / 6033 chain
     _e("AMR-14", "EFCR-1", "control", "EFCP gates EFCR chain"),
     _e("AMR-14", "EFCR-2", "control", "EFCP gates NDE controls"),

@@ -11,7 +11,7 @@ from oracle.disposition.session import DispositionSession, SessionError
 
 def test_c1_refuse_meet_without_evidence_and_export(tmp_path):
     s = DispositionSession(tmp_path / "c1")
-    s.open(actor_name="op", multi_pack=False)
+    s.open(actor_name="op", multi_pack=False, allow_builtin=True)
     # Seed AMCP fact so AMCP block is not the only reason
     s.assert_fact(key="plan.AMCP", statement="AMCP present", author="op", confidence="high")
     with pytest.raises(SessionError, match="evidence|blocked|Meet"):
@@ -28,7 +28,7 @@ def test_c1_refuse_meet_without_evidence_and_export(tmp_path):
 
 def test_c1_refuse_unsupported_na_and_bad_comment(tmp_path):
     s = DispositionSession(tmp_path / "c1b")
-    s.open(actor_name="op", multi_pack=False)
+    s.open(actor_name="op", multi_pack=False, allow_builtin=True)
     with pytest.raises(SessionError, match="blocked|N/A|scope"):
         s.set_axes(
             "AMR-52",
@@ -60,7 +60,7 @@ def test_c1_refuse_unsupported_na_and_bad_comment(tmp_path):
 
 def test_h1_inferred_requires_confirmation(tmp_path):
     s = DispositionSession(tmp_path / "h1")
-    s.open(actor_name="op", multi_pack=False)
+    s.open(actor_name="op", multi_pack=False, allow_builtin=True)
     with pytest.raises(SessionError, match="Inferred"):
         s.assert_fact(
             key="derived.x",

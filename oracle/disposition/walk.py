@@ -25,7 +25,6 @@ from typing import Callable, Optional, TextIO
 from oracle.disposition.codes import TBDReason
 from oracle.disposition.comments import assemble_comment, prohibited_language_hits
 from oracle.disposition.export import ExportError, export_all, stamp_meta
-from oracle.disposition.packs import load_rdw_default_packs
 from oracle.disposition.rulepack import (
     RequirementRecord,
     load_requirement_records,
@@ -75,6 +74,26 @@ def _is_tty(io: IOBundle) -> bool:
     return bool(getattr(io.stdin, "isatty", lambda: False)())
 
 
+def _sub_ask(
+    session: DispositionSession,
+    io: IOBundle,
+    uid: str,
+    subkey: str,
+    prompt: str,
+    actor: str,
+) -> Optional[str]:
+    """AR3: sub-prompt discipline. Every follow-up answer is raw-logged
+    (Stage A applies to citations/evidence/MI/EX/plan fields, not just the
+    top-level question), and quit/EOF cancels the sub-flow instead of being
+    stored as data — IOBundle.ask maps EOF to the literal 'quit', which
+    previously leaked into scope_citation and evidence doc ids."""
+    ans = io.ask(prompt).strip()
+    session.record_answer(uid, subkey, ans, actor_name=actor)
+    if ans.lower() in ("quit", "q"):
+        return None
+    return ans
+
+
 def _order_units(records: list[RequirementRecord]) -> list[RequirementRecord]:
     """Authority-dependent first (engine §4.2), then pack order."""
     auth = [r for r in records if r.authority_dependent]
@@ -92,19 +111,73 @@ def _intake_wizard(session: DispositionSession, io: IOBundle, actor: str) -> Non
     io.write("--- Project context intake (unanswered fields only) ---")
     orgs = list(ctx.organizations)
     if not any(o.confirmed for o in orgs if o.role == "customer"):
-        ans = io.ask("Confirm customer is assumed CEO? [y/n/skip]: ")
+        customer = next((o for o in orgs if o.role == "customer"), None)
+        cust_name = customer.name if customer else "Customer"
+        # AR3: intake answers are raw-logged under the SESSION pseudo-unit;
+        # quit/EOF is a cancel, never data (a "quit" CEO name was storable).
+        ans = _sub_ask(
+            session, io, "SESSION", "intake.ceo_confirm",
+            f"Confirm {cust_name} is the assumed CEO? [y/n/skip]: ", actor,
+        )
+        if ans is None:
+            ans = "skip"
         if ans.lower() in ("y", "yes"):
-            # keep assumed_ceo
-            pass
+            # FR1: identity recorded as an ASSUMPTION — never silently confirmed
+            session.assert_fact(
+                key="ceo.identity",
+                statement=f"{cust_name}, assumed CEO (unconfirmed)",
+                author=actor,
+                assumed=True,
+                owner=actor,
+                confidence="low",
+            )
         elif ans.lower() in ("n", "no"):
-            orgs = [
-                o.model_copy(update={"assumed_ceo": False, "confirmed": True})
-                if o.role == "customer"
-                else o
-                for o in orgs
-            ]
+            # FR1: capture WHO the CEO actually is before anything is confirmed
+            who = _sub_ask(
+                session, io, "SESSION", "intake.ceo_identity",
+                "Who is the CEO (cognizant engineering organization)?: ", actor,
+            )
+            if who is None:
+                who = ""
+            if who.strip() and who.strip().lower() not in ("skip", "unknown"):
+                session.assert_fact(
+                    key="ceo.identity",
+                    statement=f"{who.strip()} is the CEO (operator-provided)",
+                    author=actor,
+                    confidence="high",
+                )
+                orgs = [
+                    o.model_copy(update={"assumed_ceo": False}) if o.role == "customer" else o
+                    for o in orgs
+                ]
+                from oracle.disposition.session import Organization
+
+                orgs.append(
+                    Organization(role="ceo", name=who.strip(), confirmed=True)
+                )
+            else:
+                session.assert_fact(
+                    key="ceo.identity",
+                    statement="CEO identity unknown (customer input required)",
+                    author=actor,
+                    assumed=True,
+                    owner=actor,
+                    confidence="low",
+                )
+        else:
+            session.assert_fact(
+                key="ceo.identity",
+                statement="CEO identity unresolved at intake",
+                author=actor,
+                assumed=True,
+                owner=actor,
+                confidence="low",
+            )
     if ctx.hardware_process is None:
-        proc = io.ask("AM process (e.g. Cold spray) [skip]: ")
+        proc = _sub_ask(
+            session, io, "SESSION", "intake.hardware_process",
+            "AM process (e.g. Cold spray) [skip]: ", actor,
+        )
         if proc and proc.lower() != "skip":
             session.assert_fact(
                 key="hardware.process",
@@ -113,9 +186,12 @@ def _intake_wizard(session: DispositionSession, io: IOBundle, actor: str) -> Non
                 confidence="high",
             )
     if ctx.classification.tbd:
-        ans = io.ask(
-            "Primary classification known? [value/skip/unknown]: "
+        ans = _sub_ask(
+            session, io, "SESSION", "intake.classification",
+            "Primary classification known? [value/skip/unknown]: ", actor,
         )
+        if ans is None:
+            ans = "unknown"
         if ans.lower() in ("skip", "unknown", ""):
             session.assert_fact(
                 key="classification.primary",
@@ -198,13 +274,28 @@ def _highest_value_question(
             f"Does {unit.requirement_id} apply to this program/hardware? [yes/no/unknown]: ",
         )
 
-    if unit.actor_candidate and not unit.actor_candidate.confirmed:
+    if st.applicability == "no":
+        # FR3: N/A is terminal — actor/approval questions are moot for a row
+        # that does not apply (citation was gathered at election).
+        return ("done", "N/A recorded with citation. [enter to continue / quit]: ")
+
+    # FR3: the actor/ownership question must fire even when the pack has no
+    # machine-extracted candidate — otherwise org_responsibility stays TBD
+    # forever and no label can complete (Fran F4, root cause).
+    if st.applicability == "yes" and (
+        (unit.actor_candidate and not unit.actor_candidate.confirmed)
+        or st.obligated_actor is None
+    ):
         key = f"actor.{unit.requirement_id}"
         if session.fact_for(key) is None:
+            cand = (
+                f"(candidate: {unit.actor_candidate.value!r} [machine-extracted]) "
+                if unit.actor_candidate
+                else ""
+            )
             return (
                 key,
-                f"Confirm obligated actor "
-                f"(candidate: {unit.actor_candidate.value!r} [machine-extracted]) "
+                f"Confirm obligated actor {cand}"
                 f"[program/ceo/producer/supplier/subtier/other/unknown]: ",
             )
 
@@ -225,44 +316,205 @@ def _highest_value_question(
     return ("done", "All primary axes set for this unit. [enter to continue / quit]: ")
 
 
+def _action_form(
+    session: DispositionSession,
+    io: IOBundle,
+    uid: str,
+    actor: str,
+    *,
+    default_id: str,
+) -> Optional["ActionRecord"]:
+    """FR3: closure-plan mini-form. Returns None when the operator cancels
+    (including quit/EOF at any field — AR3)."""
+    from oracle.disposition.actions import ActionRecord
+
+    def _f(subkey: str, prompt: str) -> Optional[str]:
+        return _sub_ask(session, io, uid, f"action.{subkey}", prompt, actor)
+
+    aid = _f("id", f"Action id [{default_id}]: ")
+    if aid is None:
+        return None
+    aid = aid or default_id
+    title = _f("title", "Action title: ")
+    if title is None or not title or title.lower() in ("cancel", "skip"):
+        return None
+    owner = _f("owner", "Owner (person/org accountable): ")
+    if owner is None:
+        return None
+    deliverable = _f("deliverable", "Deliverable: ")
+    if deliverable is None:
+        return None
+    exit_criteria = _f("exit_criteria", "Exit criteria (done-when): ")
+    if exit_criteria is None:
+        return None
+    priority = _f("priority", "Priority [critical/high/medium/low, default medium]: ")
+    if priority is None:
+        return None
+    priority = priority.lower()
+    if priority not in ("critical", "high", "medium", "low"):
+        priority = "medium"
+    due = _f("due_or_trigger", "Due or trigger (free text, optional): ")
+    if due is None:
+        return None
+    wp = _f("work_package", "Work package (optional): ")
+    if wp is None:
+        return None
+    return ActionRecord(
+        action_id=aid,
+        title=title,
+        owner=owner,
+        deliverable=deliverable,
+        exit_criteria=exit_criteria,
+        priority=priority,  # type: ignore[arg-type]
+        due_or_trigger=due,
+        work_package=wp,
+        affected_unit_ids=(uid,),
+    )
+
+
+def _gather_mi_fields(
+    session: DispositionSession, io: IOBundle, uid: str, actor: str
+) -> Optional[dict]:
+    """FR3: Meets Intent requires intent + alternative control + class.
+    Returns None on cancel (AR3). AR9: invalid class re-prompts — never a
+    silent default; blank takes the announced default."""
+    intent = _sub_ask(
+        session, io, uid, "mi.intent_statement",
+        "Meets Intent — intent statement (what the requirement intends): ", actor,
+    )
+    if intent is None:
+        return None
+    alt = _sub_ask(
+        session, io, uid, "mi.alternative_control",
+        "Alternative control (how intent is met instead): ", actor,
+    )
+    if alt is None:
+        return None
+    while True:
+        cls = _sub_ask(
+            session, io, uid, "mi.control_class",
+            "Control class [integral/disclosed] (default integral): ", actor,
+        )
+        if cls is None:
+            return None
+        cls = cls.lower()
+        if not cls:
+            cls = "integral"
+        if cls in ("integral", "disclosed"):
+            break
+        io.write(f"Invalid control class {cls!r} — enter integral or disclosed.")
+    out: dict = {}
+    if intent:
+        out["intent_statement"] = intent
+    if alt:
+        out["alternative_control"] = alt
+    out["control_class"] = cls
+    return out
+
+
+def _gather_ex_closure(
+    session: DispositionSession, io: IOBundle, uid: str, actor: str
+) -> Optional[dict]:
+    """FR3: Exception requires basis + (closure action | permanent relief).
+    Returns None on cancel (AR3)."""
+    basis = _sub_ask(
+        session, io, uid, "ex.exception_basis",
+        "Exception basis (why as-written cannot be met): ", actor,
+    )
+    if basis is None:
+        return None
+    out: dict = {}
+    if basis:
+        out["exception_basis"] = basis
+    choice = _sub_ask(
+        session, io, uid, "ex.closure_choice",
+        "Closure path — 'action' to record a closure action, or "
+        "'relief <permanent-relief basis>': ", actor,
+    )
+    if choice is None:
+        return None
+    if choice.lower().startswith("relief"):
+        relief = choice[len("relief"):].strip()
+        if relief:
+            out["permanent_relief_basis"] = relief
+    else:
+        act = _action_form(session, io, uid, actor, default_id=f"REL-{uid}")
+        if act is not None:
+            session.record_action(act, actor_name=actor)
+            out["closure_path_action_id"] = act.action_id
+    return out
+
+
+def _gather_meet_evidence(
+    session: DispositionSession, io: IOBundle, uid: str, actor: str
+) -> bool:
+    """FR3: Meet requires cited evidence; register when a registry exists.
+    quit/EOF cancels like 'cancel' (AR3) — never stored as a doc id."""
+    from oracle.disposition.session import EvidenceRef
+
+    doc = _sub_ask(
+        session, io, uid, "evidence.doc_id",
+        "Meet requires cited evidence — document id [or 'cancel']: ", actor,
+    )
+    if doc is None or not doc or doc.lower() in ("cancel", "skip"):
+        return False
+    rev = _sub_ask(session, io, uid, "evidence.revision", "Document revision: ", actor)
+    if rev is None:
+        return False
+    rev = rev or "-"
+    session.attach_evidence(uid, EvidenceRef(doc_id=doc, revision=rev), actor)
+    store = session.evidence_store()
+    if store is not None:
+        date = _sub_ask(
+            session, io, uid, "evidence.date",
+            "Approval/effective date [YYYY-MM-DD]: ", actor,
+        )
+        date = date or None
+        store.register(
+            evidence_id=f"EV-{uid}-{doc}",
+            doc_id=doc,
+            revision=rev,
+            unit_ids=(uid,),
+            effective_date=date,
+            approval_date=date,
+        )
+    return True
+
+
 def _apply_answer(
     session: DispositionSession,
     unit: RequirementRecord,
     qkey: str,
     answer: str,
     actor: str,
+    io: IOBundle,
 ) -> None:
     uid = unit.requirement_id
     ans = answer.strip().lower()
 
     if qkey == PAIRED_QUESTION_KEY:
-        session.record_paired_answer(qkey, answer, actor)
-        # Apply to all paired units
-        for pid in PAIRED_UNIT_IDS:
-            if pid not in session.state.units:  # type: ignore[union-attr]
-                continue
-            if ans in ("yes", "y"):
-                session.set_axes(
-                    pid,
-                    actor_name=actor,
-                    applicability="yes",
-                    applicability_tbd_reason=None,
+        # FR5/AR5: a paired "no" is an N/A election for BOTH units — it needs
+        # a real operator-supplied scope citation, not a synthesized one.
+        citation: Optional[str] = None
+        if ans in ("no", "n"):
+            citation = _sub_ask(
+                session, io, uid, f"{qkey}.citation",
+                "Scope exclusion needs a positive citation "
+                "(e.g. '6030 §1.2: no joining processes in crediting') "
+                "[or 'tbd']: ", actor,
+            )
+            if citation is not None and citation.lower() in ("tbd", "skip", "unknown"):
+                citation = None
+            if not citation:
+                io.write(
+                    "No citation — both paired units record "
+                    "TBD(scope_decision_not_made) instead of N/A."
                 )
-            elif ans in ("no", "n"):
-                session.set_axes(
-                    pid,
-                    actor_name=actor,
-                    applicability="no",
-                    implementation_state="not_reached",
-                    organization_responsibility="external",
-                )
-            else:
-                session.set_axes(
-                    pid,
-                    actor_name=actor,
-                    applicability="tbd",
-                    applicability_tbd_reason=TBDReason.CUSTOMER_INPUT_MISSING,
-                )
+        session.apply_paired_answer(
+            qkey, answer, actor,
+            paired_unit_ids=tuple(PAIRED_UNIT_IDS),
+            scope_citation=citation,
+        )
         return
 
     if qkey == "classification.primary":
@@ -298,12 +550,28 @@ def _apply_answer(
         if ans in ("yes", "y"):
             session.set_axes(uid, actor_name=actor, applicability="yes")
         elif ans in ("no", "n"):
+            # FR3: N/A requires a positive scope citation — gather it now
+            citation = _sub_ask(
+                session, io, uid, f"{qkey}.citation",
+                "N/A requires a positive scope/trigger citation "
+                "(e.g. '6030 §1.2: not flight hardware') [or 'tbd']: ", actor,
+            )
+            if not citation or citation.lower() in ("tbd", "skip", "unknown"):
+                io.write("No citation — recording TBD(customer_input_missing) instead of N/A.")
+                session.set_axes(
+                    uid,
+                    actor_name=actor,
+                    applicability="tbd",
+                    applicability_tbd_reason=TBDReason.CUSTOMER_INPUT_MISSING,
+                )
+                return
             session.set_axes(
                 uid,
                 actor_name=actor,
                 applicability="no",
                 implementation_state="not_reached",
                 organization_responsibility="external",
+                scope_citation=citation,
             )
         else:
             session.set_axes(
@@ -351,6 +619,47 @@ def _apply_answer(
                 implementation_state="tbd",
                 implementation_tbd_reason=TBDReason.EVIDENCE_ABSENT,
             )
+        elif ans in ("not_yet_due", "nyd"):
+            # FR3: Not Yet Due — trigger/justification required
+            just = _sub_ask(
+                session, io, uid, f"{qkey}.nyd_justification",
+                "Not Yet Due — justification (what trigger/phase defers it): ",
+                actor,
+            )
+            if just is None:
+                io.write("Cancelled — implementation stays TBD (no Not Yet Due).")
+                session.set_axes(
+                    uid,
+                    actor_name=actor,
+                    implementation_state="tbd",
+                    implementation_tbd_reason=TBDReason.EVIDENCE_ABSENT,
+                )
+                return
+            if not just:
+                raise SessionError("Not Yet Due requires a justification")
+            session.set_axes(
+                uid,
+                actor_name=actor,
+                implementation_state="tbd",
+                implementation_tbd_reason=TBDReason.EVIDENCE_ABSENT,
+                not_yet_due=True,
+                not_yet_due_justification=just,
+            )
+        elif ans == "alternate_proposed":
+            # FR3: Meets Intent fields gathered up front
+            fields = _gather_mi_fields(session, io, uid, actor)
+            if fields is None:
+                io.write("Cancelled — implementation stays TBD (no Meets Intent).")
+                session.set_axes(
+                    uid,
+                    actor_name=actor,
+                    implementation_state="tbd",
+                    implementation_tbd_reason=TBDReason.EVIDENCE_ABSENT,
+                )
+                return
+            session.set_axes(
+                uid, actor_name=actor, implementation_state=ans, **fields
+            )
         else:
             session.set_axes(uid, actor_name=actor, implementation_state=ans)
         return
@@ -363,9 +672,166 @@ def _apply_answer(
                 approval_state="tbd",
                 approval_tbd_reason=TBDReason.APPROVAL_NOT_EXERCISED,
             )
-        else:
-            session.set_axes(uid, actor_name=actor, approval_state=ans)
+            return
+        _apply_approval_with_completion(session, unit, uid, ans, actor, io)
         return
+
+
+def _would_be_label(session: DispositionSession, uid: str, **updates) -> Optional[str]:
+    """Dry-run the §7.1 label a field update would produce (no state change)."""
+    assert session.state is not None
+    try:
+        probe = session.state.units[uid].model_copy(update=updates)
+        return probe.export_label().value
+    except Exception:  # mapping may legitimately fail mid-interview
+        return None
+
+
+def _apply_approval_with_completion(
+    session: DispositionSession,
+    unit: RequirementRecord,
+    uid: str,
+    ans: str,
+    actor: str,
+    io: IOBundle,
+) -> None:
+    """FR3: the approval answer completes the label — gather what the label's
+    gate demands (Meet evidence / EX basis+closure / MI fields) BEFORE electing,
+    and offer the Not-Met plan form after an Open/Not Met election."""
+    assert session.state is not None
+    cur = session.state.units[uid]
+    label = _would_be_label(session, uid, approval_state=ans)
+    extra: dict = {}
+
+    if label == "Meet" and not session.has_qualifying_meet_evidence(cur):
+        if not _gather_meet_evidence(session, io, uid, actor):
+            io.write("No evidence cited — recording approval with TBD implementation.")
+            session.set_axes(
+                uid,
+                actor_name=actor,
+                approval_state=ans,
+                implementation_state="tbd",
+                implementation_tbd_reason=TBDReason.EVIDENCE_ABSENT,
+            )
+            return
+    elif label == "Exception":
+        needs_basis = not (cur.exception_basis or "").strip()
+        needs_closure = not (
+            (cur.closure_path_action_id or "").strip()
+            or (cur.permanent_relief_basis or "").strip()
+        )
+        if needs_basis or needs_closure:
+            gathered = _gather_ex_closure(session, io, uid, actor)
+            if gathered is None:
+                # AR3: quit/EOF mid-gather cancels the election — same
+                # fallback as the Meet-evidence cancel path above.
+                io.write("Cancelled — recording approval with TBD implementation.")
+                session.set_axes(
+                    uid,
+                    actor_name=actor,
+                    approval_state=ans,
+                    implementation_state="tbd",
+                    implementation_tbd_reason=TBDReason.EVIDENCE_ABSENT,
+                )
+                return
+            extra = gathered
+    elif label == "Meets Intent":
+        missing = not (
+            (cur.intent_statement or "").strip()
+            and (cur.alternative_control or "").strip()
+            and (cur.control_class or "")
+        )
+        if missing:
+            gathered = _gather_mi_fields(session, io, uid, actor)
+            if gathered is None:
+                io.write("Cancelled — recording approval with TBD implementation.")
+                session.set_axes(
+                    uid,
+                    actor_name=actor,
+                    approval_state=ans,
+                    implementation_state="tbd",
+                    implementation_tbd_reason=TBDReason.EVIDENCE_ABSENT,
+                )
+                return
+            extra = gathered
+
+    session.set_axes(uid, actor_name=actor, approval_state=ans, **extra)
+
+    if label == "Open/Not Met":
+        has_plan = any(
+            a.is_plan_quality()
+            for a in session.actions_for_unit(uid)
+            if a.status == "open"
+        )
+        if not has_plan:
+            # AR7: imported library action patterns were stored but never
+            # consumed — offer a matching pattern before the blank form.
+            if _offer_library_action_pattern(session, io, uid, actor):
+                return
+            p = _sub_ask(
+                session, io, uid, "plan.offer",
+                "Open/Not Met — record a closure plan (owner + exit criteria) "
+                "for Not-Met-with-Plan readiness? [y/n]: ", actor,
+            )
+            if p is not None and p.lower() in ("y", "yes"):
+                act = _action_form(session, io, uid, actor, default_id=f"GAP-{uid}")
+                if act is not None:
+                    session.record_action(act, actor_name=actor)
+                    io.write(f"Recorded {act.action_id}.")
+            else:
+                io.write("Without a plan-quality action, readiness stays TBD Verify.")
+
+
+def _offer_library_action_pattern(
+    session: DispositionSession, io: IOBundle, uid: str, actor: str
+) -> bool:
+    """AR7: offer an imported plan pattern for this unit; True when recorded."""
+    from oracle.disposition.actions import ActionRecord
+
+    assert session.state is not None
+    pat = next(
+        (
+            p
+            for p in session.state.library_action_patterns
+            if uid in tuple(p.get("affected_unit_ids") or ())
+        ),
+        None,
+    )
+    if pat is None:
+        return False
+    io.write(
+        f"Library plan pattern: {pat.get('title')} "
+        f"(owner={pat.get('owner')}, exit={pat.get('exit_criteria')})"
+    )
+    acc = _sub_ask(
+        session, io, uid, "plan.library_pattern",
+        "Apply this library plan pattern? [y/n]: ", actor,
+    )
+    if acc is None or acc.lower() not in ("y", "yes"):
+        return False
+    try:
+        act = ActionRecord(
+            action_id=str(pat.get("action_id") or f"GAP-{uid}"),
+            title=str(pat.get("title") or ""),
+            owner=str(pat.get("owner") or ""),
+            deliverable=str(pat.get("deliverable") or ""),
+            exit_criteria=str(pat.get("exit_criteria") or ""),
+            priority=(
+                pat.get("priority")
+                if pat.get("priority") in ("critical", "high", "medium", "low")
+                else "medium"
+            ),
+            due_or_trigger=str(pat.get("due_or_trigger") or ""),
+            work_package=str(pat.get("work_package") or ""),
+            affected_unit_ids=(uid,),
+            note=f"from library pattern (source: {pat.get('action_id')})",
+        )
+    except ValueError as e:
+        io.write(f"Pattern invalid ({e}) — falling back to the plan form.")
+        return False
+    session.record_action(act, actor_name=actor)
+    io.write(f"Recorded {act.action_id} from library pattern.")
+    return True
 
 
 def _present_unit(
@@ -523,7 +989,14 @@ def _advisor_proposal_step(
     io.write(f"  proposed_label={prop.proposed_label}")
     for k, v in prop.proposed_axes.items():
         io.write(f"  {k}={v}")
-    ans = io.ask("Accept proposal? [y=attest election / edit=skip axes / skip=TBD]: ")
+    ans = _sub_ask(
+        session, io, rec.requirement_id, "advisor.accept",
+        "Accept proposal? [y=attest election / edit=skip axes / skip=TBD]: ",
+        actor_name,
+    )
+    if ans is None:
+        io.write("Cancelled — proposal not elected.")
+        return
     if ans.lower() in ("y", "yes"):
         try:
             session.set_axes(
@@ -560,10 +1033,77 @@ def _advisor_proposal_step(
                 f"  {a.action_id}: {a.title} owner={a.owner} "
                 f"exit={a.exit_criteria}"
             )
-            conf = io.ask(f"Record action {a.action_id}? [y/n]: ")
+            conf = _sub_ask(
+                session, io, rec.requirement_id,
+                f"advisor.action.{a.action_id}",
+                f"Record action {a.action_id}? [y/n]: ", actor_name,
+            )
+            if conf is None:
+                break
             if conf.lower() in ("y", "yes"):
                 session.record_action(a, actor_name=actor_name)
                 io.write(f"  recorded {a.action_id}")
+
+
+def _offer_library_suggestion(
+    session: DispositionSession,
+    rec: RequirementRecord,
+    io: IOBundle,
+    actor_name: str,
+) -> None:
+    """FR5: show an imported library disposition as a SUGGESTION with
+    provenance; applying runs the normal gated election + attestation path."""
+    assert session.state is not None
+    sug = session.state.library_suggestions.get(rec.requirement_id)
+    if not sug:
+        return
+    unit = session.state.units[rec.requirement_id]
+    if unit.applicability != "tbd":  # already worked — don't re-offer
+        return
+    prov = (sug.get("provenance") or {}).get("session_id", "unknown")
+    io.write(
+        f"Library suggestion (from {prov}): label={sug.get('export_label')} "
+        f"axes={sug.get('axes')}"
+    )
+    if sug.get("comment"):
+        io.write(f"  prior comment: {sug['comment']}")
+    ans = _sub_ask(
+        session, io, rec.requirement_id, "library.accept",
+        "Apply library suggestion as your election? [y/n]: ", actor_name,
+    )
+    if ans is None or ans.lower() not in ("y", "yes"):
+        return
+    axes = dict(sug.get("axes") or {})
+    try:
+        session.set_axes(rec.requirement_id, actor_name=actor_name, **axes)
+        io.write("Library suggestion elected (attest as usual).")
+    except (SessionError, ValueError) as e:
+        io.write(f"Suggestion refused by deterministic gate ({e}).")
+        # AR7: all-or-nothing made suggestions unusable — the gated axes
+        # (Meet evidence, N/A citation, EX basis) rightly refuse, but the
+        # ungated ones are still good context. Seed those and let the
+        # interview gather the rest. N2: applicability is NEVER seeded —
+        # the classification question only fires while it is TBD, so
+        # seeding "yes" would skip a class-gated unit's interview.
+        partial = {
+            k: axes[k]
+            for k in ("obligated_actor", "organization_responsibility")
+            if axes.get(k) not in (None, "tbd")
+        }
+        if not partial:
+            io.write("Continuing with the normal interview.")
+            return
+        try:
+            session.set_axes(rec.requirement_id, actor_name=actor_name, **partial)
+            io.write(
+                f"Partial seed applied ({', '.join(sorted(partial))}) — "
+                "interview continues for the gated axes."
+            )
+        except (SessionError, ValueError) as e2:
+            io.write(
+                f"Partial seed also refused ({e2}) — continuing with the "
+                "normal interview."
+            )
 
 
 def run_walk(
@@ -577,6 +1117,7 @@ def run_walk(
     max_units: Optional[int] = None,
     advisor: bool = False,
     live_advisor: bool = False,
+    allow_builtin: bool = False,
 ) -> DispositionSession:
     """
     Interactive walkthrough. `io` may inject scripted stdin for tests.
@@ -603,14 +1144,22 @@ def run_walk(
     session = DispositionSession(session_dir)
     header = Path(session_dir) / "session.json"
     if header.exists():
-        session.resume(actor_name=actor_name, repin=repin)
+        session.resume(
+            actor_name=actor_name, repin=repin, allow_builtin=allow_builtin
+        )
         io.write(f"Resumed session {session.state.session_id}")  # type: ignore[union-attr]
     else:
-        session.open(actor_name=actor_name, repin=repin, seed_context=True)
+        session.open(
+            actor_name=actor_name,
+            repin=repin,
+            seed_context=True,
+            allow_builtin=allow_builtin,
+        )
         io.write(f"Opened session {session.state.session_id}")  # type: ignore[union-attr]
 
-    # H4: walk the same multi-pack set the session seeds (6030+6033)
-    records_list, _ = load_rdw_default_packs(repin=True)
+    # H4/N3: walk the exact record set the session pinned at open/resume —
+    # re-loading defaults here rendered curated text under a builtin pin.
+    records_list = session.loaded_records
     records = {r.requirement_id: r for r in records_list}
     ordered = _order_units(records_list)
     if unit_filter:
@@ -626,6 +1175,7 @@ def run_walk(
         _present_unit(
             rec, session, io, advisor=adv, actor_name=actor_name
         )
+        _offer_library_suggestion(session, rec, io, actor_name)
         if adv is not None:
             try:
                 _advisor_proposal_step(session, rec, io, adv, actor_name)
@@ -648,7 +1198,15 @@ def run_walk(
                 if hits:
                     io.write(f"  (note: prohibited-language hits after soften: {hits})")
                 while True:
-                    edit = io.ask("Accept comment? [y/edit text/skip]: ")
+                    edit = _sub_ask(
+                        session, io, rec.requirement_id, "comment.review",
+                        "Accept comment? [y/edit text/skip]: ", actor_name,
+                    )
+                    if edit is None:
+                        # AR3: quit/EOF here is a cancel — never an edited
+                        # comment reading "quit".
+                        io.write("Cancelled — comment left unset.")
+                        break
                     try:
                         if edit.lower() in ("y", "yes", ""):
                             session.set_axes(
@@ -685,29 +1243,37 @@ def run_walk(
                 rec.requirement_id, qkey, ans, actor_name=actor_name
             )
             if ans.lower() in ("quit", "q", "exit"):
-                # quit mid-unit → TBD with reason (never silence)
-                session.set_axes(
-                    rec.requirement_id,
-                    actor_name=actor_name,
-                    applicability="tbd",
-                    applicability_tbd_reason=TBDReason.CUSTOMER_INPUT_MISSING,
-                    enforce_decision=False,
-                )
-                io.write("Quit mid-unit: recorded TBD(customer_input_missing).")
+                # quit mid-unit → TBD with reason (never silence). N4: this
+                # runs outside the retry loop — a refusal (e.g. carried
+                # legacy comment) must not crash the walk teardown.
+                try:
+                    session.set_axes(
+                        rec.requirement_id,
+                        actor_name=actor_name,
+                        applicability="tbd",
+                        applicability_tbd_reason=TBDReason.CUSTOMER_INPUT_MISSING,
+                        enforce_decision=False,
+                    )
+                    io.write("Quit mid-unit: recorded TBD(customer_input_missing).")
+                except SessionError as e:
+                    io.write(f"Quit mid-unit (TBD not recorded: {e}).")
                 _progress_screen(session, io)
                 return session
             if ans.lower() in ("skip",):
-                session.set_axes(
-                    rec.requirement_id,
-                    actor_name=actor_name,
-                    applicability="tbd",
-                    applicability_tbd_reason=TBDReason.CUSTOMER_INPUT_MISSING,
-                    enforce_decision=False,
-                )
-                io.write("Skipped: TBD(customer_input_missing).")
+                try:
+                    session.set_axes(
+                        rec.requirement_id,
+                        actor_name=actor_name,
+                        applicability="tbd",
+                        applicability_tbd_reason=TBDReason.CUSTOMER_INPUT_MISSING,
+                        enforce_decision=False,
+                    )
+                    io.write("Skipped: TBD(customer_input_missing).")
+                except SessionError as e:
+                    io.write(f"Skipped (TBD not recorded: {e}).")
                 break
             try:
-                _apply_answer(session, rec, qkey, ans, actor_name)
+                _apply_answer(session, rec, qkey, ans, actor_name, io)
             except (SessionError, ValueError) as e:
                 # M2/F5: re-prompt on invalid free-text; no bare Exception
                 io.write(f"Could not apply answer ({e}). Please try again.")
@@ -752,4 +1318,5 @@ def cmd_disposition_walk(args) -> None:
         max_units=getattr(args, "max_units", None),
         advisor=bool(getattr(args, "advisor", False)),
         live_advisor=bool(getattr(args, "live_advisor", False)),
+        allow_builtin=bool(getattr(args, "allow_builtin", False)),
     )

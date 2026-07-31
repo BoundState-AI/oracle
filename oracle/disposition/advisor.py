@@ -53,6 +53,9 @@ class AdvisorContext(BaseModel):
     blocked_labels: dict[str, str] = Field(default_factory=dict)
     current_label: Optional[str] = None
     why_not_meet: tuple[str, ...] = ()
+    # FR2/AF3: fact keys the dependency graph links to THIS unit — LOW is
+    # decided from these, never from a global fact scan.
+    relevant_fact_keys: tuple[str, ...] = ()
 
 
 class ExplainResult(BaseModel):
@@ -177,6 +180,15 @@ def build_context(
         k: (f.statement + (" [assumed]" if f.assumed else ""))
         for k, f in facts.items()
     }
+    relevant = tuple(
+        sorted(
+            {
+                e.fact_key
+                for e in graph.prerequisites_of(unit.unit_id)
+                if e.fact_key
+            }
+        )
+    )
     return AdvisorContext(
         unit_id=unit.unit_id,
         shall_text=record.shall_text if record else "",
@@ -194,6 +206,7 @@ def build_context(
         blocked_labels=dict(decision.blocked),
         current_label=decision.current_label,
         why_not_meet=decision.blockers_meet,
+        relevant_fact_keys=relevant,
     )
 
 
@@ -243,30 +256,37 @@ class DeterministicAdvisor(AdvisorService):
 
     def propose(self, ctx: AdvisorContext) -> ProposeResult:
         ch = context_hash(ctx)
-        # LOW when classification or critical facts unresolved
-        low_markers = (
-            "classification_unresolved",
-            "classification not provided",
-            "unresolved fact",
-        )
-        fact_blob = " ".join(ctx.facts.values()).lower()
         blocked = ctx.blocked_labels
-        is_low = any(m in fact_blob for m in low_markers) or any(
+        # FR2/AF3: LOW is decided from UNIT-RELEVANT input-gap facts only.
+        # Input-gap keys are customer/authority decisions (§8 LOW definition);
+        # plan-presence keys (plan.*) drive not-met proposals, never LOW.
+        gap_keys = [
+            k
+            for k in ctx.relevant_fact_keys
+            if k in ("classification.primary", "ceo.identity")
+        ]
+        unresolved_gaps = [
+            k
+            for k in gap_keys
+            if k not in ctx.facts or "[assumed]" in ctx.facts.get(k, "")
+        ]
+        is_low = bool(unresolved_gaps) or any(
             "classification_unresolved" in (v or "") for v in blocked.values()
         )
-        if is_low or ctx.unit_id in {"AMR-17", "AMR-18"} and (
-            "classification.primary" not in ctx.facts
-            or "not provided" in ctx.facts.get("classification.primary", "").lower()
-            or "[assumed]" in ctx.facts.get("classification.primary", "")
-        ):
+        if is_low:
+            gap = unresolved_gaps[0] if unresolved_gaps else "classification.primary"
             q = (
-                f"What is the primary classification / fracture-control input "
-                f"that governs {ctx.unit_id}?"
+                f"What is the value of {gap} that governs {ctx.unit_id}? "
+                "(customer/authority input required)"
             )
             res = ProposeResult(
                 unit_id=ctx.unit_id,
                 band=ProposalBand.LOW,
-                basis="§8 LOW: unresolved classification or authority input — propose nothing",
+                basis=(
+                    "§8 LOW: unit-relevant input unresolved "
+                    f"({', '.join(unresolved_gaps) or 'classification_unresolved'}) "
+                    "— propose nothing"
+                ),
                 proposed_axes=None,
                 proposed_label=None,
                 questions=(q,),
@@ -304,6 +324,7 @@ class DeterministicAdvisor(AdvisorService):
                     refused_labels=dict(blocked),
                 )
                 return res.model_copy(update={"output_hash": output_hash(res)})
+            verify_proposal_label(axes, label)  # AR1: template must self-agree
             res = ProposeResult(
                 unit_id=ctx.unit_id,
                 band=ProposalBand.HIGH,
@@ -403,11 +424,74 @@ class DeterministicAdvisor(AdvisorService):
         return res.model_copy(update={"output_hash": output_hash(res)})
 
 
+def finalize_hash(res: Any) -> Any:
+    """FR4/INTEG-1: output_hash is computed over the FINAL object, last.
+
+    Convention: hash is computed with output_hash cleared, then set. Nothing
+    may mutate the object after this call. Verifiers recompute with the hash
+    field cleared and compare.
+    """
+    cleared = res.model_copy(update={"output_hash": ""})
+    return cleared.model_copy(update={"output_hash": output_hash(cleared)})
+
+
+_ALLOWED_PROPOSAL_AXES = frozenset(
+    {
+        "applicability",
+        "obligated_actor",
+        "organization_responsibility",
+        "implementation_state",
+        "approval_state",
+    }
+)
+
+
+def derive_label_from_axes(axes: dict[str, Any]) -> str:
+    """AR1: the label a proposal's axes actually map to under §7.1.
+
+    Raises (ValueError/AxisContradiction) when the axes cannot map — callers
+    treat that as an invalid proposal.
+    """
+    from oracle.disposition.export_map import AxisSnapshot, map_axes_to_export_label
+
+    snap = AxisSnapshot(
+        applicability=axes.get("applicability", "tbd"),
+        obligated_actor=axes.get("obligated_actor"),
+        organization_responsibility=axes.get("organization_responsibility", "tbd"),
+        implementation_state=axes.get("implementation_state", "tbd"),
+        approval_state=axes.get("approval_state", "tbd"),
+    )
+    return map_axes_to_export_label(snap).value
+
+
+def verify_proposal_label(
+    axes: Optional[dict[str, Any]], label: Optional[str]
+) -> None:
+    """AR1: shown label and elected axes must be the SAME disposition."""
+    if axes is None and label is None:
+        return
+    if axes is None or label is None:
+        raise AdvisorError(
+            f"proposal must carry axes and label together (axes={axes!r}, "
+            f"label={label!r})"
+        )
+    derived = derive_label_from_axes(axes)
+    if derived != label:
+        raise AdvisorError(
+            f"proposed_label {label!r} does not match the label its axes "
+            f"derive to ({derived!r}) — the operator would attest a different "
+            "disposition than shown"
+        )
+
+
 class LiveAdvisor(AdvisorService):
     """
     Anthropic-backed advisor. Opt-in only; never used by tests.
 
     Env: RDW_ADVISOR_MODEL (fallback ORACLE_BETH_MODEL / claude default).
+    propose/suggest_closure request STRUCTURED JSON from the model, validate
+    it, strip anything the deterministic gates block, and fall back to the
+    DeterministicAdvisor on any parse/validation failure (recorded as such).
     """
 
     def __init__(self, model_id: Optional[str] = None):
@@ -415,7 +499,7 @@ class LiveAdvisor(AdvisorService):
             model_id
             or os.environ.get("RDW_ADVISOR_MODEL")
             or os.environ.get("ORACLE_BETH_MODEL")
-            or "claude-sonnet-4-20250514"
+            or "claude-sonnet-5"
         )
 
     def _complete(self, system: str, user: str) -> str:
@@ -458,17 +542,123 @@ class LiveAdvisor(AdvisorService):
             model_id=self.model_id,
             context_hash=ch,
         )
-        return res.model_copy(update={"output_hash": output_hash(res)})
+        return finalize_hash(res)
+
+    def _json_block(self, raw: str) -> dict[str, Any]:
+        start, end = raw.find("{"), raw.rfind("}")
+        if start < 0 or end <= start:
+            raise AdvisorError("live advisor returned no JSON object")
+        data = json.loads(raw[start : end + 1])
+        if not isinstance(data, dict):
+            raise AdvisorError("live advisor JSON is not an object")
+        return data
+
+    def _fallback(self, det_result: Any) -> Any:
+        """Deterministic fallback recorded as such; hash computed LAST."""
+        res = det_result.model_copy(
+            update={
+                "model_id": self.model_id,
+                "basis": f"{det_result.basis} [live-fallback:deterministic]",
+            }
+        )
+        return finalize_hash(res)
 
     def propose(self, ctx: AdvisorContext) -> ProposeResult:
-        # Live still must not bypass evaluate_unit blocks — use deterministic
-        # for structure, optionally enrich questions via model.
-        det = DeterministicAdvisor().propose(ctx)
-        return det.model_copy(update={"model_id": self.model_id})
+        ch = context_hash(ctx)
+        try:
+            system = (
+                "You are an RDW disposition advisor. Using ONLY the supplied "
+                "evidence bundle, return ONE JSON object with keys: band "
+                "(HIGH|MEDIUM|LOW), basis (string), proposed_axes (object with "
+                "keys among applicability/obligated_actor/"
+                "organization_responsibility/implementation_state/"
+                "approval_state, or null), proposed_label (string or null), "
+                "questions (array of strings). LOW means propose NOTHING "
+                "(axes and label null). Never propose a label listed in "
+                "blocked_labels. Advisory only (D-1); no compliance claims."
+            )
+            data = self._json_block(
+                self._complete(system, json.dumps(ctx.model_dump(), indent=2))
+            )
+            band = ProposalBand(str(data.get("band", "MEDIUM")).upper())
+            axes = data.get("proposed_axes")
+            label = data.get("proposed_label")
+            if band == ProposalBand.LOW:
+                axes, label = None, None
+            if axes is not None:
+                if not isinstance(axes, dict) or not set(axes) <= _ALLOWED_PROPOSAL_AXES:
+                    raise AdvisorError(f"invalid proposed_axes: {axes!r}")
+            if label is not None and label in ctx.blocked_labels:
+                # Deterministic gates rule: strip the blocked proposal.
+                axes, label = None, None
+            # AR1: what is shown must be what the axes elect — no divergence.
+            verify_proposal_label(axes, label)
+            basis = scrub_advisor_text(str(data.get("basis", "")), ctx.facts)
+            questions = tuple(
+                scrub_advisor_text(str(q), ctx.facts)
+                for q in (data.get("questions") or [])
+            )
+            res = ProposeResult(
+                unit_id=ctx.unit_id,
+                band=band,
+                basis=basis or "live structured proposal",
+                proposed_axes=axes,
+                proposed_label=label,
+                questions=questions,
+                model_id=self.model_id,
+                context_hash=ch,
+                refused_labels=dict(ctx.blocked_labels),
+            )
+            return finalize_hash(res)
+        except (AdvisorError, ValueError, KeyError, TypeError) as e:
+            LOGGER.warning("LiveAdvisor.propose fallback: %s", e)
+            return self._fallback(DeterministicAdvisor().propose(ctx))
 
     def suggest_closure(self, ctx: AdvisorContext) -> ClosureSuggestion:
-        det = DeterministicAdvisor().suggest_closure(ctx)
-        return det.model_copy(update={"model_id": self.model_id})
+        ch = context_hash(ctx)
+        try:
+            system = (
+                "You are an RDW closure planner. Using ONLY the supplied "
+                "evidence bundle, return ONE JSON object with keys: actions "
+                "(array of objects with action_id, title, owner, deliverable, "
+                "exit_criteria, priority in critical|high|medium|low, "
+                "due_or_trigger, work_package, affected_unit_ids array), "
+                "evidence_requests (array of strings), basis (string). Bound "
+                "every claim by the supplied facts; state unresolved "
+                "dependencies; never claim compliance. Advisory only (D-1)."
+            )
+            data = self._json_block(
+                self._complete(system, json.dumps(ctx.model_dump(), indent=2))
+            )
+            actions = tuple(
+                ActionRecord.model_validate(
+                    {**a, "affected_unit_ids": tuple(a.get("affected_unit_ids") or (ctx.unit_id,))}
+                )
+                for a in (data.get("actions") or [])
+            )
+            for a in actions:
+                scrub_advisor_text(
+                    " ".join((a.title, a.deliverable, a.exit_criteria)), ctx.facts
+                )
+            basis = scrub_advisor_text(str(data.get("basis", "")), ctx.facts)
+            evid = tuple(
+                scrub_advisor_text(str(x), ctx.facts)
+                for x in (data.get("evidence_requests") or [])
+            )
+            res = ClosureSuggestion(
+                unit_id=ctx.unit_id,
+                actions=actions,
+                evidence_requests=evid,
+                unresolved_dependencies=ctx.why_not_meet,
+                band=ProposalBand.MEDIUM,
+                basis=basis or "live structured closure plan",
+                model_id=self.model_id,
+                context_hash=ch,
+            )
+            return finalize_hash(res)
+        except (AdvisorError, ValueError, KeyError, TypeError) as e:
+            LOGGER.warning("LiveAdvisor.suggest_closure fallback: %s", e)
+            return self._fallback(DeterministicAdvisor().suggest_closure(ctx))
 
 
 def get_advisor(*, live: bool = False) -> AdvisorService:
