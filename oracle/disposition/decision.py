@@ -79,9 +79,10 @@ def evaluate_unit(
         # still allow N/A if axes already No — comment should carry rationale
         notes.append("N/A should cite scope/trigger rationale in comment or scope_citation")
 
-    # Dependency / classification gates
+    # Dependency / classification gates. M7: reopen_fact edges propagate
+    # re-review only — they never block elections here.
     for edge in graph.prerequisites_of(unit.unit_id):
-        if edge.fact_key:
+        if edge.fact_key and edge.kind != "reopen_fact":
             f = facts.get(edge.fact_key)
             if f is None or (f.assumed and not f.confirmed):
                 meet_blockers.append(
@@ -142,9 +143,9 @@ def evaluate_unit(
                 "External responsibility alone is not N/A; store states separately"
             )
 
-    # Meets Intent / alternate requires approval action
+    # Meets Intent / alternate requires approval action (split axes decide)
     requires_approval = False
-    if unit.implementation_state == "alternate_proposed":
+    if unit.fulfillment_path == "alternative_intent":
         requires_approval = True
         if unit.approval_state in ("not_required",):
             actions.append(
@@ -153,7 +154,7 @@ def evaluate_unit(
             requires_approval = True
         notes.append("Meets Intent must not render under compliance heading")
 
-    if unit.implementation_state == "not_met" and unit.approval_state in (
+    if unit.fulfillment_path == "exception" and unit.approval_state in (
         "required",
         "draft",
         "submitted",
@@ -161,12 +162,29 @@ def evaluate_unit(
         requires_approval = True
         actions.append("Track exception/relief approval separately from implementation")
 
-    # Hard evidence gate for Meet when applicability is established (FR-009 / C1)
-    if unit.implementation_state == "meets_as_written" and unit.applicability == "yes":
-        if not has_evidence_for_meet:
-            meet_blockers.append("Meet requires at least one qualifying evidence reference")
-            blocked[ExportLabel.MEET.value] = "no qualifying evidence for Meet"
-            notes.append("Evidence gate HARD: Meet blocked without evidence")
+    # Hard evidence gate (FR-009 / C1), model split: the gate protects the
+    # execution CLAIM, not the commitment. A CW commitment with execution
+    # not started is legitimate (AMR-106: CW + Not Met with Plan — readiness
+    # carries the truth); claiming evidenced/verified without qualifying
+    # evidence refuses on EVERY conformance-bearing path, not just Meet
+    # (Atlas model-split High 2). Legacy rows unaffected: only old
+    # meets_as_written converts to execution=evidenced, so the pre-split
+    # blocked set is unchanged.
+    if (
+        unit.applicability == "yes"
+        and unit.execution_state in ("evidenced", "verified")
+        and not has_evidence_for_meet
+    ):
+        reason = "no qualifying evidence for evidenced/verified execution claim"
+        meet_blockers.append("Meet requires at least one qualifying evidence reference")
+        blocked[ExportLabel.MEET.value] = reason
+        blocked[ExportLabel.MEETS_INTENT.value] = (
+            blocked.get(ExportLabel.MEETS_INTENT.value) or reason
+        )
+        blocked[ExportLabel.EXCEPTION.value] = (
+            blocked.get(ExportLabel.EXCEPTION.value) or reason
+        )
+        notes.append("Evidence gate HARD: evidenced claim blocked without evidence")
 
     # N/A without scope rationale is blocked (C1 UNSUPPORTED_NA / F4)
     if unit.applicability == "no":
@@ -208,9 +226,9 @@ def evaluate_unit(
     # Axis-level Meet blockers
     if unit.applicability != "yes":
         meet_blockers.append(f"applicability is {unit.applicability}")
-    if unit.implementation_state != "meets_as_written":
+    if unit.fulfillment_path != "as_written":
         meet_blockers.append(
-            f"implementation is {unit.implementation_state}, not meets_as_written"
+            f"fulfillment is {unit.fulfillment_path}, not as_written"
         )
     if unit.approval_state not in ("not_required", "approved"):
         meet_blockers.append(f"approval is {unit.approval_state}")

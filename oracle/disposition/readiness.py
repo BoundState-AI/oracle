@@ -96,14 +96,15 @@ def map_readiness(
             reasons=(f"scope_citation={unit.scope_citation}",),
         )
 
-    # 3. TBD Verify — any TBD axis
+    # 3. TBD Verify — any unresolved axis (execution is the split-model
+    # input; the legacy implementation view no longer decides anything)
     tbd_bits = []
     if unit.applicability == "tbd":
         tbd_bits.append(f"applicability:{unit.applicability_tbd_reason}")
     if unit.organization_responsibility == "tbd":
         tbd_bits.append(f"org:{unit.org_responsibility_tbd_reason}")
-    if unit.implementation_state == "tbd":
-        tbd_bits.append(f"impl:{unit.implementation_tbd_reason}")
+    if unit.execution_state == "tbd":
+        tbd_bits.append(f"execution:{unit.implementation_tbd_reason}")
     if unit.approval_state == "tbd":
         tbd_bits.append(f"appr:{unit.approval_tbd_reason}")
     if tbd_bits:
@@ -121,20 +122,37 @@ def map_readiness(
             reasons=tuple(a.action_id for a in open_acts),
         )
 
-    # 5. Met
+    # 4b. Support on a program/CEO obligation with tracked work is
+    # externally-owned action we assist (AMR-113 anchor — model split).
     if (
-        unit.implementation_state == "meets_as_written"
+        unit.organization_responsibility == "support"
+        and unit.obligated_actor in ("program", "ceo")
+        and open_acts
+    ):
+        return ReadinessResult(
+            unit_id=uid,
+            label=ReadinessLabel.EXTERNAL_ACTION,
+            reasons=tuple(a.action_id for a in open_acts),
+        )
+
+    # 5. Met — execution evidenced/verified with qualifying evidence
+    if (
+        unit.execution_state in ("evidenced", "verified")
         and unit.applicability == "yes"
         and has_qualifying_evidence
     ):
         return ReadinessResult(
             unit_id=uid,
             label=ReadinessLabel.MET,
-            reasons=("meets_as_written + qualifying evidence",),
+            reasons=(f"execution {unit.execution_state} + qualifying evidence",),
         )
 
-    # 6. Not Met with Plan
-    if unit.implementation_state in ("not_met", "partial") and plan_acts:
+    # 6. Not Met with Plan — applicable work not started/partial + a plan
+    if (
+        unit.applicability == "yes"
+        and unit.execution_state in ("not_started", "partial")
+        and plan_acts
+    ):
         return ReadinessResult(
             unit_id=uid,
             label=ReadinessLabel.NOT_MET_WITH_PLAN,
@@ -151,16 +169,16 @@ def map_readiness(
             reasons=("org_responsibility=external; no open action yet",),
         )
 
-    # Meets without evidence → TBD Verify
-    if unit.implementation_state == "meets_as_written" and not has_qualifying_evidence:
+    # Claimed/evidenced without qualifying evidence → TBD Verify
+    if unit.execution_state in ("implemented", "evidenced", "verified"):
         return ReadinessResult(
             unit_id=uid,
             label=ReadinessLabel.TBD_VERIFY,
-            reasons=("meets_as_written pending qualifying evidence",),
+            reasons=(f"execution {unit.execution_state} pending qualifying evidence",),
         )
 
-    # not_met/partial without plan-quality action (AF2: owner+exit_criteria required)
-    if unit.implementation_state in ("not_met", "partial"):
+    # not started/partial without plan-quality action (AF2 floor)
+    if unit.execution_state in ("not_started", "partial"):
         return ReadinessResult(
             unit_id=uid,
             label=ReadinessLabel.TBD_VERIFY,
@@ -168,7 +186,7 @@ def map_readiness(
                 (
                     "open actions lack owner+exit_criteria (plan-quality floor)"
                     if open_acts
-                    else "not_met without open ActionRecord"
+                    else "execution not started without open ActionRecord"
                 ),
             ),
         )

@@ -185,7 +185,10 @@ def build_context(
             {
                 e.fact_key
                 for e in graph.prerequisites_of(unit.unit_id)
-                if e.fact_key
+                # M7: reopen-only edges don't make a fact unit-relevant for
+                # LOW banding — that would put 31 CEO-text AMRs at LOW on an
+                # assumed CEO (AF3 regression)
+                if e.fact_key and e.kind != "reopen_fact"
             }
         )
     )

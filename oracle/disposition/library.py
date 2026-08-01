@@ -181,6 +181,11 @@ def export_library(
                     # cannot re-elect — exports were not reusable.
                     "obligated_actor": unit.obligated_actor,
                     "organization_responsibility": unit.organization_responsibility,
+                    # Model split: the split axes are authoritative — the
+                    # legacy view alone round-tripped not_started up to
+                    # evidenced via migration (Atlas model-split Medium).
+                    "fulfillment_path": unit.fulfillment_path,
+                    "execution_state": unit.execution_state,
                     "implementation_state": unit.implementation_state,
                     "approval_state": unit.approval_state,
                 },

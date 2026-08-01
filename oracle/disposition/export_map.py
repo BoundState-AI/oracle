@@ -24,11 +24,14 @@ from oracle.disposition.codes import (
     Applicability,
     ApprovalState,
     DispositionCode,
+    ExecutionState,
     ExportLabel,
+    FulfillmentPath,
     ImplementationState,
     ObligatedActor,
     OrgResponsibility,
     TBDReason,
+    split_from_legacy,
 )
 
 LOGGER = logging.getLogger("oracle.disposition.export_map")
@@ -44,7 +47,12 @@ class AxisContradiction(ValueError):
 
 @dataclass(frozen=True)
 class AxisSnapshot:
-    """Pure axis values for mapping (no workflow / identity)."""
+    """Pure axis values for mapping (no workflow / identity).
+
+    Model split: fulfillment_path/execution_state are the decision inputs.
+    Legacy constructors that supply only implementation_state get the
+    validated migration applied in __post_init__ — one conversion point.
+    """
 
     applicability: Applicability
     obligated_actor: Optional[ObligatedActor]
@@ -55,6 +63,22 @@ class AxisSnapshot:
     org_responsibility_tbd_reason: Optional[TBDReason] = None
     implementation_tbd_reason: Optional[TBDReason] = None
     approval_tbd_reason: Optional[TBDReason] = None
+    fulfillment_path: Optional[FulfillmentPath] = None
+    execution_state: Optional[ExecutionState] = None
+
+    def __post_init__(self) -> None:
+        if self.fulfillment_path is None or self.execution_state is None:
+            ful, execu = split_from_legacy(
+                self.implementation_state,
+                self.applicability,
+                self.approval_state,
+            )
+            object.__setattr__(
+                self, "fulfillment_path", self.fulfillment_path or ful
+            )
+            object.__setattr__(
+                self, "execution_state", self.execution_state or execu
+            )
 
 
 def validate_tbd_reasons(snap: AxisSnapshot) -> None:
@@ -69,10 +93,12 @@ def validate_tbd_reasons(snap: AxisSnapshot) -> None:
             "tbd_validity",
             "organization_responsibility=TBD requires org_responsibility_tbd_reason",
         )
-    if snap.implementation_state == "tbd" and snap.implementation_tbd_reason is None:
+    # Model split: the implementation reason tracks EXECUTION tbd-ness —
+    # the legacy view can be non-TBD (a commitment) while execution is TBD.
+    if snap.execution_state == "tbd" and snap.implementation_tbd_reason is None:
         raise AxisContradiction(
             "tbd_validity",
-            "implementation_state=TBD requires implementation_tbd_reason",
+            "execution_state=TBD requires implementation_tbd_reason",
         )
     if snap.approval_state == "tbd" and snap.approval_tbd_reason is None:
         raise AxisContradiction(
@@ -92,10 +118,10 @@ def validate_tbd_reasons(snap: AxisSnapshot) -> None:
             "tbd_validity",
             "org_responsibility_tbd_reason only allowed when organization_responsibility=TBD",
         )
-    if snap.implementation_state != "tbd" and snap.implementation_tbd_reason is not None:
+    if snap.execution_state != "tbd" and snap.implementation_tbd_reason is not None:
         raise AxisContradiction(
             "tbd_validity",
-            "implementation_tbd_reason only allowed when implementation_state=TBD",
+            "implementation_tbd_reason only allowed when execution_state=TBD",
         )
     if snap.approval_state != "tbd" and snap.approval_tbd_reason is not None:
         raise AxisContradiction(
@@ -136,77 +162,87 @@ def validate_actor_coherence(snap: AxisSnapshot) -> None:
 
 def map_axes_to_export_label(snap: AxisSnapshot) -> ExportLabel:
     """
-    RDW §7.1 deterministic mapping.
+    RDW §7.1 deterministic mapping — CONTRACT label from the fulfillment
+    ELECTION, never from execution (model split, Fran P0). Execution is
+    consulted only to distinguish TBD from Open/Not Met when no
+    commitment has been elected.
 
     Raises AxisContradiction for unreachable/invalid combinations.
-    Applicability is decided first so N/A is not swallowed by downstream TBDs.
+    Applicability is decided first so N/A is not swallowed by downstream
+    TBDs. Prototype-validated identical to the pre-split table on every
+    legacy combination (RDW_MODEL_SPLIT_SPEC.md).
     """
     validate_tbd_reasons(snap)
     validate_applicability_coherence(snap)
     validate_actor_coherence(snap)
 
+    ful = snap.fulfillment_path
+    execu = snap.execution_state
+    appr = snap.approval_state
+
     if snap.applicability == "tbd":
         return ExportLabel.TBD
 
     if snap.applicability == "no":
+        if ful not in ("not_applicable", "tbd"):
+            raise AxisContradiction(
+                "applicability_coherence",
+                f"applicability No cannot pair with a committed fulfillment "
+                f"path {ful!r}",
+            )
         return ExportLabel.NA
 
     # applicability == yes — unresolved subordinate axes → TBD
-    if (
-        snap.organization_responsibility == "tbd"
-        or snap.implementation_state == "tbd"
-        or snap.approval_state == "tbd"
-    ):
+    if snap.organization_responsibility == "tbd" or appr == "tbd":
         return ExportLabel.TBD
 
-    impl = snap.implementation_state
-    appr = snap.approval_state
+    # preserved legacy rule (frozen-table position): not_reached while
+    # applicable is a contradiction, never laundered into Open/Not Met
+    if snap.implementation_state == "not_reached":
+        raise AxisContradiction(
+            "applicability_coherence",
+            "implementation not_reached is only valid when applicability is No",
+        )
 
-    if impl == "meets_as_written":
-        if appr in ("not_required", "approved"):
-            return ExportLabel.MEET
+    if ful == "not_applicable":
+        raise AxisContradiction(
+            "applicability_coherence",
+            "fulfillment not_applicable requires applicability No",
+        )
+
+    if ful == "as_written":
         if appr == "rejected":
             return ExportLabel.OPEN_NOT_MET
         if appr in ("required", "draft", "submitted"):
             return ExportLabel.TBD
-        raise AxisContradiction("export_coherence", f"unmapped approval for Meet path: {appr}")
+        return ExportLabel.MEET  # not_required | approved
 
-    if impl == "alternate_proposed":
+    if ful == "alternative_intent":
         # Rejected tailoring must not claim Meets Intent (review C2).
         if appr == "rejected":
             return ExportLabel.OPEN_NOT_MET
         # Guard 1: Meets Intent never under a compliance heading.
         return ExportLabel.MEETS_INTENT
 
-    if impl == "partial":
-        # Partial is incomplete conformance — never Meets Intent (§13.2: no MI
-        # when implementation is absent/incomplete without an alternate proposal).
-        # Rejected/approved/not_required partial all → Open/Not Met (review C2).
-        return ExportLabel.OPEN_NOT_MET
-
-    if impl == "not_met":
+    if ful == "exception":
         # Rejected relief is not a live Exception (review C2).
-        if appr in ("not_required", "rejected"):
+        if appr == "rejected":
             return ExportLabel.OPEN_NOT_MET
-        # External responsibility: approval pending elsewhere is Open/Not Met,
-        # not Exception — AC-3 AMR-1 (program applies; formal approval external).
+        # External responsibility: approval pending elsewhere is Open/Not
+        # Met, not Exception — AC-3 AMR-1.
         if snap.organization_responsibility == "external":
             return ExportLabel.OPEN_NOT_MET
-        # Live relief path (local owner tracks exception approval)
-        if appr in ("required", "draft", "submitted", "approved"):
-            return ExportLabel.EXCEPTION
-        raise AxisContradiction("export_coherence", f"unmapped approval for not_met: {appr}")
+        if appr == "not_required":
+            raise AxisContradiction(
+                "export_coherence",
+                "exception fulfillment requires a relief approval path",
+            )
+        return ExportLabel.EXCEPTION
 
-    if impl == "not_reached":
-        raise AxisContradiction(
-            "applicability_coherence",
-            "implementation not_reached is only valid when applicability is No",
-        )
-
-    raise AxisContradiction(
-        "export_coherence",
-        f"unmapped implementation_state={impl!r} with applicability=yes",
-    )
+    # ful == tbd — no commitment elected
+    if execu == "tbd":
+        return ExportLabel.TBD
+    return ExportLabel.OPEN_NOT_MET
 
 
 def export_label_to_code(label: ExportLabel) -> DispositionCode:

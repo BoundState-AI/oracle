@@ -185,13 +185,16 @@ def test_ar3_eof_at_evidence_prompt_is_cancel_not_docid(tmp_path):
     """Atlas high 3: EOF became the literal doc id 'quit' before."""
     st, out, s = _walk(
         tmp_path,
-        # stream ends right where the evidence doc id is asked
-        ["y", "unknown", "yes", "producer", "meets_as_written", "not_required"],
+        # stream ends right where the evidence doc id is asked (the
+        # 'evidenced' claim cites its evidence immediately — model split)
+        ["y", "unknown", "yes", "producer", "owner", "as_written", "evidenced"],
         ["AMR-50"],
     )
     u = st.units["AMR-50"]
     assert not any(r.doc_id == "quit" for r in u.evidence_refs)
-    assert u.implementation_state == "tbd"  # cancel fell back to TBD
+    assert not u.evidence_refs
+    # cancelled citation downgrades the claim to an uncited 'implemented'
+    assert u.execution_state == "implemented"
     # the sub-prompt answer itself is raw-logged (Stage A discipline)
     assert any(
         a["question_key"] == "evidence.doc_id" and a["raw"] == "quit"
@@ -380,7 +383,8 @@ def test_ar7_walk_consumes_library_action_pattern(tmp_path):
             "\n".join(
                 [
                     "y", "unknown",  # intake (resumed session still runs it)
-                    "yes", "producer", "not_met", "not_required",
+                    "yes", "producer", "owner", "open",
+                    "not_started", "not_required",
                     "y",  # apply the library plan pattern
                     "y",  # accept comment
                     "quit",
@@ -443,10 +447,12 @@ def test_ar9_invalid_mi_class_reprompts(tmp_path):
     st, out, _ = _walk(
         tmp_path,
         [
-            "y", "unknown", "yes", "producer", "alternate_proposed",
+            "y", "unknown", "yes", "producer", "owner", "alternative",
             "intent: control the process", "alt: vendor QMS control",
             "bogus", "disclosed",  # invalid then corrected
-            "required", "y", "quit",
+            "partial", "required",
+            "n",  # plan offer (MI with execution partial)
+            "y", "quit",
         ],
         ["AMR-50"],
     )

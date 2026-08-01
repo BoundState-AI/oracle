@@ -83,6 +83,27 @@ DEPENDENCY_SEEDS: tuple[DependencyEdge, ...] = (
     _e("EFCR-1", "EFCR-3", "control", "EFCP before flaw-size credit"),
     _e("plan.EFCP", "AMR-14", "fact", "EFCP plan presence", "plan.EFCP"),
     _e("plan.EFCP", "EFCR-1", "fact", "EFCP plan presence", "plan.EFCP"),
+) + tuple(
+    # M7 (Fran P1): every CEO-obligated AMR REOPENS when ceo.identity
+    # changes. kind="reopen_fact" propagates re-review but does NOT block
+    # Meet or drive advisor LOW (that stays AMR-2/AMR-4's richer "fact"
+    # edges) — a blanket block would regress AF3 and gate 31 units on an
+    # assumed CEO. List DERIVED from the curated pack's text (CEO /
+    # "cognizant engineering" sweep 2026-07-31), pinned by a drift test.
+    _e(
+        "ceo.identity",
+        rid,
+        "reopen_fact",
+        "CEO-obligated requirement (pack text names the CEO)",
+        "ceo.identity",
+    )
+    for rid in (
+        "AMR-1", "AMR-3", "AMR-5", "AMR-13", "AMR-14", "AMR-20", "AMR-21",
+        "AMR-25", "AMR-26", "AMR-30", "AMR-34", "AMR-35", "AMR-38",
+        "AMR-58", "AMR-59", "AMR-60", "AMR-66", "AMR-67", "AMR-73",
+        "AMR-77", "AMR-78", "AMR-91", "AMR-92", "AMR-97", "AMR-99",
+        "AMR-110", "AMR-111", "AMR-112", "AMR-113",
+    )
 )
 
 
@@ -116,7 +137,7 @@ class DependencyGraph:
         """DFS cycle detection; returns list of cycle node paths."""
         adj: dict[str, list[str]] = defaultdict(list)
         for e in self.edges:
-            if e.kind == "fact":
+            if e.kind in ("fact", "reopen_fact"):
                 continue  # fact nodes are external
             adj[e.prerequisite_id].append(e.dependent_id)
 

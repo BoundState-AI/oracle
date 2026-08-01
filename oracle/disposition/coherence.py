@@ -104,10 +104,12 @@ def gate_review_coherence(
     """
     if workflow_state not in ("human_confirmed", "release_approved"):
         return
+    # Model split: execution_state is the reviewable axis — the legacy view
+    # can read meets_as_written while execution is TBD (CW commitment).
     has_tbd = (
         snap.applicability == "tbd"
         or snap.organization_responsibility == "tbd"
-        or snap.implementation_state == "tbd"
+        or snap.execution_state == "tbd"
         or snap.approval_state == "tbd"
     )
     if has_tbd and not accepted_with_tbd:

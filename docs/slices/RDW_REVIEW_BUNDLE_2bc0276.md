@@ -700,3 +700,86 @@ term refused in apply AND dry-run; replacement-generated identifier
 refused; direct CAGE refused; clean case written). All of CS1-CS6 now
 CONFIRMED; G1-G8 all independently verified fixed. No new findings.
 Committed per the standing loop. Advisory-only per D-1.
+
+---
+
+## Model-split slice ROUND 1 built by Beth (2026-07-31) — uncommitted on dded550, AWAITING ATLAS
+
+Fran P0 adopted by Dr. Wilde: fulfillment_path (contract election) split
+from execution_state (execution fact); implementation_state survives only
+as a derived legacy view. Built per RDW_MODEL_SPLIT_SPEC.md:
+
+- codes.py: FulfillmentPath/ExecutionState vocabularies + the validated
+  migration tables (split_from_legacy / legacy_from_split).
+- export_map.py: AxisSnapshot carries split axes (legacy constructors
+  auto-convert in __post_init__); the §7.1 mapping reads fulfillment only
+  (execution only distinguishes TBD from Open/Not Met when no commitment
+  is elected); frozen-table test pins EXACT equivalence on all 504 legacy
+  combos including which are contradictions.
+- session.py: UnitAxesState split axes + split_elected + a mode=before
+  model validator as the single conversion point (old event payloads
+  replay unchanged); set_axes write rules (split write backs out the
+  legacy view; legacy write re-derives the split; other-axis writes on
+  legacy-driven units re-derive); the Meet evidence HARD GATE now
+  protects the execution CLAIM (evidenced/verified without qualifying
+  evidence refuses) not the commitment — AMR-106 (CW + execution not
+  started) elects, readiness carries the gap. NYD coherence keyed to
+  execution not-started (a CW commitment may be Not Yet Due).
+- readiness.py: derives from execution + evidence + actions; support on
+  a program/CEO obligation with tracked work reads External Action
+  (AMR-113); the documented divergence (alternative control + plan =
+  Not Met with Plan, was TBD-Verify-by-fallthrough) is test-pinned.
+- walk.py M2: obligated-actor and responsibility are SEPARATE questions
+  (auto-owner removed — Fran P0 #2); fulfillment and execution are
+  separate questions; an evidenced/verified claim cites its evidence at
+  the claim; Not Yet Due is a visible choice (M6); plan offer extends to
+  CW/MI commitments with execution not complete; advisor/library
+  acceptances elect split axes (no re-interview); _would_be_label
+  rebuilds through validation (model_copy would skip conversion).
+- graph.py M7: 29 pack-derived CEO reopen_fact edges (+AMR-2/4 keep
+  blocking edges) — reopen-only: they propagate re-review but never
+  block Meet or drive advisor LOW (AF3 preserved); drift test re-derives
+  the list from the curated pack text.
+
+Anchors through the REAL session: AMR-106 = Meet(CW) + Not Met with
+Plan; AMR-113 = ceo+support+plan -> External Action; NYD coexists with
+CW. Replay compat: pre-split event payloads validate + relabel
+identically; legacy sessions resume to identical labels.
+
+Deferred to round 2 (spec M3-M5): registry-required evidence strictness,
+release gating on accepted review_state, advisor-after-elections with
+enriched context + PROMPT_VERSION content hash.
+
+11 new tests (test_model_split.py); 8 walk scripts updated to the new
+interview. Suites: **646 passed / 5 skipped**. Smoke re-verified.
+Advisory-only per D-1.
+
+---
+
+## Atlas round 1 on the model split (2026-07-31) — structurally sound; 2 High + 1 Medium, ALL FIXED
+
+Atlas confirmed the core: frozen-table transcription matches git history,
+all 504 legacy contract combos preserve labels+contradictions, no
+unexplained readiness drift beyond the two documented changes, write
+interleavings coherent live and after resume, no further model_copy
+bypasses, reopen edges behave. Findings (independent suite 644/7):
+
+- **MS1 (High)** Execution TBD could be attested fully-reviewed: the
+  TBD-reason plumbing and both review-coherence gates read the LEGACY
+  view (meets_as_written) instead of execution. Fixed: the
+  implementation TBD reason is keyed to execution everywhere (set_axes
+  defaulting, validate_tbd_reasons, snapshot), and attest_unit +
+  gate_review_coherence check execution_state — accepted-with-TBD stays
+  the explicit escape.
+- **MS2 (High)** The claim evidence gate was label-scoped: MI/EX/Open
+  paths accepted an unevidenced evidenced/verified execution. Fixed:
+  the session hard gate is label-INDEPENDENT, and decision.py blocks
+  Meet/MI/EX on an unevidenced claim (export defense in depth).
+- **MS3 (Medium)** Library export serialized only the legacy axis, so
+  not_started round-tripped up to evidenced via migration. Fixed: axes
+  carry fulfillment_path + execution_state; the apply payload never
+  re-migrates when the split is present (legacy bundles still convert).
+
+3 regressions in test_model_split.py (now 14). Suites: **649 passed /
+5 skipped**. Smoke re-verified. Awaiting Atlas re-verdict on the three
+findings. Advisory-only per D-1.

@@ -144,13 +144,15 @@ def test_fr3_meet_completes_with_evidence(tmp_path):
     st, _, _ = _walk(
         tmp_path,
         [
-            "y", "unknown", "yes", "producer", "meets_as_written",
-            "not_required", "QMS-001", "A", "y", "quit",
+            "y", "unknown", "yes", "producer", "owner", "as_written",
+            "evidenced", "QMS-001", "A", "not_required", "y", "quit",
         ],
         ["AMR-50"],
     )
     u = st.units["AMR-50"]
     assert u.export_label().value == "Meet"
+    assert u.fulfillment_path == "as_written"
+    assert u.execution_state == "evidenced"
     assert any(r.doc_id == "QMS-001" for r in u.evidence_refs)
 
 
@@ -158,14 +160,17 @@ def test_fr3_meets_intent_gathers_fields(tmp_path):
     st, _, _ = _walk(
         tmp_path,
         [
-            "y", "unknown", "yes", "producer", "alternate_proposed",
+            "y", "unknown", "yes", "producer", "owner", "alternative",
             "intent: control the process", "alt: vendor QMS control",
-            "integral", "required", "y", "quit",
+            "integral", "partial", "required",
+            "n",  # plan offer (MI with execution partial)
+            "y", "quit",
         ],
         ["AMR-50"],
     )
     u = st.units["AMR-50"]
     assert u.export_label().value == "Meets Intent"
+    assert u.fulfillment_path == "alternative_intent"
     assert u.intent_statement and u.alternative_control
     assert u.control_class == "integral"
 
@@ -174,7 +179,8 @@ def test_fr3_exception_gathers_basis_and_action(tmp_path):
     st, _, _ = _walk(
         tmp_path,
         [
-            "y", "unknown", "yes", "producer", "not_met", "required",
+            "y", "unknown", "yes", "producer", "owner", "exception",
+            "not_started", "required",
             "cannot meet as written for cold spray",  # basis
             "action",  # closure choice
             "", "Pursue MUA relief", "op", "MUA", "MUA granted",
@@ -185,6 +191,7 @@ def test_fr3_exception_gathers_basis_and_action(tmp_path):
     )
     u = st.units["AMR-50"]
     assert u.export_label().value == "Exception"
+    assert u.fulfillment_path == "exception"
     assert u.exception_basis
     assert u.closure_path_action_id
 
@@ -193,7 +200,8 @@ def test_fr3_open_not_met_offers_plan(tmp_path):
     st, _, s = _walk(
         tmp_path,
         [
-            "y", "unknown", "yes", "producer", "not_met", "not_required",
+            "y", "unknown", "yes", "producer", "owner", "open",
+            "not_started", "not_required",
             "y",  # record a plan
             "", "Close the gap", "op", "Evidence package", "evidence registered",
             "medium", "", "wp-1",
@@ -203,6 +211,7 @@ def test_fr3_open_not_met_offers_plan(tmp_path):
     )
     u = st.units["AMR-50"]
     assert u.export_label().value == "Open/Not Met"
+    assert u.execution_state == "not_started"
     acts = s.actions_for_unit("AMR-50")
     assert acts and acts[0].is_plan_quality()
 
@@ -211,7 +220,8 @@ def test_fr3_not_yet_due_path(tmp_path):
     st, _, _ = _walk(
         tmp_path,
         [
-            "y", "unknown", "yes", "producer", "not_yet_due",
+            "y", "unknown", "yes", "producer", "owner", "as_written",
+            "not_yet_due",
             "levied at flight production; program not at phase",
             "unknown", "y", "quit",
         ],
@@ -219,6 +229,9 @@ def test_fr3_not_yet_due_path(tmp_path):
     )
     u = st.units["AMR-50"]
     assert u.not_yet_due and u.not_yet_due_justification
+    # Fran's corpus: the NYD row still carries a CW commitment
+    assert u.fulfillment_path == "as_written"
+    assert u.execution_state == "not_started"
 
 
 def test_fr3_mi_gate_refuses_without_fields(tmp_path):

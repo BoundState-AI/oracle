@@ -61,6 +61,90 @@ ApprovalState = Literal[
     "tbd",
 ]
 
+# ---------------------------------------------------------------------------
+# Model split (Fran P0, adopted 2026-07-31 — RDW_MODEL_SPLIT_SPEC.md):
+# implementation_state served two masters. The CONTRACT election and the
+# EXECUTION fact are now separate axes; implementation_state survives only
+# as a derived legacy view for old events/tests.
+# ---------------------------------------------------------------------------
+
+FulfillmentPath = Literal[
+    "as_written",         # commit to comply as written -> CW
+    "alternative_intent",  # alternative control -> MI
+    "exception",           # relief sought -> EX
+    "not_applicable",      # scope exclusion -> NA
+    "tbd",                 # no commitment elected (open)
+]
+ExecutionState = Literal[
+    "not_started",
+    "partial",
+    "implemented",  # claimed done, nothing attached yet
+    "evidenced",    # evidence attached
+    "verified",     # evidence verified
+    "tbd",
+]
+
+_RELIEF_APPROVALS = ("required", "draft", "submitted", "approved")
+
+_LEGACY_EXECUTION: dict[str, str] = {
+    "meets_as_written": "evidenced",
+    "alternate_proposed": "partial",
+    "not_met": "not_started",
+    "partial": "partial",
+    "not_reached": "not_started",
+    "tbd": "tbd",
+}
+
+
+def split_from_legacy(
+    implementation_state: str,
+    applicability: str,
+    approval_state: str,
+) -> tuple[str, str]:
+    """Migrate a legacy implementation_state to (fulfillment, execution).
+
+    Validated exhaustively against the pre-split engine (504 contract
+    combos identical; readiness identical on the session-reachable set
+    except the documented alternate_proposed+plan improvement) — see
+    RDW_MODEL_SPLIT_SPEC.md before changing ANY row of this table.
+    """
+    execution = _LEGACY_EXECUTION.get(implementation_state, "tbd")
+    if applicability == "no":
+        return ("not_applicable", execution)
+    if implementation_state == "meets_as_written":
+        return ("as_written", execution)
+    if implementation_state == "alternate_proposed":
+        return ("alternative_intent", execution)
+    if implementation_state == "not_met" and approval_state in _RELIEF_APPROVALS:
+        return ("exception", execution)
+    return ("tbd", execution)
+
+
+def legacy_from_split(
+    fulfillment_path: str,
+    execution_state: str,
+) -> str:
+    """Derived legacy view — for old readers only, never a decision input.
+
+    The view reflects the COMMITMENT (an as_written election reads
+    meets_as_written even while execution is not_started); derivations
+    must read the split axes, exactly per Fran's P0.
+    """
+    if fulfillment_path == "not_applicable":
+        return "not_reached"
+    if fulfillment_path == "as_written":
+        return "meets_as_written"
+    if fulfillment_path == "alternative_intent":
+        return "alternate_proposed"
+    if fulfillment_path == "exception":
+        return "not_met"
+    # no commitment elected
+    if execution_state == "tbd":
+        return "tbd"
+    if execution_state in ("partial", "implemented", "evidenced", "verified"):
+        return "partial"
+    return "not_met"  # not_started
+
 
 class DispositionCode(str, Enum):
     """

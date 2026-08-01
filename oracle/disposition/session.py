@@ -27,17 +27,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from oracle.disposition.codes import (
     Applicability,
     ApprovalState,
+    ExecutionState,
     ExportLabel,
+    FulfillmentPath,
     ImplementationState,
     ObligatedActor,
     OrgResponsibility,
     ProposalBand,
     TBDReason,
+    legacy_from_split,
+    split_from_legacy,
 )
 from oracle.disposition.eventlog import EventLog, EventLogError
 from oracle.disposition.export_map import AxisSnapshot, map_axes_to_export_label
@@ -205,6 +209,13 @@ class UnitAxesState(BaseModel):
     organization_responsibility: OrgResponsibility = "tbd"
     implementation_state: ImplementationState = "tbd"
     approval_state: ApprovalState = "tbd"
+    # Model split (Fran P0): the contract ELECTION and the execution FACT.
+    # implementation_state is a derived legacy view; every derivation reads
+    # these. split_elected marks a unit whose split axes were set directly
+    # (legacy writes re-derive; split writes back-derive the legacy view).
+    fulfillment_path: FulfillmentPath = "tbd"
+    execution_state: ExecutionState = "tbd"
+    split_elected: bool = False
     applicability_tbd_reason: Optional[TBDReason] = TBDReason.EVIDENCE_ABSENT
     org_responsibility_tbd_reason: Optional[TBDReason] = TBDReason.EVIDENCE_ABSENT
     implementation_tbd_reason: Optional[TBDReason] = TBDReason.EVIDENCE_ABSENT
@@ -230,6 +241,33 @@ class UnitAxesState(BaseModel):
     intent_statement: Optional[str] = None
     alternative_control: Optional[str] = None
     control_class: Optional[Literal["integral", "disclosed"]] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _model_split_conversion(cls, data: Any) -> Any:
+        """Single conversion point between the legacy axis and the split.
+
+        Legacy inputs (old event payloads, old tests) lack the split axes —
+        derive them with the validated migration table. Split inputs may
+        omit implementation_state — back-derive the legacy view. Callers
+        that drop one side force the re-derivation (set_axes does this)."""
+        if not isinstance(data, dict):
+            return data
+        ful = data.get("fulfillment_path")
+        execu = data.get("execution_state")
+        if ful is None or execu is None:
+            d_ful, d_exec = split_from_legacy(
+                data.get("implementation_state") or "tbd",
+                data.get("applicability") or "tbd",
+                data.get("approval_state") or "tbd",
+            )
+            data["fulfillment_path"] = ful or d_ful
+            data["execution_state"] = execu or d_exec
+        if data.get("implementation_state") is None:
+            data["implementation_state"] = legacy_from_split(
+                data["fulfillment_path"], data["execution_state"]
+            )
+        return data
 
     @field_validator("scope_citation", mode="before")
     @classmethod
@@ -260,11 +298,13 @@ class UnitAxesState(BaseModel):
             if self.organization_responsibility == "tbd"
             else None,
             implementation_tbd_reason=self.implementation_tbd_reason
-            if self.implementation_state == "tbd"
+            if self.execution_state == "tbd"
             else None,
             approval_tbd_reason=self.approval_tbd_reason
             if self.approval_state == "tbd"
             else None,
+            fulfillment_path=self.fulfillment_path,
+            execution_state=self.execution_state,
         )
 
     def export_label(self) -> ExportLabel:
@@ -904,14 +944,46 @@ class DispositionSession:
         data = cur.model_dump()
         data.update({k: v for k, v in axis_fields.items() if v is not None})
         data["actor_name"] = actor_name
+
+        # Model split write rules (single source of coherence):
+        #   split write  -> split axes govern; legacy view back-derived
+        #   legacy write -> unit becomes legacy-driven; split re-derived
+        #   other axes on a legacy-driven unit -> split re-derived (the
+        #     migration depends on applicability/approval)
+        touches_split = (
+            "fulfillment_path" in axis_fields or "execution_state" in axis_fields
+        )
+        touches_legacy = "implementation_state" in axis_fields
+        if touches_split:
+            data["split_elected"] = True
+            data.pop("implementation_state", None)
+        elif touches_legacy or not data.get("split_elected"):
+            if touches_legacy:
+                data["split_elected"] = False
+            data.pop("fulfillment_path", None)
+            data.pop("execution_state", None)
+
         for axis, reason in (
             ("applicability", "applicability_tbd_reason"),
             ("organization_responsibility", "org_responsibility_tbd_reason"),
-            ("implementation_state", "implementation_tbd_reason"),
             ("approval_state", "approval_tbd_reason"),
         ):
             if data.get(axis) != "tbd":
                 data[reason] = None
+        # The implementation TBD reason belongs to EXECUTION under the
+        # split (the legacy view can read meets_as_written while execution
+        # is TBD — a CW commitment). Key it to the effective execution.
+        eff_exec = data.get("execution_state")
+        if eff_exec is None:
+            eff_exec = split_from_legacy(
+                data.get("implementation_state") or "tbd",
+                data.get("applicability") or "tbd",
+                data.get("approval_state") or "tbd",
+            )[1]
+        if eff_exec != "tbd":
+            data["implementation_tbd_reason"] = None
+        elif data.get("implementation_tbd_reason") is None:
+            data["implementation_tbd_reason"] = TBDReason.EVIDENCE_ABSENT
         unit = UnitAxesState.model_validate(data)
 
         # C1: §13.2 on stored comments (including edited). N4: only the
@@ -938,14 +1010,16 @@ class DispositionSession:
             raise SessionError(
                 "not_yet_due requires not_yet_due_justification"
             )
-        # AR2: Not Yet Due is only coherent while implementation is undecided.
-        # An explicit contradiction refuses; a stale carried marker clears so a
-        # later Meet/Not-Met election cannot produce two contradictory views.
-        if unit.not_yet_due and unit.implementation_state != "tbd":
+        # AR2: Not Yet Due is only coherent while execution has not begun
+        # (a CW commitment may carry NYD — Fran's corpus has exactly that —
+        # but concrete execution progress contradicts it). An explicit
+        # contradiction refuses; a stale carried marker clears so a later
+        # Meet/Not-Met election cannot produce two contradictory views.
+        if unit.not_yet_due and unit.execution_state not in ("tbd", "not_started"):
             if axis_fields.get("not_yet_due") is True:
                 raise SessionError(
-                    "not_yet_due requires implementation_state='tbd' "
-                    f"(got {unit.implementation_state!r})"
+                    "not_yet_due requires execution not started "
+                    f"(got execution_state={unit.execution_state!r})"
                 )
             unit = unit.model_copy(update={"not_yet_due": False})
 
@@ -974,14 +1048,20 @@ class DispositionSession:
                     f"Election refused: export label {label.value!r} is blocked "
                     f"({decision.blocked[label.value]})"
                 )
-            # Also refuse if Meet mapped but lacks qualifying evidence
+            # Model split: the hard evidence gate protects the execution
+            # CLAIM, not the commitment — CW with execution not started is
+            # AMR-106 (readiness carries the gap). Label-INDEPENDENT: an
+            # unevidenced evidenced/verified claim refuses on MI/EX/Open
+            # paths too (Atlas model-split High 2). Legacy meets_as_written
+            # converts to execution=evidenced, so pre-split refusals hold.
             if (
-                label.value == "Meet"
-                and unit.applicability == "yes"
+                unit.applicability == "yes"
+                and unit.execution_state in ("evidenced", "verified")
                 and not has_ev
             ):
                 raise SessionError(
-                    "Election refused: Meet requires qualifying evidence (hard gate)"
+                    "Election refused: evidenced/verified execution requires "
+                    "qualifying evidence (hard gate)"
                 )
             # Stage A: Exception closure gates
             if label.value == "Exception":
@@ -1077,12 +1157,15 @@ class DispositionSession:
                 f"(accepted → superseded only via fact propagation; "
                 f"never accepted → proposed directly)"
             )
-        # Review coherence: accepted requires non-TBD or accepted_with_tbd
+        # Review coherence: accepted requires non-TBD or accepted_with_tbd.
+        # Model split: EXECUTION is the axis that can be TBD while the
+        # legacy view reads meets_as_written (CW commitment, execution
+        # unresolved) — the gate must read the split axis, never the view.
         if decision == "accepted":
             has_tbd = (
                 unit.applicability == "tbd"
                 or unit.organization_responsibility == "tbd"
-                or unit.implementation_state == "tbd"
+                or unit.execution_state == "tbd"
                 or unit.approval_state == "tbd"
             )
             if has_tbd and not (accepted_with_tbd or unit.accepted_with_tbd):

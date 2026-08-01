@@ -299,11 +299,38 @@ def _highest_value_question(
                 f"[program/ceo/producer/supplier/subtier/other/unknown]: ",
             )
 
-    if st.implementation_state == "tbd":
+    # M2 (Fran P0): who is obligated and whose job execution is are SEPARATE
+    # questions — auto-setting owner mis-assigned CEO/program obligations.
+    if st.applicability == "yes" and st.organization_responsibility == "tbd":
+        hint = (
+            " (obligated actor is external — likely external)"
+            if st.obligated_actor in ("program", "ceo")
+            else ""
+        )
         return (
-            f"implementation.{unit.requirement_id}",
-            "Implementation state? "
-            "[meets_as_written/alternate_proposed/partial/not_met/unknown]: ",
+            f"responsibility.{unit.requirement_id}",
+            f"Whose responsibility is execution for the evaluated org?{hint} "
+            "[owner/support/external/unknown]: ",
+        )
+
+    # Model split: the contract ELECTION, then the execution FACT.
+    if (
+        st.applicability == "yes"
+        and st.fulfillment_path == "tbd"
+        and not st.split_elected
+    ):
+        return (
+            f"fulfillment.{unit.requirement_id}",
+            "How will this requirement be fulfilled contractually? "
+            "[as_written/alternative/exception/open/unknown]: ",
+        )
+
+    if st.applicability == "yes" and st.execution_state == "tbd":
+        return (
+            f"execution.{unit.requirement_id}",
+            "Where is implementation today? "
+            "[not_started/partial/implemented/evidenced/verified/"
+            "not_yet_due/unknown]: ",
         )
 
     if st.approval_state == "tbd":
@@ -603,22 +630,69 @@ def _apply_answer(
             actor_val = ans if ans in {
                 "program", "ceo", "producer", "supplier", "subtier", "other"
             } else "other"
+            # M2 (Fran P0): NEVER auto-set responsibility — a CEO/program
+            # obligation is not the evaluated org's ownership. The
+            # responsibility question follows.
+            session.set_axes(uid, actor_name=actor, obligated_actor=actor_val)
+        return
+
+    if qkey.startswith("responsibility."):
+        if ans in ("owner", "support", "external"):
+            session.set_axes(
+                uid, actor_name=actor, organization_responsibility=ans
+            )
+        else:
             session.set_axes(
                 uid,
                 actor_name=actor,
-                obligated_actor=actor_val,
-                organization_responsibility="owner",
+                organization_responsibility="tbd",
+                org_responsibility_tbd_reason=TBDReason.AUTHORITY_UNIDENTIFIED,
             )
         return
 
-    if qkey.startswith("implementation."):
-        if ans in ("unknown", "skip", ""):
+    if qkey.startswith("fulfillment."):
+        # Model split: the contract election (never execution)
+        if ans in ("as_written", "meets_as_written", "cw"):
+            session.set_axes(uid, actor_name=actor, fulfillment_path="as_written")
+        elif ans in ("alternative", "alternative_intent", "alternate_proposed", "mi"):
+            # FR3: Meets Intent fields gathered with the election
+            fields = _gather_mi_fields(session, io, uid, actor)
+            if fields is None:
+                io.write("Cancelled — no fulfillment commitment recorded.")
+                return
             session.set_axes(
                 uid,
                 actor_name=actor,
-                implementation_state="tbd",
-                implementation_tbd_reason=TBDReason.EVIDENCE_ABSENT,
+                fulfillment_path="alternative_intent",
+                **fields,
             )
+        elif ans in ("exception", "ex"):
+            # basis + closure path gathered when approval completes the label
+            session.set_axes(uid, actor_name=actor, fulfillment_path="exception")
+        elif ans in ("open", "none", "not_met"):
+            # explicit: no commitment elected (Open/Not Met once execution known)
+            session.set_axes(uid, actor_name=actor, fulfillment_path="tbd")
+        # unknown/skip: leave unelected; operator can skip the unit
+        return
+
+    if qkey.startswith("execution."):
+        if ans in ("not_started", "partial", "implemented"):
+            session.set_axes(uid, actor_name=actor, execution_state=ans)
+        elif ans in ("evidenced", "verified"):
+            # M3-adjacent: an evidence claim cites its evidence NOW; a
+            # cancelled citation downgrades the claim to 'implemented'.
+            if session.has_qualifying_meet_evidence(
+                session.state.units[uid]
+            ) or _gather_meet_evidence(session, io, uid, actor):
+                session.set_axes(uid, actor_name=actor, execution_state=ans)
+            else:
+                io.write(
+                    "No evidence cited — recording execution 'implemented' "
+                    "(claim without citation)."
+                )
+                session.set_axes(
+                    uid, actor_name=actor, execution_state="implemented"
+                )
         elif ans in ("not_yet_due", "nyd"):
             # FR3: Not Yet Due — trigger/justification required
             just = _sub_ask(
@@ -627,41 +701,20 @@ def _apply_answer(
                 actor,
             )
             if just is None:
-                io.write("Cancelled — implementation stays TBD (no Not Yet Due).")
-                session.set_axes(
-                    uid,
-                    actor_name=actor,
-                    implementation_state="tbd",
-                    implementation_tbd_reason=TBDReason.EVIDENCE_ABSENT,
-                )
+                io.write("Cancelled — execution stays TBD (no Not Yet Due).")
+                session.set_axes(uid, actor_name=actor, execution_state="tbd")
                 return
             if not just:
                 raise SessionError("Not Yet Due requires a justification")
             session.set_axes(
                 uid,
                 actor_name=actor,
-                implementation_state="tbd",
-                implementation_tbd_reason=TBDReason.EVIDENCE_ABSENT,
+                execution_state="not_started",
                 not_yet_due=True,
                 not_yet_due_justification=just,
             )
-        elif ans == "alternate_proposed":
-            # FR3: Meets Intent fields gathered up front
-            fields = _gather_mi_fields(session, io, uid, actor)
-            if fields is None:
-                io.write("Cancelled — implementation stays TBD (no Meets Intent).")
-                session.set_axes(
-                    uid,
-                    actor_name=actor,
-                    implementation_state="tbd",
-                    implementation_tbd_reason=TBDReason.EVIDENCE_ABSENT,
-                )
-                return
-            session.set_axes(
-                uid, actor_name=actor, implementation_state=ans, **fields
-            )
         else:
-            session.set_axes(uid, actor_name=actor, implementation_state=ans)
+            session.set_axes(uid, actor_name=actor, execution_state="tbd")
         return
 
     if qkey.startswith("approval."):
@@ -677,11 +730,45 @@ def _apply_answer(
         return
 
 
+def _split_axes_payload(axes: dict) -> dict:
+    """Convert a legacy proposal/suggestion axes dict to a split-axes
+    election so accepting it fully decides the unit (no re-interview of a
+    fulfillment the acceptance already elected)."""
+    from oracle.disposition.codes import split_from_legacy
+
+    out = dict(axes)
+    impl = out.pop("implementation_state", None)
+    if impl is not None and "fulfillment_path" not in out:
+        ful, execu = split_from_legacy(
+            impl, out.get("applicability", "tbd"), out.get("approval_state", "tbd")
+        )
+        out["fulfillment_path"] = ful
+        out["execution_state"] = execu
+    return out
+
+
 def _would_be_label(session: DispositionSession, uid: str, **updates) -> Optional[str]:
-    """Dry-run the §7.1 label a field update would produce (no state change)."""
+    """Dry-run the §7.1 label a field update would produce (no state change).
+
+    Model split: rebuild through model_validate — model_copy would skip the
+    legacy→split conversion and probe with STALE split axes, making the dry
+    label diverge from the real election (the exact risk Atlas verified
+    against on the pre-split model).
+    """
     assert session.state is not None
     try:
-        probe = session.state.units[uid].model_copy(update=updates)
+        unit = session.state.units[uid]
+        data = unit.model_dump()
+        data.update(updates)
+        if "fulfillment_path" in updates or "execution_state" in updates:
+            data["split_elected"] = True
+            data.pop("implementation_state", None)
+        elif "implementation_state" in updates or not data.get("split_elected"):
+            data.pop("fulfillment_path", None)
+            data.pop("execution_state", None)
+        from oracle.disposition.session import UnitAxesState
+
+        probe = UnitAxesState.model_validate(data)
         return probe.export_label().value
     except Exception:  # mapping may legitimately fail mid-interview
         return None
@@ -703,15 +790,28 @@ def _apply_approval_with_completion(
     label = _would_be_label(session, uid, approval_state=ans)
     extra: dict = {}
 
-    if label == "Meet" and not session.has_qualifying_meet_evidence(cur):
+    if (
+        label == "Meet"
+        and cur.execution_state in ("evidenced", "verified")
+        and not session.has_qualifying_meet_evidence(cur)
+    ):
+        # Only an execution CLAIM needs a citation here — a CW commitment
+        # with execution not started is AMR-106, handled by the plan offer.
         if not _gather_meet_evidence(session, io, uid, actor):
-            io.write("No evidence cited — recording approval with TBD implementation.")
+            io.write(
+                "No evidence cited — commitment withdrawn (approval recorded; "
+                "fulfillment back to open)."
+            )
             session.set_axes(
                 uid,
                 actor_name=actor,
                 approval_state=ans,
-                implementation_state="tbd",
-                implementation_tbd_reason=TBDReason.EVIDENCE_ABSENT,
+                fulfillment_path="tbd",
+                execution_state=(
+                    "implemented"
+                    if cur.execution_state in ("evidenced", "verified")
+                    else cur.execution_state
+                ),
             )
             return
     elif label == "Exception":
@@ -723,15 +823,14 @@ def _apply_approval_with_completion(
         if needs_basis or needs_closure:
             gathered = _gather_ex_closure(session, io, uid, actor)
             if gathered is None:
-                # AR3: quit/EOF mid-gather cancels the election — same
-                # fallback as the Meet-evidence cancel path above.
-                io.write("Cancelled — recording approval with TBD implementation.")
+                # AR3: quit/EOF mid-gather cancels the election — the
+                # commitment is withdrawn, not half-recorded.
+                io.write("Cancelled — commitment withdrawn (fulfillment back to open).")
                 session.set_axes(
                     uid,
                     actor_name=actor,
                     approval_state=ans,
-                    implementation_state="tbd",
-                    implementation_tbd_reason=TBDReason.EVIDENCE_ABSENT,
+                    fulfillment_path="tbd",
                 )
                 return
             extra = gathered
@@ -744,20 +843,27 @@ def _apply_approval_with_completion(
         if missing:
             gathered = _gather_mi_fields(session, io, uid, actor)
             if gathered is None:
-                io.write("Cancelled — recording approval with TBD implementation.")
+                io.write("Cancelled — commitment withdrawn (fulfillment back to open).")
                 session.set_axes(
                     uid,
                     actor_name=actor,
                     approval_state=ans,
-                    implementation_state="tbd",
-                    implementation_tbd_reason=TBDReason.EVIDENCE_ABSENT,
+                    fulfillment_path="tbd",
                 )
                 return
             extra = gathered
 
     session.set_axes(uid, actor_name=actor, approval_state=ans, **extra)
 
-    if label == "Open/Not Met":
+    # Model split: a CW/MI commitment with execution not started IS the
+    # engagement's dominant pattern (AMR-106) — it needs a plan exactly
+    # like Open/Not Met, or readiness stays TBD Verify.
+    after = session.state.units[uid]
+    needs_plan = label == "Open/Not Met" or (
+        label in ("Meet", "Meets Intent")
+        and after.execution_state in ("not_started", "partial")
+    )
+    if needs_plan:
         has_plan = any(
             a.is_plan_quality()
             for a in session.actions_for_unit(uid)
@@ -770,8 +876,9 @@ def _apply_approval_with_completion(
                 return
             p = _sub_ask(
                 session, io, uid, "plan.offer",
-                "Open/Not Met — record a closure plan (owner + exit criteria) "
-                "for Not-Met-with-Plan readiness? [y/n]: ", actor,
+                f"{label} with execution not complete — record a closure plan "
+                "(owner + exit criteria) for Not-Met-with-Plan readiness? "
+                "[y/n]: ", actor,
             )
             if p is not None and p.lower() in ("y", "yes"):
                 act = _action_form(session, io, uid, actor, default_id=f"GAP-{uid}")
@@ -1003,7 +1110,7 @@ def _advisor_proposal_step(
                 rec.requirement_id,
                 actor_name=actor_name,
                 election=True,
-                **prop.proposed_axes,
+                **_split_axes_payload(prop.proposed_axes),
             )
             io.write("Proposal elected.")
         except SessionError as e:
@@ -1075,7 +1182,9 @@ def _offer_library_suggestion(
         return
     axes = dict(sug.get("axes") or {})
     try:
-        session.set_axes(rec.requirement_id, actor_name=actor_name, **axes)
+        session.set_axes(
+            rec.requirement_id, actor_name=actor_name, **_split_axes_payload(axes)
+        )
         io.write("Library suggestion elected (attest as usual).")
     except (SessionError, ValueError) as e:
         io.write(f"Suggestion refused by deterministic gate ({e}).")
