@@ -214,8 +214,8 @@ def tbd_register(rows: list[MatrixRow], session: DispositionSession) -> list[dic
         reasons = []
         if u.applicability == "tbd":
             reasons.append(f"applicability:{u.applicability_tbd_reason}")
-        if u.implementation_state == "tbd":
-            reasons.append(f"implementation:{u.implementation_tbd_reason}")
+        if u.execution_state == "tbd":
+            reasons.append(f"execution:{u.implementation_tbd_reason}")
         if u.approval_state == "tbd":
             reasons.append(f"approval:{u.approval_tbd_reason}")
         out.append({"unit_id": r.unit_id, "reasons": "; ".join(reasons)})
@@ -240,6 +240,7 @@ def export_csv(
     known_artifact_ids: Optional[set[Any]] = None,
     enforce_decision: bool = True,
     phantom_ref_note: Optional[str] = None,
+    include_draft: bool = False,
 ) -> Path:
     rows = build_matrix_rows(
         session,
@@ -262,6 +263,9 @@ def export_csv(
     buf.write(f"# counts={counts}\n")
     if phantom_ref_note:
         buf.write(f"# {phantom_ref_note}\n")
+    draft_note = _release_note(session, include_draft=include_draft)
+    if draft_note:
+        buf.write(f"# {draft_note}\n")
 
     writer = csv.writer(buf)
     writer.writerow(
@@ -320,6 +324,7 @@ def export_docx(
     known_artifact_ids: Optional[set[Any]] = None,
     enforce_decision: bool = True,
     phantom_ref_note: Optional[str] = None,
+    include_draft: bool = False,
 ) -> Path:
     try:
         from docx import Document
@@ -352,6 +357,9 @@ def export_docx(
     ))
     if phantom_ref_note:
         doc.add_paragraph(phantom_ref_note)
+    draft_note = _release_note(session, include_draft=include_draft)
+    if draft_note:
+        doc.add_paragraph(draft_note)
 
     table = doc.add_table(rows=1, cols=6)
     hdr = table.rows[0].cells
@@ -447,6 +455,7 @@ def export_xlsx(
     enforce_decision: bool = True,
     evidence_rows: Optional[list[list[str]]] = None,
     phantom_ref_note: Optional[str] = None,
+    include_draft: bool = False,
 ) -> Path:
     """
     Phase 2: supplier matrix as XLSX using stdlib zipfile (no new dependency).
@@ -504,6 +513,9 @@ def export_xlsx(
     ]
     if phantom_ref_note:
         meta_data.append(["phantom_ref_check", phantom_ref_note])
+    draft_note = _release_note(session, include_draft=include_draft)
+    if draft_note:
+        meta_data.append(["release_state", draft_note])
 
     content_types = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -564,6 +576,38 @@ def export_xlsx(
     return path
 
 
+def _release_note(
+    session: DispositionSession,
+    *,
+    include_draft: bool,
+    unit_pred: Optional[Any] = None,
+) -> Optional[str]:
+    """M4 (Fran P1): external products require review-accepted rows.
+
+    Strict (default) refuses naming the unaccepted units; include_draft
+    trades refusal for an explicit DRAFT watermark on every product.
+    unit_pred scopes the gate to the rows the product actually exports
+    (Atlas M4-4: Appendix A must not refuse over excluded EFCR rows)."""
+    assert session.state is not None
+    unaccepted = [
+        uid
+        for uid, u in sorted(session.state.units.items())
+        if (unit_pred is None or unit_pred(uid)) and u.review_state != "accepted"
+    ]
+    if not unaccepted:
+        return None
+    if not include_draft:
+        raise ExportError(
+            f"Refuse export: {len(unaccepted)} unit(s) not review-accepted "
+            f"(first: {', '.join(unaccepted[:5])}). Use include_draft "
+            "(--include-draft) for a DRAFT-watermarked working copy."
+        )
+    return (
+        f"DRAFT — NOT RELEASABLE: {len(unaccepted)} unit(s) not "
+        "review-accepted"
+    )
+
+
 def export_all(
     session: DispositionSession,
     records: dict[str, RequirementRecord],
@@ -571,6 +615,7 @@ def export_all(
     *,
     known_artifact_ids: Optional[set[Any]] = None,
     enforce_decision: bool = True,
+    include_draft: bool = False,
 ) -> dict[str, Path]:
     """
     Write CSV + DOCX + XLSX suite under out_dir.
@@ -582,6 +627,7 @@ def export_all(
     """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    _release_note(session, include_draft=include_draft)  # fail fast
     phantom_note: Optional[str] = None
     if known_artifact_ids is None:
         store = session.evidence_store()
@@ -598,6 +644,7 @@ def export_all(
             known_artifact_ids=known_artifact_ids,
             enforce_decision=enforce_decision,
             phantom_ref_note=phantom_note,
+            include_draft=include_draft,
         ),
         "docx": export_docx(
             session,
@@ -606,6 +653,7 @@ def export_all(
             known_artifact_ids=known_artifact_ids,
             enforce_decision=enforce_decision,
             phantom_ref_note=phantom_note,
+            include_draft=include_draft,
         ),
         "xlsx": export_xlsx(
             session,
@@ -614,6 +662,7 @@ def export_all(
             known_artifact_ids=known_artifact_ids,
             enforce_decision=enforce_decision,
             phantom_ref_note=phantom_note,
+            include_draft=include_draft,
         ),
     }
     return paths
@@ -625,6 +674,7 @@ def export_appendix_a(
     path: Path | str,
     *,
     enforce_decision: bool = True,
+    include_draft: bool = False,
 ) -> Path:
     """
     Stage E external product: Appendix-A-format compliance matrix.
@@ -634,6 +684,10 @@ def export_appendix_a(
     """
     if session.state is None:
         raise ExportError("Session not open")
+    draft_note = _release_note(
+        session, include_draft=include_draft,
+        unit_pred=lambda uid: uid.upper().startswith("AMR-"),
+    )
     # Reuse matrix rows for refusal discipline, then reshape
     rows = build_matrix_rows(
         session, records, enforce_decision=enforce_decision
@@ -647,6 +701,8 @@ def export_appendix_a(
     st = session.state
     buf = io.StringIO()
     buf.write(f"# {ADVISORY_BANNER}\n")
+    if draft_note:
+        buf.write(f"# {draft_note}\n")
     buf.write(
         f"# Appendix A format | session_id={st.session_id} "
         f"pack_hash={st.pack_hash} rdw={SPEC_VERSIONS['rdw_spec']}\n"
@@ -772,10 +828,15 @@ def export_appendix_a_xlsx(
     path: Path | str,
     *,
     enforce_decision: bool = True,
+    include_draft: bool = False,
 ) -> Path:
     """FR6: the real Appendix-A worksheet — full verbatim text, standard order."""
     if session.state is None:
         raise ExportError("Session not open")
+    draft_note = _release_note(
+        session, include_draft=include_draft,
+        unit_pred=lambda uid: uid.upper().startswith("AMR-"),
+    )
     rows = build_matrix_rows(session, records, enforce_decision=enforce_decision)
     # AR12: AMR-only — same filter as the CSV form.
     rows = [r for r in rows if r.unit_id.upper().startswith("AMR-")]
@@ -800,6 +861,8 @@ def export_appendix_a_xlsx(
         ["rdw_spec", SPEC_VERSIONS["rdw_spec"]],
         ["counts", str(counts)],
     ]
+    if draft_note:
+        meta.insert(1, ["release_state", draft_note])
     out = _write_xlsx_book(
         Path(path),
         [
@@ -1003,19 +1066,25 @@ def export_dual_products(
     out_dir: Path | str,
     *,
     enforce_decision: bool = True,
+    include_draft: bool = False,
 ) -> dict[str, Path]:
-    """Stage E: supplier suite + Appendix-A (XLSX + CSV) + roadmap + guide."""
+    """Stage E: supplier suite + Appendix-A (XLSX + CSV) + roadmap + guide.
+
+    M4: the EXTERNAL products (supplier matrix, Appendix A) gate on
+    review-accepted rows; internal products (roadmap, guide) are exempt.
+    """
     out = Path(out_dir)
     paths = export_all(
-        session, records, out, enforce_decision=enforce_decision
+        session, records, out, enforce_decision=enforce_decision,
+        include_draft=include_draft,
     )
     paths["appendix_a"] = export_appendix_a_xlsx(
         session, records, out / "appendix_a_matrix.xlsx",
-        enforce_decision=enforce_decision,
+        enforce_decision=enforce_decision, include_draft=include_draft,
     )
     paths["appendix_a_csv"] = export_appendix_a(
         session, records, out / "appendix_a_matrix.csv",
-        enforce_decision=enforce_decision,
+        enforce_decision=enforce_decision, include_draft=include_draft,
     )
     paths["roadmap"] = export_readiness_roadmap(
         session, records, out / "readiness_roadmap.md"

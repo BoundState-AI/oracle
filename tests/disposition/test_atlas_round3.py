@@ -138,6 +138,8 @@ def test_ar2_nyd_cleared_when_implementation_becomes_concrete(tmp_path):
     """Atlas critical 2: sticky not_yet_due must not survive a later Meet."""
     s = DispositionSession(tmp_path / "a2")
     s.open(actor_name="op")
+    s.register_evidence(doc_id="QMS-1", revision="A",
+                        unit_ids=("AMR-50",), effective_date="2026-01-01")
     s.set_axes(
         "AMR-50",
         actor_name="op",
@@ -331,6 +333,8 @@ def test_ar6_blocklist_covers_action_free_text(tmp_path):
 def _accepted_meet_session(tmp_path, name):
     s = DispositionSession(tmp_path / name)
     s.open(actor_name="op")
+    s.register_evidence(doc_id="QMS", revision="A",
+                        unit_ids=("AMR-1",), effective_date="2026-01-01")
     s.attach_evidence("AMR-1", EvidenceRef(doc_id="QMS", revision="A"), "op")
     s.set_axes(
         "AMR-1",
@@ -518,7 +522,8 @@ def test_ar12_appendix_a_is_amr_only(tmp_path):
     recs = _records()
     assert any(uid.startswith("EFCR-") for uid in s.state.units)  # precondition
     csv_path = export_appendix_a(
-        s, recs, tmp_path / "out" / "appendix.csv", enforce_decision=False
+        s, recs, tmp_path / "out" / "appendix.csv", enforce_decision=False,
+        include_draft=True,
     )
     body = [
         row for row in _csv.reader(
@@ -529,7 +534,8 @@ def test_ar12_appendix_a_is_amr_only(tmp_path):
     ids = [r[2] for r in body[1:] if len(r) > 2]
     assert ids and all(u.startswith("AMR-") for u in ids)
     xlsx_path = export_appendix_a_xlsx(
-        s, recs, tmp_path / "out" / "appendix.xlsx", enforce_decision=False
+        s, recs, tmp_path / "out" / "appendix.xlsx", enforce_decision=False,
+        include_draft=True,
     )
     with zipfile.ZipFile(xlsx_path) as zf:
         sheet = zf.read("xl/worksheets/sheet1.xml").decode("utf-8")

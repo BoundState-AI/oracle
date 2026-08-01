@@ -475,13 +475,15 @@ def _gather_ex_closure(
 def _gather_meet_evidence(
     session: DispositionSession, io: IOBundle, uid: str, actor: str
 ) -> bool:
-    """FR3: Meet requires cited evidence; register when a registry exists.
-    quit/EOF cancels like 'cancel' (AR3) — never stored as a doc id."""
+    """M3: cited evidence REGISTERS at the claim (registry created on
+    demand) and qualifies only when the registry gate passes — a typed
+    citation alone never does. quit/EOF cancels (AR3)."""
     from oracle.disposition.session import EvidenceRef
 
     doc = _sub_ask(
         session, io, uid, "evidence.doc_id",
-        "Meet requires cited evidence — document id [or 'cancel']: ", actor,
+        "An evidence claim requires a citation — document id [or 'cancel']: ",
+        actor,
     )
     if doc is None or not doc or doc.lower() in ("cancel", "skip"):
         return False
@@ -489,23 +491,28 @@ def _gather_meet_evidence(
     if rev is None:
         return False
     rev = rev or "-"
+    date = _sub_ask(
+        session, io, uid, "evidence.date",
+        "Approval/effective date [YYYY-MM-DD, required to qualify]: ", actor,
+    )
+    if date is None:
+        return False
     session.attach_evidence(uid, EvidenceRef(doc_id=doc, revision=rev), actor)
-    store = session.evidence_store()
-    if store is not None:
-        date = _sub_ask(
-            session, io, uid, "evidence.date",
-            "Approval/effective date [YYYY-MM-DD]: ", actor,
+    session.register_evidence(
+        evidence_id=f"EV-{uid}-{doc}",
+        doc_id=doc,
+        revision=rev,
+        unit_ids=(uid,),
+        effective_date=date or None,
+        approval_date=date or None,
+    )
+    ok = session.has_qualifying_meet_evidence(session.state.units[uid])
+    if not ok:
+        io.write(
+            "Citation registered but does not QUALIFY (missing/expired "
+            "approval date) — the claim stays unverified."
         )
-        date = date or None
-        store.register(
-            evidence_id=f"EV-{uid}-{doc}",
-            doc_id=doc,
-            revision=rev,
-            unit_ids=(uid,),
-            effective_date=date,
-            approval_date=date,
-        )
-    return True
+    return ok
 
 
 def _apply_answer(
@@ -1077,6 +1084,11 @@ def _advisor_proposal_step(
         rec,
         session.state.facts,
         has_evidence=session.has_qualifying_meet_evidence(unit),
+        raw_answers=_unit_answers(session, rec.requirement_id),
+        existing_actions=tuple(
+            a.model_dump(mode="json")
+            for a in session.actions_for_unit(rec.requirement_id)
+        ),
     )
     prop = advisor.propose(ctx)  # type: ignore[attr-defined]
     session.record_advisor_output(
@@ -1124,32 +1136,66 @@ def _advisor_proposal_step(
             applicability_tbd_reason=TBDReason.CUSTOMER_INPUT_MISSING,
         )
         io.write("Skipped proposal → TBD(customer_input_missing).")
-    # suggest_closure for Not-Met paths
-    unit2 = session.state.units[rec.requirement_id]
-    if unit2.implementation_state in ("not_met", "partial", "tbd"):
-        clos = advisor.suggest_closure(ctx)  # type: ignore[attr-defined]
-        session.record_advisor_output(
-            "suggest_closure",
-            clos.model_dump(mode="json"),
-            actor_name=actor_name,
-            unit_id=rec.requirement_id,
+
+def _unit_answers(
+    session: DispositionSession, uid: str
+) -> tuple[dict, ...]:
+    assert session.state is not None
+    return tuple(
+        a for a in session.state.raw_answers if a.get("unit_id") == uid
+    )
+
+
+def _advisor_closure_step(
+    session: DispositionSession,
+    rec: RequirementRecord,
+    io: IOBundle,
+    advisor: object,
+    actor_name: str,
+) -> None:
+    """M5 (Fran P1): closure runs AFTER the operator's elections, with the
+    context the interview actually produced — answers, evidence, actions —
+    never a stale pre-election snapshot."""
+    from oracle.disposition.advisor import build_context
+
+    assert session.state is not None
+    unit = session.state.units[rec.requirement_id]
+    if unit.execution_state not in ("not_started", "partial", "tbd"):
+        return
+    ctx = build_context(
+        unit,
+        rec,
+        session.state.facts,
+        has_evidence=session.has_qualifying_meet_evidence(unit),
+        raw_answers=_unit_answers(session, rec.requirement_id),
+        existing_actions=tuple(
+            a.model_dump(mode="json")
+            for a in session.actions_for_unit(rec.requirement_id)
+        ),
+    )
+    clos = advisor.suggest_closure(ctx)  # type: ignore[attr-defined]
+    session.record_advisor_output(
+        "suggest_closure",
+        clos.model_dump(mode="json"),
+        actor_name=actor_name,
+        unit_id=rec.requirement_id,
+    )
+    io.write("Closure suggestions (*proposed* — not committed):")
+    for a in clos.actions:
+        io.write(
+            f"  {a.action_id}: {a.title} owner={a.owner} "
+            f"exit={a.exit_criteria}"
         )
-        io.write("Closure suggestions (*proposed* — not committed):")
-        for a in clos.actions:
-            io.write(
-                f"  {a.action_id}: {a.title} owner={a.owner} "
-                f"exit={a.exit_criteria}"
-            )
-            conf = _sub_ask(
-                session, io, rec.requirement_id,
-                f"advisor.action.{a.action_id}",
-                f"Record action {a.action_id}? [y/n]: ", actor_name,
-            )
-            if conf is None:
-                break
-            if conf.lower() in ("y", "yes"):
-                session.record_action(a, actor_name=actor_name)
-                io.write(f"  recorded {a.action_id}")
+        conf = _sub_ask(
+            session, io, rec.requirement_id,
+            f"advisor.action.{a.action_id}",
+            f"Record action {a.action_id}? [y/n]: ", actor_name,
+        )
+        if conf is None:
+            break
+        if conf.lower() in ("y", "yes"):
+            session.record_action(a, actor_name=actor_name)
+            io.write(f"  recorded {a.action_id}")
 
 
 def _offer_library_suggestion(
@@ -1293,6 +1339,13 @@ def run_walk(
         while True:
             qkey, prompt = _highest_value_question(rec, session)
             if qkey == "done":
+                # M5: closure suggestions run AFTER elections, before the
+                # comment — the advisor sees what the interview produced.
+                if adv is not None:
+                    try:
+                        _advisor_closure_step(session, rec, io, adv, actor_name)
+                    except Exception as e:
+                        io.write(f"Advisor closure step skipped: {e}")
                 # F5: comment accept/edit lives inside retry handling — §13.2
                 # refusal re-prompts; unit stays open; walk continues.
                 assert session.state is not None
@@ -1392,17 +1445,24 @@ def run_walk(
     _progress_screen(session, io)
 
     if export_dir:
-        # F2 + Stage E: dual products when available
+        # F2 + Stage E: dual products when available. M4: the walk's export
+        # is the operator's WORKING COPY — always DRAFT-watermarked; the
+        # releasable path is `oracle disposition export` without
+        # --include-draft, which refuses unaccepted rows.
         try:
             from oracle.disposition.export import export_dual_products
 
-            paths = export_dual_products(session, records, export_dir)
+            paths = export_dual_products(
+                session, records, export_dir, include_draft=True
+            )
         except ExportError as e:
             io.write(f"Export refused: {e}")
             return session
         except Exception:
             try:
-                paths = export_all(session, records, export_dir)
+                paths = export_all(
+                    session, records, export_dir, include_draft=True
+                )
             except ExportError as e:
                 io.write(f"Export refused: {e}")
                 return session

@@ -77,10 +77,34 @@ test_model_split.py`; updated walk scripts in `test_fix3.py` /
    block any election, never put units at advisor LOW, DO reopen
    accepted units on CEO change, and that cycle detection ignores them.
 
-Out of scope (spec round 2): registry-required evidence strictness (M3),
-release gating on accepted review state (M4), advisor-after-elections
-context enrichment + PROMPT_VERSION hash (M5); corpus-replay golden and
-WorkPackageRecord (next slice).
+## Round 2 addendum (M3-M5, same uncommitted tree)
+
+Built after your round-1 verdict; review together with the MS1-MS3
+fixes. Suites now **653 passed / 5 skipped** (18 model-split tests).
+
+- **M3:** `has_qualifying_meet_evidence` without a registry returns
+  False (fail closed) — no more warn-and-pass; the walk gathers
+  doc/rev/date at the claim and registers via new
+  `session.register_evidence` (registry auto-created); non-qualifying
+  registrations downgrade the claim. Scrutinize: any remaining path
+  where an unregistered or undated citation still qualifies; the
+  register-then-recheck flow in `_gather_meet_evidence`.
+- **M4:** external products refuse rows not review-accepted
+  (`_release_note` in export.py); `include_draft` / `--include-draft`
+  watermarks instead ("DRAFT — NOT RELEASABLE" in CSV banners, DOCX
+  paragraph, XLSX Meta); walk export + golden replay are always draft;
+  roadmap/guide exempt. Scrutinize: any external writer missing the
+  watermark; whether a fully-accepted session exports clean (no note);
+  bypass via direct writer calls.
+- **M5:** closure suggestions run AFTER elections
+  (`_advisor_closure_step` in the done branch, event-order pinned) with
+  fresh context carrying raw answers, evidence refs, existing actions,
+  split axes; system prompts extracted to constants; PROMPT_VERSION is
+  a content hash. Scrutinize: closure context staleness on retry paths;
+  quit/EOF inside the closure confirms; hash round-trips on the enriched
+  context (context_hash covers the new fields).
+
+Out of scope: corpus-replay golden and WorkPackageRecord (next slice).
 
 Run the full suite independently and report your numbers. Verdicts,
 new findings ranked with file:line + reproduction, suite result.

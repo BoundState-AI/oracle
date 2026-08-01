@@ -160,7 +160,7 @@ def test_f2_export_all_stamps_skip_without_registry(tmp_path):
     # Clear rereview left by Class A so export can proceed
     for uid in list(s.units_needing_rereview()):
         s.clear_rereview(uid, actor_name="op")
-    paths = export_all(s, _records(), tmp_path / "out")
+    paths = export_all(s, _records(), tmp_path / "out", include_draft=True)
     csv_text = paths["csv"].read_text(encoding="utf-8")
     assert PHANTOM_REF_SKIPPED in csv_text
 

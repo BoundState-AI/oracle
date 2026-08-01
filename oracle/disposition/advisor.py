@@ -35,7 +35,39 @@ from oracle.disposition.session import Fact, UnitAxesState
 
 LOGGER = logging.getLogger("oracle.disposition.advisor")
 
-PROMPT_VERSION = "rdw-advisor/v1"
+# Live-advisor system prompts, module-level so provenance can hash them.
+SYSTEM_EXPLAIN = (
+    "You are an RDW disposition advisor. Explain what the requirement asks "
+    "using ONLY the supplied evidence bundle. Label is interpretation only. "
+    "Never claim compliance. Advisory only (D-1)."
+)
+SYSTEM_PROPOSE = (
+    "You are an RDW disposition advisor. Using ONLY the supplied "
+    "evidence bundle, return ONE JSON object with keys: band "
+    "(HIGH|MEDIUM|LOW), basis (string), proposed_axes (object with "
+    "keys among applicability/obligated_actor/"
+    "organization_responsibility/implementation_state/"
+    "approval_state, or null), proposed_label (string or null), "
+    "questions (array of strings). LOW means propose NOTHING "
+    "(axes and label null). Never propose a label listed in "
+    "blocked_labels. Advisory only (D-1); no compliance claims."
+)
+SYSTEM_CLOSURE = (
+    "You are an RDW closure planner. Using ONLY the supplied "
+    "evidence bundle, return ONE JSON object with keys: actions "
+    "(array of objects with action_id, title, owner, deliverable, "
+    "exit_criteria, priority in critical|high|medium|low, "
+    "due_or_trigger, work_package, affected_unit_ids array), "
+    "evidence_requests (array of strings), basis (string). Bound "
+    "every claim by the supplied facts; state unresolved "
+    "dependencies; never claim compliance. Advisory only (D-1)."
+)
+
+# M5 (Fran P2): prompt provenance is a CONTENT hash — editing any prompt
+# changes the recorded version; a stale tag can never mask a changed prompt.
+PROMPT_VERSION = "rdw-advisor/sha256:" + hashlib.sha256(
+    "\n---\n".join((SYSTEM_EXPLAIN, SYSTEM_PROPOSE, SYSTEM_CLOSURE)).encode()
+).hexdigest()[:12]
 
 
 class AdvisorContext(BaseModel):
@@ -56,6 +88,12 @@ class AdvisorContext(BaseModel):
     # FR2/AF3: fact keys the dependency graph links to THIS unit — LOW is
     # decided from these, never from a global fact scan.
     relevant_fact_keys: tuple[str, ...] = ()
+    # M5 (Fran P1): the advisor sees what the operator actually said and
+    # holds — raw answers, cited evidence, existing actions — so closure
+    # guidance is specific instead of generic.
+    raw_answers: tuple[dict[str, Any], ...] = ()
+    evidence_refs: tuple[dict[str, Any], ...] = ()
+    existing_actions: tuple[dict[str, Any], ...] = ()
 
 
 class ExplainResult(BaseModel):
@@ -167,6 +205,8 @@ def build_context(
     *,
     graph: Optional[DependencyGraph] = None,
     has_evidence: bool = False,
+    raw_answers: tuple[dict[str, Any], ...] = (),
+    existing_actions: tuple[dict[str, Any], ...] = (),
 ) -> AdvisorContext:
     graph = graph or DependencyGraph.from_seeds()
     decision = evaluate_unit(
@@ -203,6 +243,8 @@ def build_context(
             "applicability": unit.applicability,
             "obligated_actor": unit.obligated_actor,
             "organization_responsibility": unit.organization_responsibility,
+            "fulfillment_path": unit.fulfillment_path,
+            "execution_state": unit.execution_state,
             "implementation_state": unit.implementation_state,
             "approval_state": unit.approval_state,
         },
@@ -210,6 +252,9 @@ def build_context(
         current_label=decision.current_label,
         why_not_meet=decision.blockers_meet,
         relevant_fact_keys=relevant,
+        raw_answers=raw_answers,
+        evidence_refs=tuple(r.model_dump(mode="json") for r in unit.evidence_refs),
+        existing_actions=existing_actions,
     )
 
 
@@ -530,13 +575,8 @@ class LiveAdvisor(AdvisorService):
 
     def explain(self, ctx: AdvisorContext) -> ExplainResult:
         ch = context_hash(ctx)
-        system = (
-            "You are an RDW disposition advisor. Explain what the requirement asks "
-            "using ONLY the supplied evidence bundle. Label is interpretation only. "
-            "Never claim compliance. Advisory only (D-1)."
-        )
         user = json.dumps(ctx.model_dump(), indent=2)
-        text = scrub_advisor_text(self._complete(system, user), ctx.facts)
+        text = scrub_advisor_text(self._complete(SYSTEM_EXPLAIN, user), ctx.facts)
         res = ExplainResult(
             unit_id=ctx.unit_id,
             interpretation=text,
@@ -569,19 +609,8 @@ class LiveAdvisor(AdvisorService):
     def propose(self, ctx: AdvisorContext) -> ProposeResult:
         ch = context_hash(ctx)
         try:
-            system = (
-                "You are an RDW disposition advisor. Using ONLY the supplied "
-                "evidence bundle, return ONE JSON object with keys: band "
-                "(HIGH|MEDIUM|LOW), basis (string), proposed_axes (object with "
-                "keys among applicability/obligated_actor/"
-                "organization_responsibility/implementation_state/"
-                "approval_state, or null), proposed_label (string or null), "
-                "questions (array of strings). LOW means propose NOTHING "
-                "(axes and label null). Never propose a label listed in "
-                "blocked_labels. Advisory only (D-1); no compliance claims."
-            )
             data = self._json_block(
-                self._complete(system, json.dumps(ctx.model_dump(), indent=2))
+                self._complete(SYSTEM_PROPOSE, json.dumps(ctx.model_dump(), indent=2))
             )
             band = ProposalBand(str(data.get("band", "MEDIUM")).upper())
             axes = data.get("proposed_axes")
@@ -620,18 +649,8 @@ class LiveAdvisor(AdvisorService):
     def suggest_closure(self, ctx: AdvisorContext) -> ClosureSuggestion:
         ch = context_hash(ctx)
         try:
-            system = (
-                "You are an RDW closure planner. Using ONLY the supplied "
-                "evidence bundle, return ONE JSON object with keys: actions "
-                "(array of objects with action_id, title, owner, deliverable, "
-                "exit_criteria, priority in critical|high|medium|low, "
-                "due_or_trigger, work_package, affected_unit_ids array), "
-                "evidence_requests (array of strings), basis (string). Bound "
-                "every claim by the supplied facts; state unresolved "
-                "dependencies; never claim compliance. Advisory only (D-1)."
-            )
             data = self._json_block(
-                self._complete(system, json.dumps(ctx.model_dump(), indent=2))
+                self._complete(SYSTEM_CLOSURE, json.dumps(ctx.model_dump(), indent=2))
             )
             actions = tuple(
                 ActionRecord.model_validate(

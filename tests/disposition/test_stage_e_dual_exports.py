@@ -34,7 +34,7 @@ def test_appendix_a_and_roadmap_for_golden(tmp_path):
     )
     recs, _ = load_rdw_default_packs(repin=True)
     records = {r.requirement_id: r for r in recs}
-    app = export_appendix_a(s, records, tmp_path / "app_a.csv")
+    app = export_appendix_a(s, records, tmp_path / "app_a.csv", include_draft=True)
     text = app.read_text(encoding="utf-8")
     assert ADVISORY_BANNER in text
     assert "Section" in text
@@ -43,7 +43,7 @@ def test_appendix_a_and_roadmap_for_golden(tmp_path):
     rtext = road.read_text(encoding="utf-8")
     assert "readiness_counts=" in rtext
     assert "EFCP-01" in rtext or "AMR-14" in rtext
-    paths = export_dual_products(s, records, tmp_path / "dual")
+    paths = export_dual_products(s, records, tmp_path / "dual", include_draft=True)
     assert paths["appendix_a"].is_file()
     assert paths["roadmap"].is_file()
     assert paths["csv"].is_file()

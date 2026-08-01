@@ -107,6 +107,18 @@ def evidence_supports_meet(
         reasons.append("missing doc_id or revision")
     if not art.effective_date and not art.approval_date:
         reasons.append("missing effective/approval date")
+    else:
+        # Atlas M3-3: effective/approval dates parse fail-closed, exactly
+        # like expiration — "not-a-date" must never qualify a Meet claim.
+        for label, val in (
+            ("effective_date", art.effective_date),
+            ("approval_date", art.approval_date),
+        ):
+            if val:
+                try:
+                    date.fromisoformat(val[:10])
+                except ValueError:
+                    reasons.append(f"unparseable {label} {val!r}")
     return EvidenceGateResult(ok=len(reasons) == 0, reasons=tuple(reasons))
 
 

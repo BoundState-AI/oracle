@@ -67,7 +67,7 @@ def test_counts_computed_from_matrix_and_banner(tmp_path):
     assert counts.get("Open/Not Met", 0) >= 1
     assert counts.get("TBD", 0) >= 1
 
-    path = export_csv(s, records, tmp_path / "m.csv")
+    path = export_csv(s, records, tmp_path / "m.csv", include_draft=True)
     text = path.read_text(encoding="utf-8")
     assert ADVISORY_BANNER in text
     assert "session_id=" in text
@@ -96,10 +96,10 @@ def test_docx_export_and_golden_snapshot(tmp_path):
     )
     known = {("EFCP-gap", "n/a")}
     csv_path = export_csv(
-        s, records, tmp_path / "golden.csv", known_artifact_ids=known
+        s, records, tmp_path / "golden.csv", known_artifact_ids=known, include_draft=True
     )
     docx_path = export_docx(
-        s, records, tmp_path / "golden.docx", known_artifact_ids=known
+        s, records, tmp_path / "golden.docx", known_artifact_ids=known, include_draft=True
     )
     assert csv_path.is_file()
     assert docx_path.is_file()

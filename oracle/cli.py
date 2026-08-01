@@ -3589,8 +3589,14 @@ def _cmd_disposition_export(args: argparse.Namespace) -> None:
     # default set here exported curated text under a builtin pin.
     records = {r.requirement_id: r for r in s.loaded_records}
     # F2: known set is (doc_id, revision) from registry; export_all loads it
-    # when omitted — never synthesize from the refs under validation
-    paths = export_all(s, records, args.export_dir)
+    # when omitted — never synthesize from the refs under validation.
+    # M4: strict by default — refuses unaccepted rows unless --include-draft.
+    paths = export_all(
+        s,
+        records,
+        args.export_dir,
+        include_draft=bool(getattr(args, "include_draft", False)),
+    )
     s.record_export({**stamp_meta(s), "paths": {k: str(v) for k, v in paths.items()}}, args.actor)
     print(json.dumps({k: str(v) for k, v in paths.items()}, indent=2))
 
@@ -3927,6 +3933,12 @@ Examples:
         "--allow-builtin",
         action="store_true",
         help="Explicitly allow the KNOWN-CORRUPT builtin 6030 pack (AR4)",
+    )
+    p_export.add_argument(
+        "--include-draft",
+        action="store_true",
+        help="Export rows not yet review-accepted, watermarked "
+        "DRAFT — NOT RELEASABLE (default refuses them; M4)",
     )
     p_export.set_defaults(func=_cmd_disposition_export)
 

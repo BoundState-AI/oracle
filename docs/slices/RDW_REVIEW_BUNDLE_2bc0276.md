@@ -783,3 +783,60 @@ bypasses, reopen edges behave. Findings (independent suite 644/7):
 3 regressions in test_model_split.py (now 14). Suites: **649 passed /
 5 skipped**. Smoke re-verified. Awaiting Atlas re-verdict on the three
 findings. Advisory-only per D-1.
+
+---
+
+## Model-split ROUND 2 built by Beth (M3-M5) — uncommitted, AWAITING ATLAS
+
+- **M3 evidence strictness (Fran P1):** has_qualifying_meet_evidence
+  without a registry now returns False (fail closed, warn once) — a typed
+  citation is a claim, never qualifying evidence. The walk gathers
+  doc/rev/DATE at the claim and registers via the new
+  session.register_evidence (registry auto-created); an undated or
+  non-qualifying registration downgrades the claim honestly.
+- **M4 release gating (Fran P1):** external products (supplier matrix
+  trio, Appendix A CSV+XLSX) REFUSE rows not review-accepted, naming
+  them; include_draft (--include-draft on the CLI) trades refusal for a
+  "DRAFT — NOT RELEASABLE" watermark in every banner/meta. The walk's
+  end-of-run export and the golden replay are always DRAFT (working
+  copies); internal products (roadmap, guide) exempt.
+- **M5 advisor ordering + provenance (Fran P1/P2):** closure suggestions
+  run AFTER the operator's elections (event-log-order pinned), built
+  from a FRESH context that now carries the unit's raw answers, cited
+  evidence refs, existing actions, and both split axes. PROMPT_VERSION
+  is a content hash of the extracted system prompts — editing a prompt
+  changes the recorded version.
+
+4 new tests (test_model_split.py now 18); 8 existing tests updated for
+the stricter gates (register_evidence + include_draft). Suites:
+**653 passed / 5 skipped**. Smoke re-verified end-to-end.
+Advisory-only per D-1.
+
+---
+
+## Atlas round 2 on the model split (2026-07-31) — MS1-MS3+M5 PASS; M3/M4 boundary defects, ALL FIXED
+
+Atlas confirmed MS1-MS3 held and M5 passed outright (fresh post-election
+context, hash round-trips, prompt-content provenance, EOF-safe action
+confirms). Four new findings (independent 651/7):
+
+- **MS4 (High)** Evidence qualification combined two unrelated
+  artifacts: a qualifying-but-uncited artifact linked to the unit plus a
+  cited artifact linked to ANOTHER unit passed. Fixed: the cited and
+  unit-linked predicates must be satisfied by the SAME artifact
+  (store.for_unit keyed by (doc_id, revision), last registration wins).
+- **MS5 (High)** Direct export_csv/docx/xlsx calls bypassed the release
+  gate entirely. Fixed: each writer invokes _release_note itself
+  (include_draft param; caller-supplied notes removed) — a direct call
+  now refuses or watermarks exactly like export_all, which keeps its own
+  fail-fast gate.
+- **MS6 (Medium)** effective/approval dates were presence-checked only —
+  "not-a-date" qualified. Fixed: ISO-parsed fail-closed like expiration.
+- **MS7 (Medium)** Appendix A refused over unaccepted EFCR rows it does
+  not export. Fixed: _release_note takes a unit predicate; the appendix
+  gates AMR-only while the full supplier suite still gates everything.
+  (Also: the TBD register now reads execution_state, not the legacy view.)
+
+4 regressions (test_model_split.py now 22); 3 older direct-writer tests
+updated to the stricter gate. Suites: **657 passed / 5 skipped**.
+Awaiting Atlas re-verdict on MS4-MS7. Advisory-only per D-1.

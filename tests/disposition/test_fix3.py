@@ -145,7 +145,8 @@ def test_fr3_meet_completes_with_evidence(tmp_path):
         tmp_path,
         [
             "y", "unknown", "yes", "producer", "owner", "as_written",
-            "evidenced", "QMS-001", "A", "not_required", "y", "quit",
+            "evidenced", "QMS-001", "A", "2026-01-01",
+            "not_required", "y", "quit",
         ],
         ["AMR-50"],
     )
@@ -329,6 +330,8 @@ def test_fr4_live_blocked_label_stripped(tmp_path):
 def test_fr5_blocklist_scans_comments(tmp_path):
     s = DispositionSession(tmp_path / "lib")
     s.open(actor_name="op")
+    s.register_evidence(doc_id="QMS", revision="A",
+                        unit_ids=("AMR-1",), effective_date="2026-01-01")
     s.attach_evidence("AMR-1", EvidenceRef(doc_id="QMS", revision="A"), "op")
     s.set_axes(
         "AMR-1",
@@ -350,6 +353,8 @@ def test_fr5_blocklist_scans_comments(tmp_path):
 def test_fr5_import_suggestions_and_paired_apply(tmp_path):
     s = DispositionSession(tmp_path / "src")
     s.open(actor_name="op")
+    s.register_evidence(doc_id="QMS", revision="A",
+                        unit_ids=("AMR-1",), effective_date="2026-01-01")
     s.attach_evidence("AMR-1", EvidenceRef(doc_id="QMS", revision="A"), "op")
     s.set_axes(
         "AMR-1",
@@ -392,7 +397,7 @@ def test_fr6_appendix_xlsx_full_text_and_guide(tmp_path):
     recs = _records()
     from oracle.disposition.export import export_dual_products
 
-    paths = export_dual_products(s, recs, tmp_path / "out")
+    paths = export_dual_products(s, recs, tmp_path / "out", include_draft=True)
     assert str(paths["appendix_a"]).endswith(".xlsx")
     with zipfile.ZipFile(paths["appendix_a"]) as zf:
         sheet = zf.read("xl/worksheets/sheet1.xml").decode("utf-8")

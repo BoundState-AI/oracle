@@ -149,7 +149,11 @@ def run_golden_session(
         records = {r.requirement_id: r for r in recs}
         export_paths = {
             k: str(v)
-            for k, v in export_all(session, records, export_dir).items()
+            # M4: the golden replay is a verification artifact, not a
+            # release — always the DRAFT-watermarked working copy.
+            for k, v in export_all(
+                session, records, export_dir, include_draft=True
+            ).items()
         }
         session.record_export({"paths": export_paths, **labels}, actor)
 

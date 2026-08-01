@@ -252,6 +252,8 @@ def test_pre_split_event_payload_replays(tmp_path):
 
 def test_legacy_session_resume_preserves_labels(tmp_path):
     s = _open(tmp_path)
+    s.register_evidence(doc_id="QMS", revision="A",
+                        unit_ids=("AMR-50",), effective_date="2026-01-01")
     s.attach_evidence("AMR-50", EvidenceRef(doc_id="QMS", revision="A"), "op")
     s.set_axes(
         "AMR-50",
@@ -415,6 +417,210 @@ def test_ms3_library_roundtrip_preserves_split_axes(tmp_path):
     payload = _split_axes_payload(axes)
     assert payload["execution_state"] == "not_started"
     assert "implementation_state" not in payload
+
+
+# ------------------------------------------- round 2: M3 / M4 / M5
+
+
+def test_m3_unregistered_citation_never_qualifies(tmp_path):
+    """M3 (Fran P1): a typed citation without a registry entry is a claim,
+    not qualifying evidence — fail closed, no warn-and-pass."""
+    s = _open(tmp_path)
+    s.attach_evidence("AMR-50", EvidenceRef(doc_id="QMS", revision="A"), "op")
+    assert not s.has_qualifying_meet_evidence(s.state.units["AMR-50"])
+    with pytest.raises(SessionError, match="qualifying evidence"):
+        s.set_axes(
+            "AMR-50",
+            actor_name="op",
+            applicability="yes",
+            obligated_actor="producer",
+            organization_responsibility="owner",
+            fulfillment_path="as_written",
+            execution_state="evidenced",
+            approval_state="not_required",
+        )
+    # dated registration is what qualifies
+    s.register_evidence(
+        doc_id="QMS", revision="A", unit_ids=("AMR-50",),
+        effective_date="2026-01-01",
+    )
+    u = s.set_axes(
+        "AMR-50",
+        actor_name="op",
+        applicability="yes",
+        obligated_actor="producer",
+        organization_responsibility="owner",
+        fulfillment_path="as_written",
+        execution_state="evidenced",
+        approval_state="not_required",
+    )
+    assert u.export_label().value == "Meet"
+    assert map_readiness(
+        u, (), has_qualifying_evidence=s.has_qualifying_meet_evidence(u)
+    ).label.value == "Met"
+
+
+def test_m4_external_exports_gate_on_accepted(tmp_path):
+    """M4 (Fran P1): releasable products refuse unaccepted rows; the
+    working copy is explicitly DRAFT-watermarked."""
+    from oracle.disposition.export import ExportError, export_all
+
+    s = _open(tmp_path)
+    recs = {r.requirement_id: r for r in s.loaded_records}
+    with pytest.raises(ExportError, match="not review-accepted"):
+        export_all(s, recs, tmp_path / "strict")
+    paths = export_all(s, recs, tmp_path / "draft", include_draft=True)
+    text = paths["csv"].read_text(encoding="utf-8")
+    assert "DRAFT — NOT RELEASABLE" in text
+
+
+def test_m5_prompt_version_is_content_hash():
+    """M5 (Fran P2): prompt provenance hashes the prompt CONTENT."""
+    import hashlib
+
+    from oracle.disposition.advisor import (
+        PROMPT_VERSION,
+        SYSTEM_CLOSURE,
+        SYSTEM_EXPLAIN,
+        SYSTEM_PROPOSE,
+    )
+
+    expected = "rdw-advisor/sha256:" + hashlib.sha256(
+        "\n---\n".join((SYSTEM_EXPLAIN, SYSTEM_PROPOSE, SYSTEM_CLOSURE)).encode()
+    ).hexdigest()[:12]
+    assert PROMPT_VERSION == expected
+    assert PROMPT_VERSION != "rdw-advisor/v1"
+
+
+def test_m5_closure_runs_after_elections(tmp_path):
+    """M5 (Fran P1): closure suggestions are generated AFTER the operator's
+    elections — never from a stale pre-election context."""
+    import io as _io
+
+    from oracle.disposition.walk import IOBundle, run_walk
+
+    bundle = IOBundle(
+        stdin=_io.StringIO("\n".join(
+            ["y", "unknown", "y", "y", "y", "quit"]
+        ) + "\n"),
+        stdout=_io.StringIO(),
+        require_tty=False,
+    )
+    run_walk(
+        session_dir=tmp_path / "s",
+        actor_name="op",
+        unit_filter=["AMR-14"],
+        io=bundle,
+        max_units=1,
+        advisor=True,
+    )
+    lines = (tmp_path / "s" / "events.jsonl").read_text(
+        encoding="utf-8"
+    ).splitlines()
+    events = [json.loads(ln)["payload"] for ln in lines]
+    closure_idx = [
+        i for i, p in enumerate(events)
+        if p.get("event_type") == "advisor_output"
+        and p.get("kind") == "suggest_closure"
+    ]
+    election_idx = [
+        i for i, p in enumerate(events)
+        if p.get("event_type") == "election"
+        and (p.get("unit") or {}).get("unit_id") == "AMR-14"
+    ]
+    assert closure_idx and election_idx
+    # every AXIS election happened before closure (the comment write —
+    # an axis_set — legitimately follows closure in the done branch)
+    assert all(i < min(closure_idx) for i in election_idx)
+
+
+# --------------------------------- Atlas model-split round 2 findings
+
+
+def test_ms4_evidence_same_artifact_must_be_cited_and_linked(tmp_path):
+    """Atlas r2 High 1: a qualifying-but-uncited artifact plus a
+    cited-but-other-unit artifact must never combine into a pass."""
+    s = _open(tmp_path)
+    # A: qualifying, linked to AMR-50, NOT cited
+    s.register_evidence(doc_id="DOC-A", revision="1", unit_ids=("AMR-50",),
+                        effective_date="2026-01-01")
+    # B: qualifying, linked ONLY to AMR-51, cited by AMR-50
+    s.register_evidence(doc_id="DOC-B", revision="1", unit_ids=("AMR-51",),
+                        effective_date="2026-01-01")
+    s.attach_evidence("AMR-50", EvidenceRef(doc_id="DOC-B", revision="1"), "op")
+    assert not s.has_qualifying_meet_evidence(s.state.units["AMR-50"])
+    # citing the SAME linked artifact is what qualifies
+    s.attach_evidence("AMR-50", EvidenceRef(doc_id="DOC-A", revision="1"), "op")
+    assert s.has_qualifying_meet_evidence(s.state.units["AMR-50"])
+
+
+def test_ms5_direct_writers_invoke_release_gate(tmp_path):
+    """Atlas r2 High 2: export_csv/docx/xlsx must gate themselves."""
+    import zipfile
+
+    from oracle.disposition.export import (
+        ExportError,
+        export_csv,
+        export_docx,
+        export_xlsx,
+    )
+
+    s = _open(tmp_path)
+    recs = {r.requirement_id: r for r in s.loaded_records}
+    for fn, name in (
+        (export_csv, "m.csv"), (export_docx, "m.docx"), (export_xlsx, "m.xlsx")
+    ):
+        with pytest.raises(ExportError, match="not review-accepted"):
+            fn(s, recs, tmp_path / name)
+    p = export_csv(s, recs, tmp_path / "d.csv", include_draft=True)
+    assert "DRAFT — NOT RELEASABLE" in p.read_text(encoding="utf-8")
+    px = export_xlsx(s, recs, tmp_path / "d.xlsx", include_draft=True)
+    with zipfile.ZipFile(px) as zf:
+        blob = b"".join(zf.read(n) for n in zf.namelist() if n.endswith(".xml"))
+    assert b"NOT RELEASABLE" in blob
+
+
+def test_ms6_malformed_dates_never_qualify(tmp_path):
+    """Atlas r2 Medium 3: effective/approval dates parse fail-closed."""
+    from oracle.disposition.evidence import EvidenceArtifact, evidence_supports_meet
+
+    s = _open(tmp_path)
+    s.register_evidence(doc_id="DOC", revision="1", unit_ids=("AMR-50",),
+                        effective_date="not-a-date")
+    s.attach_evidence("AMR-50", EvidenceRef(doc_id="DOC", revision="1"), "op")
+    assert not s.has_qualifying_meet_evidence(s.state.units["AMR-50"])
+    res = evidence_supports_meet(
+        EvidenceArtifact(
+            evidence_id="E", doc_id="D", revision="1",
+            effective_date="not-a-date",
+        )
+    )
+    assert not res.ok and any("unparseable effective_date" in r for r in res.reasons)
+
+
+def test_ms7_appendix_gate_scopes_to_exported_rows(tmp_path):
+    """Atlas r2 Medium 4: Appendix A (AMR-only) must not refuse over
+    excluded EFCR rows; the full supplier suite still does."""
+    from oracle.disposition.export import (
+        ExportError,
+        export_all,
+        export_appendix_a,
+    )
+
+    s = _open(tmp_path)
+    recs = {r.requirement_id: r for r in s.loaded_records}
+    for uid in s.state.units:
+        if uid.upper().startswith("AMR-"):
+            s.attest_unit(
+                uid, actor_name="op", role="disposition_author",
+                decision="accepted", accepted_with_tbd=True,
+            )
+    p = export_appendix_a(
+        s, recs, tmp_path / "a.csv", enforce_decision=False
+    )  # strict — EFCRs unaccepted but not exported here
+    assert "NOT RELEASABLE" not in p.read_text(encoding="utf-8")
+    with pytest.raises(ExportError, match="not review-accepted"):
+        export_all(s, recs, tmp_path / "suite")  # EFCRs ARE in this product
 
 
 # ----------------------------------------------------- M7 CEO reopening

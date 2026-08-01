@@ -57,13 +57,13 @@ def test_phase2_xlsx_and_export_all(tmp_path):
         s.clear_rereview(uid, actor_name="golden-operator")
     recs, _ = load_rdw_default_packs(repin=True)
     records = {r.requirement_id: r for r in recs}
-    xlsx = export_xlsx(s, records, tmp_path / "m.xlsx")
+    xlsx = export_xlsx(s, records, tmp_path / "m.xlsx", include_draft=True)
     assert xlsx.is_file()
     with zipfile.ZipFile(xlsx, "r") as zf:
         names = zf.namelist()
         assert "xl/worksheets/sheet1.xml" in names
         assert "xl/workbook.xml" in names
-    paths = export_all(s, records, tmp_path / "all")
+    paths = export_all(s, records, tmp_path / "all", include_draft=True)
     assert paths["csv"].is_file()
     assert paths["docx"].is_file()
     assert paths["xlsx"].is_file()

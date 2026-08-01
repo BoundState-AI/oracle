@@ -619,15 +619,39 @@ class DispositionSession:
             self._graph = DependencyGraph.from_seeds()
             return state
 
-    def evidence_store(self) -> Optional[Any]:
-        """Return EvidenceStore when <session>/evidence registry exists; else None."""
+    def evidence_store(self, *, create: bool = False) -> Optional[Any]:
+        """Return EvidenceStore when <session>/evidence registry exists; else None.
+
+        create=True initializes the registry (M3: citations register at the
+        moment of the claim instead of floating unverified)."""
         from oracle.disposition.evidence import EvidenceStore
 
         root = self.root / "evidence"
         registry = root / "registry.jsonl"
-        if root.is_dir() and registry.is_file():
+        if create or (root.is_dir() and registry.is_file()):
             return EvidenceStore(root)
         return None
+
+    def register_evidence(
+        self,
+        *,
+        doc_id: str,
+        revision: str,
+        unit_ids: tuple[str, ...] = (),
+        effective_date: Optional[str] = None,
+        approval_date: Optional[str] = None,
+        evidence_id: Optional[str] = None,
+    ) -> Any:
+        """M3 convenience: create the registry on demand and register."""
+        store = self.evidence_store(create=True)
+        return store.register(
+            evidence_id=evidence_id or f"EV-{doc_id}-{revision}",
+            doc_id=doc_id,
+            revision=revision,
+            unit_ids=tuple(unit_ids),
+            effective_date=effective_date,
+            approval_date=approval_date,
+        )
 
     def has_qualifying_meet_evidence(self, unit: UnitAxesState) -> bool:
         """
@@ -642,21 +666,25 @@ class DispositionSession:
 
         store = self.evidence_store()
         if store is None:
-            # Warn once per session root (avoid export-row spam)
+            # M3 (Fran P1): a typed citation without a registry entry is a
+            # CLAIM, not qualifying evidence — fail closed. Warn once.
             flag = "_warned_unverified_evidence"
-            if not getattr(self, flag, False):
+            if unit.evidence_refs and not getattr(self, flag, False):
                 LOGGER.warning(
-                    "Meet evidence refs are unverified "
-                    "(no evidence registry at %s/evidence)",
+                    "Evidence refs do NOT qualify: no evidence registry at "
+                    "%s/evidence (M3 fail-closed; use register_evidence)",
                     self.root,
                 )
                 setattr(self, flag, True)
-            return bool(unit.evidence_refs)
-        if not store.unit_has_qualifying_meet_evidence(unit.unit_id):
             return False
-        by_key = {(a.doc_id, a.revision): a for a in store.list_all()}
+        # Atlas M3-1: the CITED and UNIT-LINKED predicates must be satisfied
+        # by the SAME artifact — a qualifying-but-uncited artifact plus a
+        # cited-but-other-unit artifact must never combine into a pass.
+        linked = {
+            (a.doc_id, a.revision): a for a in store.for_unit(unit.unit_id)
+        }
         for ref in unit.evidence_refs:
-            art = by_key.get((ref.doc_id, ref.revision))
+            art = linked.get((ref.doc_id, ref.revision))
             if art is not None and evidence_supports_meet(art).ok:
                 return True
         return False
