@@ -305,6 +305,7 @@ class UnitAxesState(BaseModel):
             else None,
             fulfillment_path=self.fulfillment_path,
             execution_state=self.execution_state,
+            split_elected=self.split_elected,
         )
 
     def export_label(self) -> ExportLabel:
@@ -332,6 +333,8 @@ class SessionState(BaseModel):
     rereview_diffs: dict[str, dict[str, Any]] = Field(default_factory=dict)
     # Stage A
     actions: dict[str, Any] = Field(default_factory=dict)  # action_id -> ActionRecord
+    # CR1 — wp_id -> WorkPackageRecord
+    work_packages: dict[str, Any] = Field(default_factory=dict)
     raw_answers: list[dict[str, Any]] = Field(default_factory=list)
     advisor_outputs: list[dict[str, Any]] = Field(default_factory=list)
     # FR5 — library reuse: suggestions are never auto-applied
@@ -790,6 +793,18 @@ class DispositionSession:
                     state.actions[act.supersedes] = prior.model_copy(
                         update={"status": "superseded"}
                     )
+            elif et == "work_package_recorded":
+                from oracle.disposition.workpackage import WorkPackageRecord
+
+                wp = WorkPackageRecord.model_validate(p["work_package"])
+                # same order as live recording: supersession FIRST, then
+                # store — replay and resume must agree (Atlas CR Medium 5)
+                if wp.supersedes and wp.supersedes in state.work_packages:
+                    prior = state.work_packages[wp.supersedes]
+                    state.work_packages[wp.supersedes] = prior.model_copy(
+                        update={"status": "superseded"}
+                    )
+                state.work_packages[wp.wp_id] = wp
             elif et == "advisor_output":
                 state.advisor_outputs.append(
                     {k: v for k, v in p.items() if k not in ("event_type", "_schema")}
@@ -969,9 +984,18 @@ class DispositionSession:
         cur = self.state.units.get(unit_id)
         if cur is None:
             cur = UnitAxesState(unit_id=unit_id)
+        # Provenance is DERIVED, never caller-asserted (Atlas CR High 1):
+        # a forged split_elected would unlock the split-only allowances
+        # (CW-by-policy, external exceptions) without a real election.
+        if "split_elected" in axis_fields:
+            raise SessionError(
+                "split_elected is derived from the election shape and is "
+                "never caller-settable"
+            )
         data = cur.model_dump()
         data.update({k: v for k, v in axis_fields.items() if v is not None})
         data["actor_name"] = actor_name
+        data["unit_id"] = unit_id
 
         # Model split write rules (single source of coherence):
         #   split write  -> split axes govern; legacy view back-derived
@@ -1491,6 +1515,35 @@ class DispositionSession:
                 )
             self.state.actions[action.action_id] = action
         return action
+
+    def record_work_package(
+        self,
+        wp: Any,
+        *,
+        actor_name: str,
+    ) -> Any:
+        """CR1: append WorkPackageRecord (supersession by wp_id chain)."""
+        from oracle.disposition.workpackage import WorkPackageRecord
+
+        if self.state is None:
+            raise SessionError("Session not open")
+        if not isinstance(wp, WorkPackageRecord):
+            wp = WorkPackageRecord.model_validate(wp)
+        with self._exclusive_lock():
+            self.eventlog.append(
+                actor=actor_name,
+                payload={
+                    "event_type": "work_package_recorded",
+                    "work_package": wp.model_dump(mode="json"),
+                },
+            )
+            if wp.supersedes and wp.supersedes in self.state.work_packages:
+                prior = self.state.work_packages[wp.supersedes]
+                self.state.work_packages[wp.supersedes] = prior.model_copy(
+                    update={"status": "superseded"}
+                )
+            self.state.work_packages[wp.wp_id] = wp
+        return wp
 
     def actions_for_unit(self, unit_id: str) -> list[Any]:
         if self.state is None:

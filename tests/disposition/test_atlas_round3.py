@@ -428,7 +428,19 @@ def test_ar8_cited_na_not_blocked_by_unresolved_fact():
     )
     res = evaluate_unit(unit, facts={})  # ceo.identity entirely unresolved
     assert "N/A" not in res.blocked
-    assert "Meet" in res.blocked  # Meet stays blocked as before
+    # claim-scoped (corpus-replay slice): the Meet BLOCK applies to rows
+    # claiming execution — an evidenced AMR-2 claim stays blocked
+    claim = UnitAxesState(
+        unit_id="AMR-2",
+        applicability="yes",
+        obligated_actor="producer",
+        organization_responsibility="owner",
+        fulfillment_path="as_written",
+        execution_state="evidenced",
+        approval_state="not_required",
+    )
+    res2 = evaluate_unit(claim, facts={})
+    assert "Meet" in res2.blocked
 
 
 def test_ar8_uncited_na_still_blocked():

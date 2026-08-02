@@ -279,4 +279,6 @@ def test_cs5_check_reports_tallies_and_all_coherence_errors(tmp_path):
     assert rep["rows"] == 2
     assert rep["reconciled"] is False
     assert len(rep["coherence_errors"]) == 2  # ALL errors, not just first
-    assert rep["contract_expected"]["CW"] == 85
+    # identity-first: tallies are computed reports, never targets
+    assert rep["contract"] == {"CW": 1, "NA": 1}
+    assert "contract_expected" not in rep

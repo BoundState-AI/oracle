@@ -65,6 +65,9 @@ class AxisSnapshot:
     approval_tbd_reason: Optional[TBDReason] = None
     fulfillment_path: Optional[FulfillmentPath] = None
     execution_state: Optional[ExecutionState] = None
+    # provenance: True when the split axes were elected directly — the
+    # CW-by-policy allowance below never applies to converted legacy input
+    split_elected: bool = False
 
     def __post_init__(self) -> None:
         if self.fulfillment_path is None or self.execution_state is None:
@@ -131,8 +134,14 @@ def validate_tbd_reasons(snap: AxisSnapshot) -> None:
 
 
 def validate_applicability_coherence(snap: AxisSnapshot) -> None:
-    """applicability No + active implementation is a contradiction."""
+    """applicability No + active implementation is a contradiction —
+    EXCEPT a split-elected as_written commitment (CW-by-policy: the
+    engagement's four Technical-N/A rows that still answer CW; Fran's
+    dual-view requirement). Converted legacy input keeps the historical
+    contradiction."""
     if snap.applicability != "no":
+        return
+    if snap.split_elected and snap.fulfillment_path == "as_written":
         return
     active = {"meets_as_written", "alternate_proposed", "partial", "not_met"}
     if snap.implementation_state in active:
@@ -184,6 +193,15 @@ def map_axes_to_export_label(snap: AxisSnapshot) -> ExportLabel:
         return ExportLabel.TBD
 
     if snap.applicability == "no":
+        # CW-by-policy: a split-elected as_written commitment stands even
+        # when the scope is technically out of reach — contract Meet(CW),
+        # readiness carries Technical N/A (AMR-11/24/25/48 pattern).
+        if snap.split_elected and ful == "as_written":
+            if appr == "rejected":
+                return ExportLabel.OPEN_NOT_MET
+            if appr in ("required", "draft", "submitted", "tbd"):
+                return ExportLabel.TBD
+            return ExportLabel.MEET
         if ful not in ("not_applicable", "tbd"):
             raise AxisContradiction(
                 "applicability_coherence",
@@ -229,8 +247,11 @@ def map_axes_to_export_label(snap: AxisSnapshot) -> ExportLabel:
         if appr == "rejected":
             return ExportLabel.OPEN_NOT_MET
         # External responsibility: approval pending elsewhere is Open/Not
-        # Met, not Exception — AC-3 AMR-1.
-        if snap.organization_responsibility == "external":
+        # Met, not Exception — AC-3 AMR-1 — for CONVERTED legacy input.
+        # A split-ELECTED exception is an explicit relief election and
+        # stands even when the approval chain is externally owned (the
+        # final AMR-1/63 adjudication).
+        if snap.organization_responsibility == "external" and not snap.split_elected:
             return ExportLabel.OPEN_NOT_MET
         if appr == "not_required":
             raise AxisContradiction(

@@ -840,3 +840,121 @@ confirms). Four new findings (independent 651/7):
 4 regressions (test_model_split.py now 22); 3 older direct-writer tests
 updated to the stricter gate. Suites: **657 passed / 5 skipped**.
 Awaiting Atlas re-verdict on MS4-MS7. Advisory-only per D-1.
+
+---
+
+## Contract-identity adjudication CLOSED (2026-08-02) — Fran ruling + operator confirmation
+
+The corpus contract codes are now fully adjudicated. Key events:
+
+1. Beth crosswalked the two engagement code workbooks (agree on 110/115)
+   and the expert-corrected fixture (settles the 5 diffs), then proposed
+   resolving the last six rows from the exception-package structure.
+2. **Fran rejected the proposal as code-fitting** — fitting row codes to
+   a target tally. Her adjudication: AMR-12 MI, AMR-16 CW (the
+   unplanned-interruption NCR obligation stands; dwell limits define
+   planned limits and never excuse an NCR), AMR-41 CW, AMR-26 MI,
+   AMR-57 conditional on deposition-source configuration, AMR-22 NA
+   (reopens if repair/rework enters scope).
+3. The operator confirmed a single-gun/head controlled scope → AMR-57 CW.
+
+**Final totals: 88 CW / 6 MI / 4 EX / 17 NA.** The prior 85/6/7/17
+constant is stale (the protected fixture's own note flagged its counts
+as pending final engineering confirmation; the fixture remains
+untouched as the historical record).
+
+**Methodology ruling (governs the corpus-replay slice):** the golden
+locks adjudicated ROW IDENTITIES and computes totals for reporting — it
+never enforces totals. The hard EXACT tally gate in corpus.py is
+retired; the replay test compares engine-derived labels against the
+locked per-row codes. Synthetic row identities in test fixtures are
+marked synthetic. The full 115-row map lives outside the repo in the
+corpus file; in-repo tests pin anchor rows only. The AMR-16/41 corpus
+comments carry the corrected four-point NCR control statement, not the
+workbook's superseded "regime replaced" framing.
+
+Advisory-only per D-1.
+
+---
+
+## Corpus-replay slice BUILT — THE GOLDEN IS LIVE (2026-08-02, uncommitted, AWAITING ATLAS)
+
+Fran's acceptance test exists and PASSES: the full 115-row engagement
+corpus replays through the engine via normal gated APIs and every
+derived contract code and readiness label matches the locked, human-
+adjudicated identity. Identity-first throughout (tallies computed,
+never enforced). Suites: **663 passed / 4 skipped** (corpus golden
+running, not skipping).
+
+Built:
+- CR1 WorkPackageRecord (Gap-Action-Register shape) + session event +
+  replay; 16 real work packages load from a sibling CSV.
+- CR2 corpus v2 (split axes + gate fields + evidence date), identity-
+  first reconciliation (the EXACT tally gate is retired; coherence
+  floor kept, v2-aware), load_work_packages.
+- CR3 replay harness (oracle/disposition/replay.py): evidence
+  registration (unique per-row ids — the registry is last-wins by id),
+  work packages, shared actions, gated elections, attestations, then
+  row-by-row identity comparison. Synthetic self-test covers every
+  label class keylessly; the RDW_CORPUS_PATH golden runs the real
+  corpus + anchor rows.
+- CR4 synthetic fixtures explicitly marked (operator instruction).
+
+Model findings surfaced BY the first real replay, fixed with the
+established provenance pattern (split-elected vs converted legacy —
+frozen-table equivalence preserved in every case):
+- CW-by-policy: split-elected as_written under applicability=no renders
+  contract Meet(CW) with readiness Technical N/A (AMR-11/24/25/48).
+- Claim-scoped prerequisite gates: AMCP/classification/CEO fact blocks
+  apply to evidenced/verified claims, never to commitments (the
+  engagement elects CW while dependencies are open; readiness carries
+  them). Legacy blocked states unchanged.
+- Split-elected exceptions stand under external responsibility (the
+  AMR-1/63 adjudication); converted legacy keeps the AC-3 rule.
+- Data adjudications recorded: AMR-50 contract NA (single-source logic
+  read across from AMR-57, reopening trigger recorded — flagged for
+  Fran sign-off); AMR-7/9 design-basis Mets cite the AMCP scope-
+  declaration record (operator ruling).
+
+OPEN ITEM for a ruling: §13.2's prohibited-language list refuses the
+words "qualified/approved/complete" used descriptively — 30 real
+engagement comments cannot be stored until the list is refined to
+claim-phrases. Replay records these as warnings, not failures.
+
+Advisory-only per D-1.
+
+---
+
+## Atlas round 1 on the corpus-replay slice (2026-08-02) — 3 High + 2 Medium, ALL FIXED
+
+Atlas confirmed the harness surfaces named mismatches, shared evidence
+stays independently qualified, header parsing works, no EXPECTED_*
+remnants, and the 504-case frozen sweep passes (independent 659/8).
+Findings, all fixed same day with regressions (test_corpus_replay.py):
+
+- **CR1 (High)** split_elected was caller-settable through set_axes —
+  forged provenance flipped a legacy external ONM to Exception. Fixed:
+  set_axes refuses split_elected as an input (derived only); unit_id
+  pinned against payload override too.
+- **CR2 (High)** Prerequisite gates on evidenced claims were
+  label-dependent — exception-mapped claims sailed past Meet-only
+  blocks (AMR-2/4/17 probes). Fixed: with an evidenced/verified claim,
+  unresolved prerequisites block Meet, Meets Intent, AND Exception
+  (session election + export re-check both consume the blocks).
+- **CR3 (High)** replay bypassed the coherence floor — a half-split row
+  replayed on the defaulted axis and reported ok. Fixed: replay runs
+  assert_reconciled (which now also enforces unique identities — the
+  public-floor gap) before any session write; _election_kwargs requires
+  split axes both-or-neither and refuses loudly.
+- **CR4 (Medium)** The work-package sibling bypassed the D-3 boundary.
+  Fixed: scan_work_packages runs the identifier blocklist over every WP
+  field; replay refuses on hits; check() folds hits into
+  coherence_errors (reconciled goes false).
+- **CR5 (Medium)** WP supersession diverged live-vs-resume and
+  duplicate sibling rows silently collapsed. Fixed: self-supersession
+  rejected at the model; replay applies supersession before storing
+  (identical to live, test-pinned); duplicate wp_id refuses at load.
+
+Suites: **668 passed / 4 skipped** — the engagement golden (115/115
+identity match) still runs live. Awaiting Atlas re-verdict.
+Advisory-only per D-1.

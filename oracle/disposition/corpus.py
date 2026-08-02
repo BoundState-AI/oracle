@@ -25,9 +25,10 @@ from __future__ import annotations
 import csv
 import logging
 import os
+import re
 from collections import Counter
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -35,26 +36,21 @@ LOGGER = logging.getLogger("oracle.disposition.corpus")
 
 CORPUS_ENV = "RDW_CORPUS_PATH"
 
-# Fran's engagement reconciliation targets (2026-07-30) — EXACT.
-EXPECTED_CONTRACT: dict[str, int] = {
-    "CW": 85,
-    "MI": 6,
-    "EX": 7,
-    "NA": 17,
-}
-EXPECTED_READINESS: dict[str, int] = {
-    "Met": 2,
-    "Not Met with Plan": 39,
-    "TBD": 34,
-    "Program Action": 18,
-    "Technical N/A": 21,
-    "Not Yet Due": 1,
-}
-EXPECTED_WORK_PACKAGES = 16
+# Identity-first (Fran ruling 2026-08-02): the corpus file locks the
+# adjudicated ROW IDENTITIES; tallies are COMPUTED for reporting and are
+# never enforcement targets. The earlier EXACT tally constants
+# (85/6/7/17 etc.) were retired as stale — forcing totals was shown to
+# push rows into false codes (the AMR-16/41 lesson).
 
 
 class CorpusRow(BaseModel):
-    """One expert-adjudicated requirement row from the engagement."""
+    """One expert-adjudicated requirement row from the engagement.
+
+    v2 (CR2): carries everything the replay harness needs to drive a
+    real session through the normal gated APIs — split axes, gate
+    fields (citation / MI fields / EX closure / NYD), and evidence.
+    All v2 fields default so legacy v1 files still load.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -70,6 +66,20 @@ class CorpusRow(BaseModel):
     action_ids: tuple[str, ...] = ()
     raw_answers: str = ""
     evidence_refs: str = ""
+    # ---- v2 replay fields
+    obligated_actor: str = ""
+    fulfillment_path: str = ""
+    execution_state: str = ""
+    scope_citation: str = ""
+    intent_statement: str = ""
+    alternative_control: str = ""
+    control_class: str = ""
+    exception_basis: str = ""
+    permanent_relief_basis: str = ""
+    closure_action_id: str = ""
+    not_yet_due: str = ""  # truthy strings: yes/true/1
+    not_yet_due_justification: str = ""
+    evidence_date: str = ""
 
 
 class CorpusError(Exception):
@@ -117,6 +127,17 @@ _AXIS_VOCAB: dict[str, frozenset[str]] = {
     "approval_state": frozenset(
         {"not_required", "required", "draft", "submitted", "approved", "rejected", "tbd"}
     ),
+    # v2 (model split)
+    "obligated_actor": frozenset(
+        {"program", "ceo", "producer", "supplier", "subtier", "other"}
+    ),
+    "fulfillment_path": frozenset(
+        {"as_written", "alternative_intent", "exception", "not_applicable", "tbd"}
+    ),
+    "execution_state": frozenset(
+        {"not_started", "partial", "implemented", "evidenced", "verified", "tbd"}
+    ),
+    "control_class": frozenset({"integral", "disclosed"}),
 }
 
 
@@ -339,8 +360,13 @@ _AXIS_FIELDS = (
 def _assert_row_coherent(r: CorpusRow) -> None:
     """AR11 (completion): label counts alone are not evidence — every row
     must carry axes, and its labels must cohere with them. Catches a corpus
-    that matches the tallies while being structurally meaningless."""
+    that matches the tallies while being structurally meaningless.
+    v2: split axes (fulfillment+execution) satisfy the implementation
+    requirement; execution-based invariants apply when present."""
+    has_split = bool(r.fulfillment_path and r.execution_state)
     for f in _AXIS_FIELDS:
+        if f == "implementation_state" and has_split:
+            continue
         if not getattr(r, f):
             raise CorpusError(
                 f"{r.requirement_id}: axis {f} is blank — the corpus is a "
@@ -354,21 +380,38 @@ def _assert_row_coherent(r: CorpusRow) -> None:
         raise CorpusError(
             f"{r.requirement_id}: contract NA but applicability={r.applicability!r}"
         )
-    if r.contract_label == "MI" and r.implementation_state != "alternate_proposed":
+    mi_ok = (
+        r.fulfillment_path == "alternative_intent"
+        if has_split
+        else r.implementation_state == "alternate_proposed"
+    )
+    if r.contract_label == "MI" and not mi_ok:
         raise CorpusError(
-            f"{r.requirement_id}: contract MI but "
-            f"implementation_state={r.implementation_state!r}"
+            f"{r.requirement_id}: contract MI but the fulfillment/"
+            f"implementation axis does not elect an alternative"
         )
-    if r.readiness_label == "Met" and r.implementation_state != "meets_as_written":
-        raise CorpusError(
-            f"{r.requirement_id}: readiness Met but "
-            f"implementation_state={r.implementation_state!r}"
+    if r.readiness_label == "Met":
+        met_ok = (
+            r.execution_state in ("evidenced", "verified")
+            if has_split
+            else r.implementation_state == "meets_as_written"
         )
-    if r.readiness_label == "Not Yet Due" and r.implementation_state != "tbd":
-        raise CorpusError(
-            f"{r.requirement_id}: readiness Not Yet Due but "
-            f"implementation_state={r.implementation_state!r}"
+        if not met_ok:
+            raise CorpusError(
+                f"{r.requirement_id}: readiness Met but execution/"
+                f"implementation does not support it"
+            )
+    if r.readiness_label == "Not Yet Due":
+        nyd_ok = (
+            r.execution_state in ("tbd", "not_started")
+            if has_split
+            else r.implementation_state == "tbd"
         )
+        if not nyd_ok:
+            raise CorpusError(
+                f"{r.requirement_id}: readiness Not Yet Due but execution "
+                "has concrete progress"
+            )
     if r.readiness_label == "Technical N/A" and r.applicability != "no":
         raise CorpusError(
             f"{r.requirement_id}: readiness Technical N/A but "
@@ -382,24 +425,91 @@ def _assert_row_coherent(r: CorpusRow) -> None:
 
 
 def assert_reconciled(rows: list[CorpusRow]) -> None:
-    """FR8: EXACT reconciliation against the engagement targets."""
-    got = reconcile(rows)
-    if len(rows) != 115:
-        raise CorpusError(f"Corpus has {len(rows)} rows; expected 115")
-    for r in rows:
+    """Identity-first (Fran 2026-08-02): the corpus IS the identity lock.
+
+    Enforces per-row coherence + unique identities. Tallies are computed
+    by reconcile() for reporting and are never gates; row count is
+    whatever the adjudication produced; the replay golden compares
+    engine-derived labels against each row's locked codes."""
+    seen: dict[str, int] = {}
+    for i, r in enumerate(rows):
+        if r.requirement_id in seen:
+            raise CorpusError(
+                f"duplicate requirement_id {r.requirement_id!r} "
+                f"(rows {seen[r.requirement_id]} and {i})"
+            )
+        seen[r.requirement_id] = i
         _assert_row_coherent(r)
-    if got["contract"] != EXPECTED_CONTRACT:
-        raise CorpusError(
-            f"Contract counts differ: got {got['contract']} "
-            f"expected {EXPECTED_CONTRACT}"
-        )
-    if got["readiness"] != EXPECTED_READINESS:
-        raise CorpusError(
-            f"Readiness counts differ: got {got['readiness']} "
-            f"expected {EXPECTED_READINESS}"
-        )
-    if got["work_packages"]["count"] != EXPECTED_WORK_PACKAGES:
-        raise CorpusError(
-            f"Work packages: got {got['work_packages']['count']} "
-            f"expected {EXPECTED_WORK_PACKAGES}"
-        )
+
+
+def scan_work_packages(wps: list[Any]) -> list[str]:
+    """D-3 floor for the sibling file (Atlas CR Medium 4): every string
+    field of every work package is scanned against the identifier
+    blocklist. Returns hits; callers refuse on any."""
+    from oracle.disposition.library import DEFAULT_BLOCKLIST_PATTERNS
+
+    hits: list[str] = []
+    for wp in wps:
+        for field, value in wp.model_dump().items():
+            text = " ".join(value) if isinstance(value, (list, tuple)) else str(value)
+            for pat in DEFAULT_BLOCKLIST_PATTERNS:
+                m = re.search(pat, text or "", re.I)
+                if m:
+                    hits.append(
+                        f"{wp.wp_id}.{field}: {m.group(0)[:40]!r} matches {pat!r}"
+                    )
+    return hits
+
+
+def load_work_packages(corpus_path: Path | str) -> list[Any]:
+    """CR2: sibling `<stem>.workpackages.csv` -> WorkPackageRecord list.
+
+    Header = WorkPackageRecord field names (a few engagement synonyms
+    accepted). Missing sibling file -> empty list, never an error."""
+    from oracle.disposition.workpackage import WorkPackageRecord
+
+    p = Path(corpus_path)
+    sib = p.with_name(p.stem + ".workpackages.csv")
+    if not sib.is_file():
+        return []
+    synonyms = {
+        "actionid": "wp_id",
+        "id": "wp_id",
+        "affectedamrs": "affected_unit_ids",
+        "affectedunits": "affected_unit_ids",
+        "objectiveevidence": "objective_evidence",
+        "exitcriteria": "exit_criteria",
+        "executionactions": "execution_actions",
+    }
+    known = set(WorkPackageRecord.model_fields.keys())
+    out: list[Any] = []
+    with sib.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        for i, raw in enumerate(reader, start=2):
+            data: dict[str, Any] = {}
+            for k, v in raw.items():
+                if not k:
+                    continue
+                nk = re.sub(r"[^a-z0-9]", "", k.lower())
+                field = synonyms.get(nk) or next(
+                    (f for f in known if f.replace("_", "") == nk), None
+                )
+                if field:
+                    data[field] = (v or "").strip()
+            if not data.get("wp_id"):
+                raise CorpusError(f"{sib.name} row {i}: wp_id missing")
+            if any(w.wp_id == data["wp_id"] for w in out):
+                raise CorpusError(
+                    f"{sib.name} row {i}: duplicate wp_id {data['wp_id']!r}"
+                )
+            aff = data.get("affected_unit_ids", "")
+            if isinstance(aff, str):
+                data["affected_unit_ids"] = tuple(
+                    a.strip() for a in re.split(r"[;,]", aff) if a.strip()
+                )
+            status = (data.get("status") or "open").lower()
+            data["status"] = status if status in (
+                "open", "blocked", "closed", "superseded"
+            ) else "open"
+            out.append(WorkPackageRecord.model_validate(data))
+    return out

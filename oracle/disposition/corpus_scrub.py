@@ -28,9 +28,6 @@ from typing import Optional
 from pydantic import BaseModel, ConfigDict
 
 from oracle.disposition.corpus import (
-    EXPECTED_CONTRACT,
-    EXPECTED_READINESS,
-    EXPECTED_WORK_PACKAGES,
     CorpusError,
     CorpusRow,
     _assert_row_coherent,
@@ -389,7 +386,12 @@ def scrub(
 
 
 def check(path: Path | str) -> dict:
-    """CS5: load + tally vs engagement targets + ALL coherence errors."""
+    """CS5, identity-first: computed tallies + ALL coherence errors.
+
+    Tallies are REPORTS (Fran 2026-08-02) — 'reconciled' means the rows
+    are internally coherent, never that they hit a target count."""
+    from oracle.disposition.corpus import load_work_packages, scan_work_packages
+
     rows = load_corpus(path)
     got = reconcile(rows)
     errors: list[str] = []
@@ -398,20 +400,15 @@ def check(path: Path | str) -> dict:
             _assert_row_coherent(r)
         except CorpusError as e:
             errors.append(str(e))
+    wps = load_work_packages(path)
+    # D-3 floor covers the sibling too (Atlas CR Medium 4)
+    errors.extend(f"work package {h}" for h in scan_work_packages(wps))
     return {
         "rows": len(rows),
         "contract": got["contract"],
-        "contract_expected": EXPECTED_CONTRACT,
         "readiness": got["readiness"],
-        "readiness_expected": EXPECTED_READINESS,
         "work_packages": got["work_packages"]["count"],
-        "work_packages_expected": EXPECTED_WORK_PACKAGES,
+        "work_package_records": len(wps),
         "coherence_errors": errors,
-        "reconciled": (
-            len(rows) == 115
-            and got["contract"] == EXPECTED_CONTRACT
-            and got["readiness"] == EXPECTED_READINESS
-            and got["work_packages"]["count"] == EXPECTED_WORK_PACKAGES
-            and not errors
-        ),
+        "reconciled": not errors,
     }

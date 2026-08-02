@@ -79,6 +79,13 @@ def evaluate_unit(
         # still allow N/A if axes already No — comment should carry rationale
         notes.append("N/A should cite scope/trigger rationale in comment or scope_citation")
 
+    # Model split: prerequisite-fact gates protect the execution CLAIM,
+    # never the commitment — a CW election with execution not started is
+    # the engagement's dominant pattern (readiness carries the unresolved
+    # dependency). Legacy meets_as_written converts to evidenced, so every
+    # pre-split blocked state stays blocked.
+    claims_execution = unit.execution_state in ("evidenced", "verified")
+
     # Dependency / classification gates. M7: reopen_fact edges propagate
     # re-review only — they never block elections here.
     for edge in graph.prerequisites_of(unit.unit_id):
@@ -88,10 +95,17 @@ def evaluate_unit(
                 meet_blockers.append(
                     f"prerequisite fact {edge.fact_key} unresolved ({edge.note})"
                 )
-                blocked[ExportLabel.MEET.value] = (
-                    blocked.get(ExportLabel.MEET.value)
-                    or f"unresolved fact {edge.fact_key}"
-                )
+                if claims_execution:
+                    # label-INDEPENDENT for claims (Atlas CR High 2): an
+                    # evidenced/verified claim is unverifiable while the
+                    # prerequisite is unresolved, whatever label it maps to
+                    reason = f"unresolved fact {edge.fact_key} (evidenced claim)"
+                    for lab in (
+                        ExportLabel.MEET,
+                        ExportLabel.MEETS_INTENT,
+                        ExportLabel.EXCEPTION,
+                    ):
+                        blocked[lab.value] = blocked.get(lab.value) or reason
                 # AR8/N1: classification DETERMINES applicability, so for
                 # class-gated units no citation can substitute — N/A stays
                 # blocked until classification resolves (spec AMR-17 rule).
@@ -115,8 +129,15 @@ def evaluate_unit(
     )
     if class_unresolved and class_gated:
         meet_blockers.append("classification_unresolved")
-        blocked[ExportLabel.MEET.value] = "classification_unresolved"
-        blocked[ExportLabel.MEETS_INTENT.value] = "classification_unresolved"
+        if claims_execution:
+            for lab in (
+                ExportLabel.MEET,
+                ExportLabel.MEETS_INTENT,
+                ExportLabel.EXCEPTION,
+            ):
+                blocked[lab.value] = (
+                    blocked.get(lab.value) or "classification_unresolved"
+                )
         notes.append("Render TBD(classification_unresolved) until class inputs arrive")
 
     # EFCP / AMR-14
@@ -129,10 +150,20 @@ def evaluate_unit(
             if unit.applicability == "yes" and unit.implementation_state == "not_met":
                 actions.append("Obtain EFCP / mapped 6033 control set")
 
-    # AMCP / AMR-2 — cannot satisfy by supplier matrix alone
+    # AMCP / AMR-2 — cannot satisfy by supplier matrix alone. The block
+    # protects the execution claim; the CW commitment (readiness Program
+    # Action while the AMCP is pending) elects.
     amcp = facts.get("plan.AMCP")
     if unit.unit_id == "AMR-2" and (amcp is None or not amcp.confirmed):
-        blocked[ExportLabel.MEET.value] = "no approved AMCP present"
+        if claims_execution:
+            for lab in (
+                ExportLabel.MEET,
+                ExportLabel.MEETS_INTENT,
+                ExportLabel.EXCEPTION,
+            ):
+                blocked[lab.value] = (
+                    blocked.get(lab.value) or "no approved AMCP present"
+                )
         meet_blockers.append("AMCP not observed — supplier matrix cannot close AMR-2")
         actions.append("Obtain approved AMCP (identity/revision/approver/date/scope)")
 
@@ -220,8 +251,14 @@ def evaluate_unit(
     if class_unresolved and class_gated:
         if ExportLabel.TBD.value not in allowed:
             allowed = allowed + (ExportLabel.TBD.value,)
-        blocked.setdefault(ExportLabel.MEET.value, "classification_unresolved")
-        blocked.setdefault(ExportLabel.MEETS_INTENT.value, "classification_unresolved")
+        if claims_execution:
+            blocked.setdefault(ExportLabel.MEET.value, "classification_unresolved")
+            blocked.setdefault(
+                ExportLabel.MEETS_INTENT.value, "classification_unresolved"
+            )
+            blocked.setdefault(
+                ExportLabel.EXCEPTION.value, "classification_unresolved"
+            )
 
     # Axis-level Meet blockers
     if unit.applicability != "yes":

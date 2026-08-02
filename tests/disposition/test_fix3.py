@@ -425,8 +425,11 @@ def test_fr7_fail_closed_without_curated(tmp_path):
 
 
 def _corpus_rows_ok():
-    """115 coherent rows hitting the exact engagement tallies (AR11: rows
-    carry full axes and label/axis coherence, not just matching counts)."""
+    """SYNTHETIC shape fixture (CR4, operator instruction 2026-08-02):
+    the row-to-label assignments here are POSITIONAL TEST SHAPES, never
+    engagement identities — do not read any AMR's code off this data.
+    The adjudicated identities live in the corpus file outside the repo;
+    tallies here are historical shape only (identity-first ruling)."""
     # (contract, readiness, applicability, org, implementation, approval, plan?)
     shapes = (
         [("CW", "Met", "yes", "owner", "meets_as_written", "not_required", False)] * 2

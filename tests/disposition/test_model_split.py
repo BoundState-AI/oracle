@@ -623,6 +623,39 @@ def test_ms7_appendix_gate_scopes_to_exported_rows(tmp_path):
         export_all(s, recs, tmp_path / "suite")  # EFCRs ARE in this product
 
 
+# ------------------------------------------- CW-by-policy (dual view)
+
+
+def test_cw_by_policy_technical_na_rows(tmp_path):
+    """The engagement's four Technical-N/A rows that still answer CW:
+    split-elected as_written under applicability=no renders contract
+    Meet(CW) while readiness reads Technical N/A. Converted LEGACY input
+    keeps the historical contradiction."""
+    s = _open(tmp_path)
+    u = s.set_axes(
+        "AMR-50",
+        actor_name="op",
+        applicability="no",
+        organization_responsibility="owner",
+        fulfillment_path="as_written",
+        execution_state="not_started",
+        approval_state="not_required",
+        scope_citation="6030 scope: technically outside declared process",
+    )
+    assert u.export_label().value == "Meet"  # contract CW stands
+    assert map_readiness(u, ()).label.value == "Technical N/A"
+    # legacy path unchanged: appl no + meets_as_written is still invalid
+    with pytest.raises(SessionError, match="applicability"):
+        s.set_axes(
+            "AMR-51",
+            actor_name="op",
+            applicability="no",
+            organization_responsibility="owner",
+            implementation_state="meets_as_written",
+            approval_state="not_required",
+        )
+
+
 # ----------------------------------------------------- M7 CEO reopening
 
 
