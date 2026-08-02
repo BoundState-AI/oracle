@@ -25,6 +25,7 @@ venv/
 
 # Claude Code
 .claude/
+.playwright-mcp/
 
 # ORACLE runtime artifacts (generated, not committed)
 oracle_packs/
