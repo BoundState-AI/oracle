@@ -1,0 +1,9 @@
+# Paths the oracle build pipeline must never modify (one glob per line).
+# Read by pipeline/oracle_build.py's CHECK stage; a spec's "## Never touch"
+# section adds task-specific patterns on top of these repo defaults.
+# Inline comments after " #" are stripped.
+
+tests/golden/fixtures/* # golden consensus fixtures — regenerate only deliberately
+docs/ORACLE_DISPOSITION_SPEC.md # build contract — a builder must never edit the spec to match the code
+docs/oracle_runs/* # immutable run records
+tests/disposition/fixtures/* # merge-blocking regression corpus — never edited to make tests pass

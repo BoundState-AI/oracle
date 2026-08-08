@@ -1,0 +1,16 @@
+{
+  "accepted_critical_count": 3,
+  "accepted_high_count": 4,
+  "total_accepted_defects": 9,
+  "total_rejected_claims": 0,
+  "total_preference_only": 0,
+  "novel_issue_count": 10,
+  "duplicate_rate": null,
+  "unsupported_claim_rate": null,
+  "rounds_to_stability": 1,
+  "valid_rounds": 1,
+  "converged": false,
+  "consensus_type": "blocked",
+  "dangling_decision_ids": [],
+  "issue_id_continuity": null
+}

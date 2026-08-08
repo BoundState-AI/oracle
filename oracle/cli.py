@@ -3560,6 +3560,157 @@ def cmd_show_pack(args: argparse.Namespace) -> None:
         print(_render_pack_for_oracle(pack_data, pack_id))
 
 
+def _cmd_disposition_walk(args: argparse.Namespace) -> None:
+    """Minimal wiring: RDW disposition walk (oracle/disposition/walk.py)."""
+    from oracle.disposition.walk import cmd_disposition_walk
+
+    cmd_disposition_walk(args)
+
+
+def _cmd_disposition_golden(args: argparse.Namespace) -> None:
+    from oracle.disposition.golden import run_golden_session
+
+    result = run_golden_session(args.session_dir, export_dir=args.export_dir)
+    print(json.dumps(result, indent=2, default=str))
+
+
+def _cmd_disposition_export(args: argparse.Namespace) -> None:
+    from oracle.disposition.export import export_all, stamp_meta
+    from oracle.disposition.session import DispositionSession
+
+    s = DispositionSession(args.session_dir)
+    # H2: default repin=False — levy drift is a new run, not silent rewrite
+    s.resume(
+        actor_name=args.actor,
+        repin=bool(getattr(args, "repin", False)),
+        allow_builtin=bool(getattr(args, "allow_builtin", False)),
+    )
+    # N3: render from the records the SESSION pinned — re-loading the
+    # default set here exported curated text under a builtin pin.
+    records = {r.requirement_id: r for r in s.loaded_records}
+    # F2: known set is (doc_id, revision) from registry; export_all loads it
+    # when omitted — never synthesize from the refs under validation.
+    # M4: strict by default — refuses unaccepted rows unless --include-draft.
+    paths = export_all(
+        s,
+        records,
+        args.export_dir,
+        include_draft=bool(getattr(args, "include_draft", False)),
+    )
+    s.record_export({**stamp_meta(s), "paths": {k: str(v) for k, v in paths.items()}}, args.actor)
+    print(json.dumps({k: str(v) for k, v in paths.items()}, indent=2))
+
+
+def _cmd_disposition_library_export(args: argparse.Namespace) -> None:
+    from oracle.disposition.library import export_library
+    from oracle.disposition.session import DispositionSession
+
+    s = DispositionSession(args.session_dir)
+    s.resume(
+        actor_name=args.actor,
+        repin=False,
+        allow_builtin=bool(getattr(args, "allow_builtin", False)),
+    )
+    path = export_library(s, args.out_json)
+    print(json.dumps({"library": str(path)}, indent=2))
+
+
+def _cmd_disposition_library_import(args: argparse.Namespace) -> None:
+    from pathlib import Path
+
+    from oracle.disposition.library import import_library
+    from oracle.disposition.session import DispositionSession
+
+    s = DispositionSession(args.session_dir)
+    allow_builtin = bool(getattr(args, "allow_builtin", False))
+    if not (Path(args.session_dir) / "session.json").exists():
+        s.open(actor_name=args.actor, repin=True, allow_builtin=allow_builtin)
+    else:
+        s.resume(actor_name=args.actor, repin=False, allow_builtin=allow_builtin)
+    counts = import_library(s, args.library_json, actor_name=args.actor)
+    print(json.dumps(counts, indent=2))
+
+
+def _cmd_disposition_corpus_scrub(args: argparse.Namespace) -> None:
+    from oracle.disposition.corpus_scrub import scrub
+
+    overrides = {}
+    for m in args.map or []:
+        raw, _, field = m.partition("=")
+        if not raw or not field:
+            raise SystemExit(f"--map needs RawHeader=field (got {m!r})")
+        overrides[raw] = field
+    report = scrub(
+        args.raw,
+        args.out,
+        terms_path=args.terms,
+        mapping_overrides=overrides or None,
+        apply=bool(args.apply),
+        allow_no_terms=bool(getattr(args, "no_terms", False)),
+    )
+    print(f"rows={report.rows} replacements={report.replacements}")
+    print(f"mapped: {report.mapped}")
+    if report.dropped_columns:
+        print(f"dropped columns (not corpus fields): {report.dropped_columns}")
+    for wmsg in report.warnings:
+        print(f"WARNING: {wmsg}")
+    if report.violations:
+        print(f"REFUSED — {len(report.violations)} unresolved D-3 hits:")
+        for v in report.violations:
+            print(f"  row {v.row} [{v.column}] {v.kind}: {v.excerpt!r} ({v.detail})")
+        print("Fix the source or add terms to the terms file, then re-run.")
+        raise SystemExit(1)
+    if report.format_errors:
+        print(f"REFUSED — {len(report.format_errors)} loader-level format errors:")
+        for e in report.format_errors:
+            print(f"  {e}")
+        print("The output must load cleanly via load_corpus; fix and re-run.")
+        raise SystemExit(1)
+    if report.written:
+        print(f"written: {report.out_path}")
+    else:
+        print("dry run clean — re-run with --apply to write")
+
+
+def _cmd_disposition_corpus_check(args: argparse.Namespace) -> None:
+    from oracle.disposition.corpus_scrub import check
+
+    rep = check(args.corpus)
+    print(json.dumps(rep, indent=2))
+    if not rep["reconciled"]:
+        raise SystemExit(1)
+
+
+def _cmd_disposition_audit(args: argparse.Namespace) -> None:
+    from pathlib import Path
+
+    from oracle.disposition.audit import build_lineage
+    from oracle.disposition.evidence import EvidenceStore
+    from oracle.disposition.session import DispositionSession
+
+    s = DispositionSession(args.session_dir)
+    # H2: audit is strictly read-only — never repin
+    s.resume(
+        actor_name=args.actor,
+        repin=False,
+        allow_builtin=bool(getattr(args, "allow_builtin", False)),
+    )
+    # N3: lineage must cite the session-pinned records, not the default set
+    records = {r.requirement_id: r for r in s.loaded_records}
+    ev_store = None
+    ev_root = Path(args.session_dir) / "evidence"
+    if ev_root.is_dir():
+        ev_store = EvidenceStore(ev_root)
+    # F6: attestations come from the event log; no review_package.json
+    lin = build_lineage(
+        args.unit,
+        s,
+        records,
+        evidence_store=ev_store,
+    )
+    print(lin.model_dump_json(indent=2))
+
+
 def cmd_promote_pack(args: argparse.Namespace) -> None:
     """Handle 'promote-pack' subcommand."""
     pack_dir = _resolve_pack_dir(getattr(args, 'pack_dir', None))
@@ -3690,6 +3841,210 @@ Examples:
     p_promote.add_argument("--yes", action="store_true",
                            help="Auto-confirm (required with --non-interactive)")
     p_promote.set_defaults(func=cmd_promote_pack)
+
+    # --- disposition (RDW MVP: walk interview) ---
+    p_disp = subparsers.add_parser(
+        "disposition",
+        help="Requirements Disposition Workbench (RDW) commands",
+    )
+
+    def _disposition_help(_args: argparse.Namespace) -> None:
+        p_disp.print_help()
+
+    p_disp.set_defaults(func=_disposition_help)
+    disp_sub = p_disp.add_subparsers(dest="disposition_command")
+    p_walk = disp_sub.add_parser(
+        "walk",
+        help="Interactive axis-based disposition interview (TTY required)",
+    )
+    p_walk.add_argument(
+        "--session-dir",
+        type=str,
+        default="oracle_sessions/disposition-default",
+        help="Session root (append-only event log)",
+    )
+    p_walk.add_argument("--actor", type=str, default="operator", help="Human actor name")
+    p_walk.add_argument(
+        "--units",
+        type=str,
+        default=None,
+        help="Comma-separated unit ids to walk (e.g. AMR-1,AMR-14,AMR-17)",
+    )
+    p_walk.add_argument(
+        "--export-dir",
+        type=str,
+        default=None,
+        help="If set, write CSV/DOCX exports after the walk",
+    )
+    p_walk.add_argument(
+        "--repin",
+        action="store_true",
+        help="Allow re-pinning when builtin pack content hash changed",
+    )
+    p_walk.add_argument(
+        "--max-units",
+        type=int,
+        default=None,
+        help="Optional cap on units walked (for smoke runs)",
+    )
+    p_walk.add_argument(
+        "--advisor",
+        action="store_true",
+        help="Enable advisor panes (DeterministicAdvisor; keyless by default)",
+    )
+    p_walk.add_argument(
+        "--live-advisor",
+        action="store_true",
+        help="Use LiveAdvisor (requires ANTHROPIC_API_KEY / RDW_ADVISOR_MODEL)",
+    )
+    p_walk.add_argument(
+        "--allow-builtin",
+        action="store_true",
+        help="Explicitly allow the KNOWN-CORRUPT builtin 6030 pack (AR4)",
+    )
+    p_walk.set_defaults(func=_cmd_disposition_walk)
+
+    p_golden = disp_sub.add_parser(
+        "golden",
+        help="Replay scrubbed Appendix A/B golden session (AMR-1/14/17)",
+    )
+    p_golden.add_argument(
+        "--session-dir",
+        type=str,
+        default="oracle_sessions/rdw-golden",
+        help="Session root",
+    )
+    p_golden.add_argument(
+        "--export-dir",
+        type=str,
+        default="oracle_sessions/rdw-golden/export",
+        help="Export directory for CSV/DOCX/XLSX",
+    )
+    p_golden.set_defaults(func=_cmd_disposition_golden)
+
+    p_export = disp_sub.add_parser(
+        "export",
+        help="Export supplier matrix suite from an existing session",
+    )
+    p_export.add_argument("--session-dir", type=str, required=True)
+    p_export.add_argument("--export-dir", type=str, required=True)
+    p_export.add_argument("--actor", type=str, default="operator")
+    p_export.add_argument(
+        "--allow-builtin",
+        action="store_true",
+        help="Explicitly allow the KNOWN-CORRUPT builtin 6030 pack (AR4)",
+    )
+    p_export.add_argument(
+        "--include-draft",
+        action="store_true",
+        help="Export rows not yet review-accepted, watermarked "
+        "DRAFT — NOT RELEASABLE (default refuses them; M4)",
+    )
+    p_export.set_defaults(func=_cmd_disposition_export)
+
+    p_audit = disp_sub.add_parser(
+        "audit",
+        help="Print audit lineage for a unit (FR-017)",
+    )
+    p_audit.add_argument("--session-dir", type=str, required=True)
+    p_audit.add_argument("--unit", type=str, required=True)
+    p_audit.add_argument("--actor", type=str, default="auditor")
+    p_audit.add_argument(
+        "--allow-builtin",
+        action="store_true",
+        help="Explicitly allow the KNOWN-CORRUPT builtin 6030 pack (AR4)",
+    )
+    p_audit.set_defaults(func=_cmd_disposition_audit)
+
+    # Stage D — context library
+    p_lib = disp_sub.add_parser(
+        "library",
+        help="Cross-project context library export/import",
+    )
+    lib_sub = p_lib.add_subparsers(dest="library_command")
+
+    def _lib_help(_args: argparse.Namespace) -> None:
+        p_lib.print_help()
+
+    p_lib.set_defaults(func=_lib_help)
+
+    p_lib_export = lib_sub.add_parser(
+        "export", help="Export scrubbed learning bundle from a session"
+    )
+    p_lib_export.add_argument("session_dir", type=str)
+    p_lib_export.add_argument("out_json", type=str)
+    p_lib_export.add_argument("--actor", type=str, default="operator")
+    p_lib_export.add_argument(
+        "--allow-builtin",
+        action="store_true",
+        help="Explicitly allow the KNOWN-CORRUPT builtin 6030 pack (AR4/N8)",
+    )
+    p_lib_export.set_defaults(func=_cmd_disposition_library_export)
+
+    p_lib_import = lib_sub.add_parser(
+        "import", help="Import library as assumption facts into a session"
+    )
+    p_lib_import.add_argument("session_dir", type=str)
+    p_lib_import.add_argument("library_json", type=str)
+    p_lib_import.add_argument("--actor", type=str, default="operator")
+    p_lib_import.add_argument(
+        "--allow-builtin",
+        action="store_true",
+        help="Explicitly allow the KNOWN-CORRUPT builtin 6030 pack (AR4/N8)",
+    )
+    p_lib_import.set_defaults(func=_cmd_disposition_library_import)
+
+    # Corpus intake — D-3 scrub assist (CS1-CS5)
+    p_corpus = disp_sub.add_parser(
+        "corpus",
+        help="Engagement-corpus intake: D-3 scrub + reconciliation check",
+    )
+    corpus_sub = p_corpus.add_subparsers(dest="corpus_command")
+
+    def _corpus_help(_args: argparse.Namespace) -> None:
+        p_corpus.print_help()
+
+    p_corpus.set_defaults(func=_corpus_help)
+
+    p_cs = corpus_sub.add_parser(
+        "scrub",
+        help="Map raw export to corpus schema, replace terms, scan, write",
+    )
+    p_cs.add_argument("raw", type=str, help="Raw engagement export (.csv/.xlsx)")
+    p_cs.add_argument("out", type=str, help="Scrubbed corpus CSV to write")
+    p_cs.add_argument(
+        "--terms",
+        type=str,
+        default=None,
+        help="Operator terms file OUTSIDE the repo (term or term=Replacement per line)",
+    )
+    p_cs.add_argument(
+        "--map",
+        action="append",
+        default=None,
+        metavar="RAW=FIELD",
+        help="Column mapping override, e.g. --map \"Req ID=requirement_id\"",
+    )
+    p_cs.add_argument(
+        "--apply",
+        action="store_true",
+        help="Write the output (only on a zero-violation scan; default dry run)",
+    )
+    p_cs.add_argument(
+        "--no-terms",
+        action="store_true",
+        help="Attest the corpus contains no engagement names (writing "
+        "without a terms file is otherwise refused — patterns cannot "
+        "catch bare names)",
+    )
+    p_cs.set_defaults(func=_cmd_disposition_corpus_scrub)
+
+    p_cc = corpus_sub.add_parser(
+        "check",
+        help="Load a corpus file and report reconciliation vs engagement targets",
+    )
+    p_cc.add_argument("corpus", type=str)
+    p_cc.set_defaults(func=_cmd_disposition_corpus_check)
 
     args = parser.parse_args()
 

@@ -1,0 +1,794 @@
+{
+  "fixture_id": "oracle_eval_cs6030",
+  "version": "0.1.0",
+  "classification": "BoundState Proprietary",
+  "rights_status": "scrubbed-for-ci \u2014 no customer or program identifiers; counsel sign-off tracked per spec \u00a714.4/\u00a714.7 (D-3)",
+  "scrub_note": "Customer referenced generically as prime contractor throughout. Unscrubbed engagement records remain outside the product repo.",
+  "created": "2026-07-28",
+  "description": "Labeled regression cases from a complete manual Oracle run: NASA-STD-6030 (115 requirements) and NASA-STD-6033 (31 requirements) dispositioned against a cold spray solid-state additive process for a prime-contractor supplier flowdown. Initial dispositions were proposed by an LLM reading the controlled standards; corrections came from independent expert review. Cases marked expert_corrected are the highest-value regression targets: they were produced with high apparent fluency and were wrong.",
+  "corpus": {
+    "primary_standard": {
+      "id": "NASA-STD-6030",
+      "revision": "Baseline",
+      "approved": "2021-04-21",
+      "requirement_count": 115,
+      "requirement_prefix": "AMR"
+    },
+    "secondary_standard": {
+      "id": "NASA-STD-6033",
+      "revision": "Baseline",
+      "approved": "2021-04-21",
+      "revalidated": "2026-01-07",
+      "requirement_count": 31,
+      "requirement_prefix": "EFCR"
+    }
+  },
+  "declared_scope": [
+    {
+      "id": "SD-1",
+      "declaration": "Freestanding parts; forming mandrel removed before delivery",
+      "type": "policy"
+    },
+    {
+      "id": "SD-2",
+      "declaration": "Classes A, B, C pursued in phases; customer assigns class",
+      "type": "policy"
+    },
+    {
+      "id": "SD-3",
+      "declaration": "Metallic material/process combinations in an accepted process spec",
+      "type": "policy"
+    },
+    {
+      "id": "SD-4",
+      "declaration": "Feedstock not reused; overspray quarantined and scrapped",
+      "type": "policy"
+    },
+    {
+      "id": "SD-5",
+      "declaration": "New part production only; no repair",
+      "type": "policy"
+    },
+    {
+      "id": "SD-6",
+      "declaration": "Qualified deposition parameters fixed during build",
+      "type": "policy"
+    },
+    {
+      "id": "SD-7",
+      "declaration": "Lot-provisional allowables not used for Class A or B under the no-agreement route",
+      "type": "derived",
+      "note": "Discovered during review, not declared at intake. See case 21."
+    }
+  ],
+  "final_counts": {
+    "NASA-STD-6030": {
+      "CW": 85,
+      "MI": 6,
+      "EX": 7,
+      "NA": 17,
+      "total": 115
+    },
+    "NASA-STD-6033": {
+      "CW": 23,
+      "MI": 4,
+      "EX": 1,
+      "NA": 3,
+      "total": 31
+    },
+    "note": "Counts are post-review and pending final engineering confirmation. An earlier narrative asserted 61/38/16 for the primary standard; see case 22."
+  },
+  "cases": [
+    {
+      "case_id": 1,
+      "requirement_id": "AMR-1",
+      "standard": "NASA-STD-6030",
+      "category": "authority_dependent",
+      "label": "expert_corrected",
+      "severity": "critical",
+      "proposed": {
+        "code": "CW",
+        "subject": "Additive Manufacturing Control Plan approval"
+      },
+      "corrected": {
+        "code": "EX",
+        "subject": "Tailoring documentation and approval"
+      },
+      "failure_modes": [
+        "requirement_subject_misidentified",
+        "authority_dependent_coded_CW"
+      ],
+      "spec_rules": [
+        "4.1",
+        "7.1"
+      ],
+      "detectable_mechanically": true,
+      "notes": "Two compounding errors. The requirement's subject was recalled rather than extracted, and the requirement names an approval chain (program/project, M&P organization, Technical Authority) that was never exercised. No document can demonstrate an unexercised approval. Correct disposition is EX under the alternative contractual route."
+    },
+    {
+      "case_id": 2,
+      "requirement_id": "AMR-52",
+      "standard": "NASA-STD-6030",
+      "category": "definitional_remap",
+      "label": "expert_corrected",
+      "severity": "high",
+      "proposed": {
+        "code": "MI",
+        "subject": "Process requalification, melt-pool characterization",
+        "exception_membership": "E-3"
+      },
+      "corrected": {
+        "code": "NA",
+        "subject": "Quality of the as-built material, polymer",
+        "exception_membership": null
+      },
+      "failure_modes": [
+        "requirement_subject_misidentified",
+        "code_and_exception_membership_contradiction"
+      ],
+      "spec_rules": [
+        "5.1",
+        "9"
+      ],
+      "detectable_mechanically": true,
+      "notes": "Assumed to be the requalification counterpart of the preceding requirement by numeric adjacency. It is the polymer counterpart. The requirement was simultaneously coded NA and cited inside an exception entry, a single-code violation the consistency gate must block."
+    },
+    {
+      "case_id": 3,
+      "requirement_id": "AMR-51(e)",
+      "standard": "NASA-STD-6030",
+      "category": "definitional_remap",
+      "label": "correct_positive",
+      "severity": "high",
+      "proposed": {
+        "code": "MI",
+        "scope_of_remap": "subparagraph (e) only"
+      },
+      "corrected": {
+        "code": "MI",
+        "scope_of_remap": "subparagraph (e) only"
+      },
+      "failure_modes": [],
+      "spec_rules": [
+        "5.1"
+      ],
+      "detectable_mechanically": true,
+      "notes": "Reference case for subparagraph-level remap. Subparagraph (e) requires melt-pool depth and overlap metrics with no solid-state referent; subparagraphs (a) through (d) apply unchanged. A whole-requirement remap would have silently voided four applicable controls. Regression must confirm remap granularity is preserved."
+    },
+    {
+      "case_id": 4,
+      "requirement_id": "AMR-39",
+      "standard": "NASA-STD-6030",
+      "category": "na_vs_zero_limit",
+      "label": "expert_corrected",
+      "severity": "high",
+      "proposed": {
+        "code": "NA",
+        "basis": "SD-4 no reuse"
+      },
+      "corrected": {
+        "code": "MI",
+        "basis": "controlled reuse limit of zero with quarantine, scrap, material balance, and audit evidence"
+      },
+      "failure_modes": [
+        "policy_scope_coded_as_physical_impossibility"
+      ],
+      "spec_rules": [
+        "6.1",
+        "3.2"
+      ],
+      "detectable_mechanically": true,
+      "notes": "The process is physically capable of powder recovery, so the requirement applies. NA is the audit-fragile disposition: an auditor observing recovered powder anywhere in the facility defeats it. MI with a zero limit is evidenced and defensible. Detection requires the process capability model from intake, which is why scope intake is blocking."
+    },
+    {
+      "case_id": 5,
+      "requirement_id": "AMR-66",
+      "standard": "NASA-STD-6030",
+      "category": "na_vs_zero_limit",
+      "label": "expert_corrected",
+      "severity": "high",
+      "proposed": {
+        "code": "NA",
+        "basis": "requirement conditioned on processes operated with reuse"
+      },
+      "corrected": {
+        "code": "MI",
+        "basis": "zero-reuse limit plus feedstock lot traceability through the end-item data package"
+      },
+      "failure_modes": [
+        "policy_scope_coded_as_physical_impossibility"
+      ],
+      "spec_rules": [
+        "6.1"
+      ],
+      "detectable_mechanically": true,
+      "notes": "Same failure as case 4. Paired cases: a regression that fixes one and not the other indicates the rule was pattern-matched to a requirement ID rather than to the capability model."
+    },
+    {
+      "case_id": 6,
+      "requirement_id": "AMR-45",
+      "standard": "NASA-STD-6030",
+      "category": "voluntary_expansion",
+      "label": "expert_corrected",
+      "severity": "high",
+      "proposed": {
+        "code": "CW",
+        "exception_membership": "E-8",
+        "narrative": "declines the exception paths the requirement provides"
+      },
+      "corrected": {
+        "code": "CW",
+        "exception_membership": null,
+        "narrative": "the requirement's own exception provisions remain available and are not waived"
+      },
+      "failure_modes": [
+        "exception_entry_for_non_exception",
+        "relief_path_foreclosed"
+      ],
+      "spec_rules": [
+        "9",
+        "10.1"
+      ],
+      "detectable_mechanically": true,
+      "notes": "An exception entry was constructed around a requirement to which no exception was taken, and the narrative volunteered away a relief path the standard grants. Both are mechanical checks: CW rows must not appear in exception entries, and dispositions that foreclose a standard-provided relief path must be flagged for explicit reviewer election."
+    },
+    {
+      "case_id": 7,
+      "requirement_id": "AMR-46",
+      "standard": "NASA-STD-6030",
+      "category": "code_narrative_contradiction",
+      "label": "expert_corrected",
+      "severity": "medium",
+      "proposed": {
+        "code": "MI",
+        "narrative": "no relief is requested from any obligation of this requirement"
+      },
+      "corrected": {
+        "code": "CW",
+        "narrative": "full declaration and qualification; comply as written"
+      },
+      "failure_modes": [
+        "code_contradicts_narrative"
+      ],
+      "spec_rules": [
+        "9"
+      ],
+      "detectable_mechanically": true,
+      "notes": "A row whose narrative asserts full compliance cannot carry an exception code. Trivially detectable and inflates the exception count, which weakens the package by making the supplier look more exceptional than it is."
+    },
+    {
+      "case_id": 8,
+      "requirement_id": "AMR-63",
+      "standard": "NASA-STD-6030",
+      "category": "authority_dependent",
+      "label": "expert_corrected",
+      "severity": "critical",
+      "proposed": {
+        "code": "MI",
+        "basis": "submittal routing change only; package elevatable to the agency without rework"
+      },
+      "corrected": {
+        "code": "EX",
+        "basis": "no agreement will be prepared or submitted; relief requested"
+      },
+      "failure_modes": [
+        "exception_downgraded_to_routing_change",
+        "unsupportable_forward_claim"
+      ],
+      "spec_rules": [
+        "4.1",
+        "2.2"
+      ],
+      "detectable_mechanically": true,
+      "notes": "The requirement names submission to the agency for approval. Declining to submit is relief, not a routing preference. The MI framing also carried a forward claim (elevatable without rework) that nothing in evidence supported. Softening an EX into an MI is the most commercially tempting and most dangerous error class in the product."
+    },
+    {
+      "case_id": 9,
+      "requirement_id": "AMR-84",
+      "standard": "NASA-STD-6030",
+      "category": "voluntary_expansion",
+      "label": "expert_corrected",
+      "severity": "medium",
+      "proposed": {
+        "code": "NA",
+        "narrative": "polymer-section requirement, adopted voluntarily for metallic use and extended to the highest part class"
+      },
+      "corrected": {
+        "code": "NA",
+        "narrative": "polymer-section requirement, not adopted as a metallic flowdown"
+      },
+      "failure_modes": [
+        "voluntary_control_entered_contractual_baseline"
+      ],
+      "spec_rules": [
+        "10.1"
+      ],
+      "detectable_mechanically": true,
+      "notes": "Volunteering a requirement the standard does not levy, and extending it beyond the class the requirement itself targets, converts prudent practice into permanent obligation. The underlying engineering concern is legitimate and belongs in internal process documents, classified as disclosed rather than integral."
+    },
+    {
+      "case_id": 10,
+      "requirement_id": "AMR-69",
+      "standard": "NASA-STD-6030",
+      "category": "voluntary_expansion",
+      "label": "expert_corrected",
+      "severity": "medium",
+      "proposed": {
+        "code": "CW",
+        "narrative": "the relief this requirement offers is declined; additional characterization is mandatory"
+      },
+      "corrected": {
+        "code": "CW",
+        "narrative": "anisotropy evaluated and incorporated by the data path the requirement provides; no broader commitment created"
+      },
+      "failure_modes": [
+        "chosen_means_of_compliance_framed_as_added_obligation"
+      ],
+      "spec_rules": [
+        "10.1"
+      ],
+      "detectable_mechanically": false,
+      "notes": "Same technical behavior, two framings. Framing a chosen compliance path as declined relief gratuitously surrenders an option. Requires reviewer judgment; Oracle can flag the pattern (narrative contains decline/waive language on a CW row) but cannot auto-correct."
+    },
+    {
+      "case_id": 11,
+      "requirement_id": "AMR-17",
+      "standard": "NASA-STD-6030",
+      "category": "separate_disposition",
+      "label": "correct_positive",
+      "severity": "critical",
+      "proposed": {
+        "code": "EX",
+        "dispositioned_separately_from": "AMR-18"
+      },
+      "corrected": {
+        "code": "EX",
+        "dispositioned_separately_from": "AMR-18"
+      },
+      "failure_modes": [],
+      "spec_rules": [
+        "9"
+      ],
+      "detectable_mechanically": true,
+      "notes": "Reference case. Two adjacent requirements impose different obligations (quantitative detection capability versus a referenced special-NDE standard). The coverage-limitation clause of the first does not satisfy the second. Regression must confirm they never collapse into one entry."
+    },
+    {
+      "case_id": 12,
+      "requirement_id": "AMR-17",
+      "standard": "NASA-STD-6030",
+      "category": "scope_overreach_in_narrative",
+      "label": "expert_corrected",
+      "severity": "high",
+      "proposed": {
+        "narrative": "the requirement applies to fracture-critical parts"
+      },
+      "corrected": {
+        "narrative": "the requirement applies to all parts of the highest class, and adds critical-initial-flaw detection for fracture-critical damage-tolerant parts"
+      },
+      "failure_modes": [
+        "class_conflated_with_fracture_classification"
+      ],
+      "spec_rules": [
+        "7.1"
+      ],
+      "detectable_mechanically": false,
+      "notes": "Part class and fracture-control classification are separate axes assigned by different authorities. Conflating them narrows the requirement's stated applicability and understates the obligation. Extraction of the requirement's own applicability clause prevents this."
+    },
+    {
+      "case_id": 13,
+      "requirement_id": "AMR-18",
+      "standard": "NASA-STD-6030",
+      "category": "unsupportable_universal_claim",
+      "label": "expert_corrected",
+      "severity": "high",
+      "proposed": {
+        "narrative": "no representative detection-capability demonstration exists for this flaw type"
+      },
+      "corrected": {
+        "narrative": "the supplier has not demonstrated qualified detection capability for this flaw, material, and geometry population"
+      },
+      "failure_modes": [
+        "universal_negative_asserted_without_basis"
+      ],
+      "spec_rules": [
+        "7.1",
+        "8"
+      ],
+      "detectable_mechanically": true,
+      "notes": "A claim about the state of the world versus a claim about the supplier's own evidence. The first is unfalsifiable by the supplier and invites a reviewer to produce a counterexample; the second is exactly true and sufficient. Detect by flagging universal negatives in exception rationale."
+    },
+    {
+      "case_id": 14,
+      "requirement_id": "EFCR-5",
+      "standard": "NASA-STD-6033",
+      "category": "quantitative_reasoning_error",
+      "label": "expert_corrected",
+      "severity": "medium",
+      "proposed": {
+        "code": "MI",
+        "narrative": "a literal reading requires seven machines, one per material family"
+      },
+      "corrected": {
+        "code": "MI",
+        "narrative": "the requirement is one machine per material; families comprise multiple materials each, so the family count does not determine the machine count"
+      },
+      "failure_modes": [
+        "unit_of_analysis_error"
+      ],
+      "spec_rules": [
+        "5.1"
+      ],
+      "detectable_mechanically": true,
+      "notes": "The requirement's unit is material; the scope declaration's unit is material family. The stated machine count was wrong and understated the burden the tailoring relieves, weakening the argument. Detect by unit checking between requirement text and scope declaration."
+    },
+    {
+      "case_id": 15,
+      "requirement_id": "EFCR-5",
+      "standard": "NASA-STD-6033",
+      "category": "terminology_precision",
+      "label": "expert_corrected",
+      "severity": "low",
+      "proposed": {
+        "term": "wetted components"
+      },
+      "corrected": {
+        "term": "powder-contact components"
+      },
+      "failure_modes": [
+        "borrowed_terminology_from_wrong_domain"
+      ],
+      "spec_rules": [
+        "5.1"
+      ],
+      "detectable_mechanically": true,
+      "notes": "Fluid-service terminology imported into a dry powder process. Low severity but a credibility signal to a domain reviewer, and it makes the controlled component population ambiguous."
+    },
+    {
+      "case_id": 16,
+      "requirement_id": "EFCR-1",
+      "standard": "NASA-STD-6033",
+      "category": "authority_dependent",
+      "label": "expert_corrected",
+      "severity": "critical",
+      "proposed": {
+        "code": null,
+        "note": "not dispositioned"
+      },
+      "corrected": {
+        "code": "EX",
+        "basis": "the approval chain named by the requirement is not exercised under the alternative contractual route"
+      },
+      "failure_modes": [
+        "authority_dependent_requirement_missed_in_secondary_standard"
+      ],
+      "spec_rules": [
+        "4.1",
+        "9"
+      ],
+      "detectable_mechanically": true,
+      "notes": "The authority-dependency analysis was performed on the primary standard only. The secondary standard carries its own parallel approval chain. Any authority scan must run across every standard in the levied set."
+    },
+    {
+      "case_id": 17,
+      "requirement_id": "EFCR-2",
+      "standard": "NASA-STD-6033",
+      "category": "cross_standard_dependency",
+      "label": "expert_corrected",
+      "severity": "high",
+      "proposed": {
+        "code": "CW"
+      },
+      "corrected": {
+        "code": "MI",
+        "basis": "the control plan is maintained under the quality system but is not linked to a control plan under the primary standard, because no such plan exists under the alternative route"
+      },
+      "failure_modes": [
+        "dependency_on_artifact_that_route_eliminates"
+      ],
+      "spec_rules": [
+        "11",
+        "3.2"
+      ],
+      "detectable_mechanically": true,
+      "notes": "The requirement presupposes an artifact that the chosen contractual route eliminates. Any requirement whose text depends on an artifact excluded by an accepted exception must be reopened. This is the dependency-graph requirement operating across standards."
+    },
+    {
+      "case_id": 18,
+      "requirement_id": "EFCR-7",
+      "standard": "NASA-STD-6033",
+      "category": "na_physical_impossibility",
+      "label": "correct_positive",
+      "severity": "low",
+      "proposed": {
+        "code": "NA",
+        "basis": "wire feedstock requirement; process is powder-fed"
+      },
+      "corrected": {
+        "code": "NA",
+        "basis": "wire feedstock requirement; process is powder-fed"
+      },
+      "failure_modes": [],
+      "spec_rules": [
+        "6.1"
+      ],
+      "detectable_mechanically": true,
+      "notes": "Reference case for genuine NA by physical impossibility. Contrast with cases 4 and 5. Regression must confirm Oracle distinguishes this from policy-based scope."
+    },
+    {
+      "case_id": 19,
+      "requirement_id": "AMR-21",
+      "standard": "NASA-STD-6030",
+      "category": "scope_decision_required",
+      "label": "must_not_propose",
+      "severity": "critical",
+      "proposed": {
+        "code": "NA",
+        "confidence": "LOW",
+        "basis": "assumed the supplier will not credit in-process monitoring for part acceptance"
+      },
+      "corrected": {
+        "code": "OPEN",
+        "sub_reason": "scope_decision_not_made"
+      },
+      "failure_modes": [
+        "proposed_code_on_an_undecided_scope_question"
+      ],
+      "spec_rules": [
+        "8",
+        "2.1"
+      ],
+      "detectable_mechanically": true,
+      "paired_with": "EFCR-16",
+      "notes": "Whether in-process monitoring data is credited for part acceptance is a business and qualification decision with large downstream consequence. Presenting a proposed code invites confirmation of a guess. Oracle must render this as a question. The paired requirement in the secondary standard must receive the same answer; divergence is a consistency failure."
+    },
+    {
+      "case_id": 20,
+      "requirement_id": "AMR-82",
+      "standard": "NASA-STD-6030",
+      "category": "scope_decision_required",
+      "label": "must_not_propose",
+      "severity": "high",
+      "proposed": {
+        "code": "CW",
+        "confidence": "LOW",
+        "basis": "conditional on whether joining operations are in scope"
+      },
+      "corrected": {
+        "code": "OPEN",
+        "sub_reason": "scope_decision_not_made"
+      },
+      "failure_modes": [
+        "proposed_code_on_an_undecided_scope_question"
+      ],
+      "spec_rules": [
+        "8"
+      ],
+      "detectable_mechanically": true,
+      "notes": "A conditional disposition is not a disposition. If the answer changes the code, the code is OPEN until the answer exists."
+    },
+    {
+      "case_id": 21,
+      "requirement_id": "AMR-65",
+      "standard": "NASA-STD-6030",
+      "category": "cross_standard_dependency",
+      "label": "expert_discovered",
+      "severity": "critical",
+      "proposed": {
+        "code": "CW",
+        "basis": "lot-mature allowables required for the highest class"
+      },
+      "corrected": {
+        "code": "CW",
+        "basis": "same, plus derived scope declaration SD-7",
+        "derived_scope": "the standard's lot-provisional path for the middle class requires an approved part-specific agreement; the alternative contractual route eliminates that agreement, so the lot-provisional bridge is unavailable without separate written customer disposition"
+      },
+      "failure_modes": [
+        "second_order_consequence_of_an_accepted_exception_not_traced"
+      ],
+      "spec_rules": [
+        "11",
+        "3.2"
+      ],
+      "detectable_mechanically": true,
+      "notes": "Highest-value case in the fixture. The consequence is not in this requirement's text; it emerges from an accepted exception elsewhere eliminating a mechanism this requirement's relief path depends on. Purely graph-derived, invisible to per-requirement reading, and it carries real schedule cost. Oracle must propagate accepted exceptions through the dependency graph and reopen every disposition that relied on an eliminated mechanism."
+    },
+    {
+      "case_id": 22,
+      "requirement_id": null,
+      "standard": "package",
+      "category": "fabricated_summary",
+      "label": "expert_corrected",
+      "severity": "critical",
+      "proposed": {
+        "narrative_counts": {
+          "CW": 61,
+          "tailored": 38,
+          "NA": 16,
+          "total": 115
+        }
+      },
+      "corrected": {
+        "narrative_counts": {
+          "CW": 85,
+          "MI": 6,
+          "EX": 7,
+          "NA": 17,
+          "total": 115
+        },
+        "note": "computed from the matrix"
+      },
+      "failure_modes": [
+        "counts_asserted_without_a_source_matrix",
+        "fabricated_counts_survived_multiple_revisions"
+      ],
+      "spec_rules": [
+        "7.1",
+        "12"
+      ],
+      "detectable_mechanically": true,
+      "notes": "A narrative summarized a disposition split for a matrix that did not exist. The split survived three document revisions and a leadership briefing before anyone checked. This case alone justifies the rule that every count is computed at render time from the matrix and never typed."
+    },
+    {
+      "case_id": 23,
+      "requirement_id": null,
+      "standard": "package",
+      "category": "phantom_reference",
+      "label": "expert_corrected",
+      "severity": "critical",
+      "proposed": {
+        "references": [
+          "exception register, cited by name and item range",
+          "compliance matrix, cited with a generation date",
+          "secondary standard annex, cited as attached"
+        ]
+      },
+      "corrected": {
+        "references": [],
+        "note": "none of the three artifacts existed"
+      },
+      "failure_modes": [
+        "referenced_artifacts_do_not_exist",
+        "downstream_drafts_inherited_the_citations"
+      ],
+      "spec_rules": [
+        "7.2"
+      ],
+      "detectable_mechanically": true,
+      "notes": "Three attachments were cited by name, described by content, and used to support a claim of complete disposition. None existed. Reference emission must be gated on artifact resolution in the controlled document system; unresolvable reference yields OPEN, never a citation."
+    },
+    {
+      "case_id": 24,
+      "requirement_id": null,
+      "standard": "external_reference",
+      "category": "recalled_citation",
+      "label": "expert_corrected",
+      "severity": "high",
+      "proposed": {
+        "handbook_title": "Guidance on Proof Testing"
+      },
+      "corrected": {
+        "handbook_title": "Guidance on Strength, Fatigue, and Fracture Control Requirements for Additively Manufactured Spaceflight Hardware",
+        "revision": "Baseline",
+        "approved": "2024-08-12"
+      },
+      "failure_modes": [
+        "citation_inherited_from_a_prior_summary_and_never_verified"
+      ],
+      "spec_rules": [
+        "7.1",
+        "11"
+      ],
+      "detectable_mechanically": true,
+      "notes": "The incorrect title entered from a source memo and propagated through four document revisions unchecked. Every external citation must resolve against the corpus at current issuance with revision, or be flagged unverified."
+    },
+    {
+      "case_id": 25,
+      "requirement_id": null,
+      "standard": "NASA-STD-6030",
+      "category": "false_generalization",
+      "label": "expert_corrected",
+      "severity": "high",
+      "proposed": {
+        "argument": "every enumerated process in the standard has a melt pool, therefore the target process is outside the enumerated set"
+      },
+      "corrected": {
+        "argument": "the standard's own definition of the relevant process class requires focused thermal energy fusing material by melting; the target process consolidates in the solid state and does not match the definition"
+      },
+      "failure_modes": [
+        "inductive_generalization_over_enumerated_set",
+        "counterexample_present_in_the_same_table"
+      ],
+      "spec_rules": [
+        "5.2"
+      ],
+      "detectable_mechanically": true,
+      "notes": "The generalization was false on its face: the enumerated set included non-fusion polymer processes. The definition-based argument is both true and stronger. Exclusion arguments must be built from the definitions section and cite the locator, never induced over a table."
+    },
+    {
+      "case_id": 26,
+      "requirement_id": null,
+      "standard": "NASA-STD-6030",
+      "category": "authority_dependent",
+      "label": "expert_discovered",
+      "severity": "critical",
+      "proposed": {
+        "note": "the approving organization's identity was never examined; the package assumed the customer held the role"
+      },
+      "corrected": {
+        "note": "the standard references the cognizant engineering organization 109 times; 18 requirements name an approving authority in their text; the role's identity determines part classification, part acceptance, readiness review, and configuration control, and was never established"
+      },
+      "affected_requirements": [
+        "AMR-2",
+        "AMR-3",
+        "AMR-4",
+        "AMR-5",
+        "AMR-13",
+        "AMR-14",
+        "AMR-21",
+        "AMR-34",
+        "AMR-35",
+        "AMR-58",
+        "AMR-60",
+        "AMR-67",
+        "AMR-97",
+        "AMR-99",
+        "AMR-110",
+        "AMR-111",
+        "AMR-112",
+        "AMR-113"
+      ],
+      "failure_modes": [
+        "approval_role_assumed_not_identified",
+        "assumption_embedded_in_scope_declarations_without_being_stated"
+      ],
+      "spec_rules": [
+        "4.1",
+        "4.2"
+      ],
+      "detectable_mechanically": true,
+      "notes": "The single highest-consequence finding, discovered last, after a full package had been drafted on top of the unexamined assumption. The assumption had silently entered a scope declaration (the customer assigns part class) and an exception entry (the customer-designated cognizant organization) without ever being stated as an assumption or tested. The authority report must render before the disposition matrix so this surfaces at intake."
+    }
+  ],
+  "regression_policy": {
+    "blocking": "Any change to disposition logic that regresses a case labeled expert_corrected or expert_discovered blocks merge.",
+    "must_not_propose": "Cases labeled must_not_propose assert that Oracle emits OPEN and a reviewer question, not a code. Emitting any code on these cases is a failure regardless of which code.",
+    "correct_positive": "Cases labeled correct_positive assert behavior that already worked. Regressing one indicates a fix over-generalized.",
+    "coverage_note": "This fixture covers 26 cases from one run against two related standards in one process domain. It is not a representative sample of Oracle's problem space. Treat passing this fixture as necessary, never sufficient."
+  },
+  "failure_mode_index": {
+    "authority": [
+      "authority_dependent_coded_CW",
+      "authority_dependent_requirement_missed_in_secondary_standard",
+      "approval_role_assumed_not_identified",
+      "exception_downgraded_to_routing_change"
+    ],
+    "provenance": [
+      "requirement_subject_misidentified",
+      "counts_asserted_without_a_source_matrix",
+      "referenced_artifacts_do_not_exist",
+      "citation_inherited_from_a_prior_summary_and_never_verified"
+    ],
+    "scope": [
+      "policy_scope_coded_as_physical_impossibility",
+      "proposed_code_on_an_undecided_scope_question",
+      "unit_of_analysis_error"
+    ],
+    "consistency": [
+      "code_and_exception_membership_contradiction",
+      "code_contradicts_narrative",
+      "exception_entry_for_non_exception"
+    ],
+    "commercial_exposure": [
+      "voluntary_control_entered_contractual_baseline",
+      "relief_path_foreclosed",
+      "chosen_means_of_compliance_framed_as_added_obligation"
+    ],
+    "reasoning": [
+      "inductive_generalization_over_enumerated_set",
+      "universal_negative_asserted_without_basis",
+      "class_conflated_with_fracture_classification",
+      "second_order_consequence_of_an_accepted_exception_not_traced",
+      "dependency_on_artifact_that_route_eliminates"
+    ]
+  }
+}

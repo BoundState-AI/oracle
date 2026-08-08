@@ -25,6 +25,7 @@ venv/
 
 # Claude Code
 .claude/
+.playwright-mcp/
 
 # ORACLE runtime artifacts (generated, not committed)
 oracle_packs/
@@ -40,3 +41,5 @@ Thumbs.db
 hearth_audit/
 .pytest_cache/
 oracle_server.log
+.coverage
+tests/.tmp/

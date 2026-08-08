@@ -1,5 +1,0 @@
-account_id,parcel_number,situs_address,situs_city,situs_zip,latitude,longitude,total_mill_levy,metro_district_mill_levy,tax_district,last_sale_price,last_sale_date
-A001,R1234567,123 Shadow Mountain Drive,Berthoud,80513,40.3083,-105.0811,95.4,52,GREYROCK METRO DIST 1,685000,2023-06-15
-A002,R2345678,456 Ursa Major Lane,Berthoud,80513,40.3121,-105.0750,108.2,63,GREYROCK METRO DIST 2,712500,2024-03-01
-A003,R3456789,789 County Road 8E,Loveland,80537,40.3666,-105.1201,68.9,0,LOVELAND RURAL,540000,2019-09-30
-A004,R4567890,1010 Foothills Court,Loveland,80538,40.4233,-105.1452,92.1,44,FOOTHILLS METRO,605000,2022-11-12

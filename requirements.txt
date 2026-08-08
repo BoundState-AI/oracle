@@ -2,6 +2,7 @@ anthropic>=0.80.0
 openai>=1.50.0
 httpx>=0.27.0
 PyMuPDF>=1.24.0
+pdfplumber>=0.11.0
 jsonschema>=4.20.0
 cryptography>=42.0.0
 python-docx>=1.1.2
@@ -10,3 +11,8 @@ pydantic>=2.10.0
 fastapi>=0.115.0
 uvicorn>=0.34.0
 python-multipart>=0.0.20
+# Imported by pipeline scaffold + its tests. Was absent here while present in
+# the shared dev venv, so collection passed locally and aborted in CI -- taking
+# the whole suite down with it (pytest exits 2 on a collection error, so the
+# coverage floor never ran either). Keep declared even if only tests import it.
+PyYAML>=6.0

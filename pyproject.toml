@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "boundstate-hearth"
+name = "boundstate-oracle"
 version = "0.1.0"
-description = "HEARTH — Buyer-Side Real Estate Intelligence Platform (ships with the ORACLE review engine)"
+description = "ORACLE — multi-oracle adversarial document review, rule-pack generation, and standards disposition"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "LicenseRef-Proprietary"
@@ -44,12 +44,11 @@ dev = [
 ]
 
 [project.scripts]
-hearth = "hearth.cli:main"
 oracle = "oracle.cli:main"
 sentinel-tocr = "sentinel.tocr.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["oracle", "sentinel", "hearth"]
+packages = ["oracle", "sentinel"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
