@@ -2679,11 +2679,8 @@ def _corroboration_note(sources: list[str]) -> str | None:
 
 def _format_reviewer_pool_note(session: Any) -> list[str]:
     """One-line disclosure of reviewer vendor diversity (AUDIT A6)."""
-    from oracle.oracle2 import ORACLE_ROSTER
-    reviewers = [
-        cfg for cfg in ORACLE_ROSTER.values()
-        if cfg.role not in ("coordinator", "referee")
-    ]
+    from oracle.oracle2 import ORACLE_ROSTER, REQUIRED_REVIEWERS
+    reviewers = [ORACLE_ROSTER[key] for key in REQUIRED_REVIEWERS]
     if not reviewers:
         return []
     by_provider: dict[str, list[str]] = {}
