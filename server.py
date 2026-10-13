@@ -263,7 +263,7 @@ SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 SESSION_STATE_FILE = "session_state.json"
 MAX_LOG_MESSAGES = 200
 
-# Hard ceiling for UI-driven reviews. Each round fans out to ~4 reviewer LLMs
+# Hard ceiling for UI-driven reviews. Each round fans out to 3 reviewer LLMs
 # over the full document, so cost scales roughly linearly. The CLI can still
 # exceed this; the cap applies only to requests that come through the HTTP API.
 UI_MAX_ROUNDS_CEILING = 4
@@ -2319,3 +2319,4 @@ async def health():
             "xai": _fingerprint("XAI_API_KEY"),
         },
     }
+

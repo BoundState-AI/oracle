@@ -44,14 +44,10 @@ from eval.live.scoring import (
 CASES_DIR = Path(__file__).parent / "cases"
 
 REQUIRED_KEYS = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "XAI_API_KEY")
-# Gemini accepts either spelling.
-GEMINI_KEYS = ("GEMINI_API_KEY", "GOOGLE_API_KEY")
 
 
 def _check_keys() -> list[str]:
     missing = [k for k in REQUIRED_KEYS if not os.environ.get(k)]
-    if not any(os.environ.get(k) for k in GEMINI_KEYS):
-        missing.append("GEMINI_API_KEY or GOOGLE_API_KEY")
     return missing
 
 
@@ -184,3 +180,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+

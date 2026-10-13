@@ -42,7 +42,7 @@ def test_manual_workflow_sends_raw_reviews_to_beth_and_skips_sonnet(
         if config.name == "Beth":
             assert "## Blind Review Bundle" in user_message
             assert "### Fran" in user_message
-            assert "### Gemini" in user_message
+            assert "### Gemini" not in user_message
             return {
                 "oracle_name": "Beth",
                 "role": "coordinator",
@@ -89,7 +89,7 @@ def test_manual_workflow_sends_raw_reviews_to_beth_and_skips_sonnet(
     assert session.canonical_draft == "revised spec"
     assert "Sonnet" not in calls
     assert calls.count("Beth") == 1
-    assert {name for name in calls if name != "Beth"} == {"Fran", "Codex", "Grok", "Gemini"}
+    assert {name for name in calls if name != "Beth"} == {"Fran", "Codex", "Grok"}
     assert (tmp_path / "round1_beth_normalized.json").exists()
 
 
@@ -133,3 +133,4 @@ def test_manual_workflow_continues_on_one_more_round_then_locks(
     assert session.converged is True
     assert len(session.rounds) == 2
     assert session.canonical_draft == "draft round 2"
+
