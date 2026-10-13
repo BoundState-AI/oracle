@@ -1980,7 +1980,9 @@ def _configured_review_models() -> list[str]:
     _oracle2 = importlib.import_module("oracle.oracle2")
     roster = getattr(_oracle2, "ORACLE_ROSTER", None)
     if roster:
-        return [cfg.model for cfg in roster.values()]
+        active = getattr(_oracle2, "REQUIRED_REVIEWERS", None)
+        keys = (*active, "beth", "sonnet") if active is not None else tuple(roster)
+        return [roster[key].model for key in keys]
     return [
         os.environ.get(var, default)
         for var, default in (
@@ -1991,7 +1993,6 @@ def _configured_review_models() -> list[str]:
             ("ORACLE_FRAN_MODEL", "gpt-5.6-terra"),
             ("ORACLE_CODEX_MODEL", "gpt-5.6-terra"),
             ("ORACLE_GROK_MODEL", "grok-4.5"),
-            ("ORACLE_GEMINI_MODEL", "gemini-3.5-flash"),
         )
     ]
 
@@ -3733,3 +3734,4 @@ Examples:
 
 if __name__ == "__main__":
     main()
+

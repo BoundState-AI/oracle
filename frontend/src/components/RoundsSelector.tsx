@@ -29,7 +29,7 @@ const ROUNDS_OPTIONS: RoundsOption[] = [
     label: "Single Pass",
     description:
       "One round of oracle review. Baseline for exploratory or low-risk documents.",
-    specification: "4 oracles × 1 round = 4 reviewer calls",
+    specification: "3 oracles × 1 round = 3 reviewer calls",
     warning: "Cannot converge",
   },
   {
@@ -37,21 +37,21 @@ const ROUNDS_OPTIONS: RoundsOption[] = [
     label: "Two Rounds",
     description:
       "Enables convergence validation: round 2 confirms no new critical findings emerged from revisions.",
-    specification: "4 oracles × 2 rounds = 8 reviewer calls",
+    specification: "3 oracles × 2 rounds = 6 reviewer calls",
   },
   {
     value: 3,
     label: "Three Rounds",
     description:
       "For dense specifications or contested findings where round 2 yields new defects.",
-    specification: "4 oracles × 3 rounds = 12 reviewer calls",
+    specification: "3 oracles × 3 rounds = 9 reviewer calls",
   },
   {
     value: 4,
     label: "Four Rounds",
     description:
       "Maximum iteration depth. Use only when round 3 yields new unresolved disagreements.",
-    specification: "4 oracles × 4 rounds = 16 reviewer calls",
+    specification: "3 oracles × 4 rounds = 12 reviewer calls",
     warning: "Peak cost",
   },
 ];
@@ -143,3 +143,4 @@ export function RoundsSelector({ value, onChange }: RoundsSelectorProps) {
     </div>
   );
 }
+

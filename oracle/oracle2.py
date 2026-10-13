@@ -5,7 +5,7 @@ Purpose: Multi-oracle review system for specs, plans, and architecture docs.
 
 Flow (model defaults live in ORACLE_ROSTER; override via ORACLE_*_MODEL):
   Round 0: Beth (Anthropic coordinator) writes or accepts the canonical draft
-  Round 1: Fran (OpenAI), Codex (OpenAI), Grok (xAI), Gemini (Google) review independently (blind)
+  Round 1: Fran (OpenAI), Codex (OpenAI), Grok (xAI) review independently (blind)
   Round 1.5 (ledger workflow only): Sonnet (Anthropic referee) normalizes/deduplicates findings
   Round 2: Beth classifies findings, revises draft
   Round 3+: Re-review changed sections until convergence
@@ -234,7 +234,7 @@ Output JSON only:
       "issue_id": "BETH-R1-ISSUE-001",
       "title": "...",
       "severity": "critical|high|medium|low",
-      "source_reviewers": ["Fran", "Gemini"],
+      "source_reviewers": ["Fran", "Grok"],
       "summary": "...",
       "resolution": "...",
       "confidence": 0.0,
@@ -1522,7 +1522,7 @@ class OracleSession:
 
 
 # The blind-review pool.
-REQUIRED_REVIEWERS = ("fran", "codex", "grok", "gemini")
+REQUIRED_REVIEWERS = ("fran", "codex", "grok")
 
 
 def _min_valid_reviewers() -> int:
@@ -2323,7 +2323,7 @@ def _run_round(
     prior_decisions = last_valid.coordinator_decisions if last_valid else None
     prior_issues = last_valid.normalized_issues.get("normalized_issues", []) if last_valid else []
 
-    # --- Parallel blind review (Fran, Codex, Grok, Gemini) ---
+    # --- Parallel blind review (Fran, Codex, Grok) ---
     review_msg = _build_review_message(
         session.canonical_draft, round_num, changed_sections,
         compliance_context=compliance_context,
@@ -2991,7 +2991,7 @@ Environment variables:
   ANTHROPIC_API_KEY   — Required for Beth (and Sonnet in ledger workflow)
   OPENAI_API_KEY      — Required for Fran and Codex (GPT-5.4)
   XAI_API_KEY         — Required for Grok
-  GEMINI_API_KEY      — Required for Gemini (GOOGLE_API_KEY also accepted)
+  GEMINI_API_KEY      — Optional dormant adapter; Gemini is not in the review flow
 
   ORACLE_WORKFLOW     — manual | ledger (default: manual)
   ORACLE_BETH_MODEL   — Override Beth model  (default: claude-opus-4-8)
@@ -3073,8 +3073,6 @@ Examples:
         missing.append("OPENAI_API_KEY")
     if not os.environ.get("XAI_API_KEY"):
         missing.append("XAI_API_KEY")
-    if not (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")):
-        missing.append("GEMINI_API_KEY or GOOGLE_API_KEY")
     if missing:
         LOGGER.error(f"Missing API keys: {', '.join(missing)}")
         sys.exit(1)
@@ -3107,3 +3105,4 @@ Examples:
 
 if __name__ == "__main__":
     main()
+

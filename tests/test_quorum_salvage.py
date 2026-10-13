@@ -140,8 +140,8 @@ def test_failure_forensics_persisted_in_round_telemetry(monkeypatch, tmp_path):
 
 
 def test_quorum_threshold_is_configurable(monkeypatch, tmp_path):
-    """ORACLE_MIN_VALID_REVIEWERS=4 restores the strict all-or-nothing mode."""
-    monkeypatch.setenv("ORACLE_MIN_VALID_REVIEWERS", "4")
+    """ORACLE_MIN_VALID_REVIEWERS=3 restores the strict all-or-nothing mode."""
+    monkeypatch.setenv("ORACLE_MIN_VALID_REVIEWERS", "3")
     _single_outage_mock(monkeypatch, failing="Grok")
 
     session = oracle2.run_review(
@@ -158,8 +158,8 @@ def test_quorum_floor_is_two(monkeypatch):
     assert _min_valid_reviewers() == 2
 
 
-def test_two_failed_reviewers_still_salvage_at_default_quorum(monkeypatch, tmp_path):
-    failing = {"Grok", "Gemini"}
+def test_one_failed_reviewer_still_salvages_at_default_quorum(monkeypatch, tmp_path):
+    failing = {"Grok"}
 
     def fake_call_oracle(config, user_message):
         if config.name in failing:
@@ -175,11 +175,11 @@ def test_two_failed_reviewers_still_salvage_at_default_quorum(monkeypatch, tmp_p
     )
 
     assert session.converged is True
-    assert session.rounds[0].missing_reviewers == ["Gemini", "Grok"]
+    assert session.rounds[0].missing_reviewers == ["Grok"]
 
 
-def test_three_failed_reviewers_fall_below_default_quorum(monkeypatch, tmp_path):
-    failing = {"Codex", "Grok", "Gemini"}
+def test_two_failed_reviewers_fall_below_default_quorum(monkeypatch, tmp_path):
+    failing = {"Codex", "Grok"}
 
     def fake_call_oracle(config, user_message):
         if config.name in failing:
@@ -207,7 +207,7 @@ def test_report_discloses_degraded_quorum(monkeypatch, tmp_path):
     report = format_findings_report(session, pack_dir=tmp_path)
 
     assert "Degraded quorum:" in report
-    assert "3/4 reviewers" in report
+    assert "2/3 reviewers" in report
     assert "Grok" in report
     assert "not agreement" in report
 
@@ -286,3 +286,4 @@ def test_preflight_gate_aborts_run_before_any_review_call(monkeypatch, tmp_path)
         oracle2.run_review(draft="spec", max_rounds=2, output_dir=tmp_path, workflow="manual")
 
     assert review_calls == [], "No review spend after a failed preflight"
+
